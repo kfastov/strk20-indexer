@@ -68,6 +68,7 @@ pub fn encodings(f: &Felt) -> Vec<(&'static str, Vec<u8>)> {
         ("be-bytes", be.clone()),
         ("le-bytes", le),
         ("base64-be", base64_encode(&be).into_bytes()),
+        ("be-bytes-debug", format!("{:?}", be).into_bytes()),
     ];
     if distinctive {
         out.push(("minimal-hex", min.clone().into_bytes()));

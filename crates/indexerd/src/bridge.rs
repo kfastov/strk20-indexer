@@ -70,7 +70,14 @@ impl DbBackend {
                     .unwrap_or(0);
                 Ok((l1, BlockId::Number(l1)))
             }
-            Some(BlockId::Number(n)) => Ok((n, BlockId::Number(n))),
+            Some(BlockId::Number(n)) => {
+                if n > head {
+                    return Err(anyhow_err(anyhow::anyhow!(
+                        "block {n} beyond ingested head {head}"
+                    )));
+                }
+                Ok((n, BlockId::Number(n)))
+            }
             Some(BlockId::Hash(h)) => {
                 if head_hash.as_deref() == Some(strk20_feed::felt_hex(&h).as_str()) {
                     return Ok((head, BlockId::Hash(h)));

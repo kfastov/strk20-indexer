@@ -83,7 +83,7 @@ fn reopen_cursor(cursor: &mut DiscoveryCursor) {
 }
 
 fn load_cursor(store: &FeedStore, key: &str) -> Result<Option<DiscoveryCursor>> {
-    match store.meta_get(key)? {
+    match store.meta_get(key)?.filter(|s| !s.is_empty()) {
         Some(json) => Ok(Some(serde_json::from_str(&json)?)),
         None => Ok(None),
     }
@@ -183,6 +183,19 @@ fn register_notes(
     Ok(())
 }
 
+/// Drop every cursor and registry row for `owner` (recovery path; the
+/// mirror itself is kept and stays verified).
+pub fn full_resync(store: &FeedStore, owner: &Felt) -> Result<()> {
+    let a = strk20_feed::felt_hex(owner);
+    for kind in ["in", "out"] {
+        store.meta_set(&format!("cur_{kind}_{a}"), "")?;
+        store.meta_set(&format!("ckpt_{kind}_{a}"), "")?;
+        store.meta_set(&format!("ckpt_at_{kind}_{a}"), "")?;
+    }
+    store.delete_owner_notes(owner)?;
+    Ok(())
+}
+
 /// One full keyless sync for `owner`. The viewing key never leaves this
 /// process: it is used only to drive local decryption over the mirror.
 pub async fn sync_once(
@@ -195,15 +208,28 @@ pub async fn sync_once(
     let in_keys = keys("in", &owner);
     let out_keys = keys("out", &owner);
 
-    if outcome.tail_rewound {
-        // Reorg: discard live cursors and any tail-derived registry rows;
-        // resume from the L1-final checkpoint (spec §7.5).
+    // Per-owner reorg rewind via the persisted tail generation (crash-safe
+    // and shared-db-safe — review findings): the generation is bumped in the
+    // same transaction as any tail replacement; every owner whose cursors
+    // were computed at an older generation rewinds, regardless of who
+    // consumed the ETag edge or whether the process died in between.
+    let generation = store.tail_generation()?;
+    let gen_key = format!("gen_{}", strk20_feed::felt_hex(&owner));
+    let owner_gen: u64 = store
+        .meta_get(&gen_key)?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let rewound_for_owner = owner_gen != generation;
+    if rewound_for_owner {
+        // Discard live cursors and any registry rows whose note slot is gone
+        // from the mirror; resume from the L1-final checkpoint (spec §7.5).
         store.meta_set(&in_keys.live, "")?;
         store.meta_set(&out_keys.live, "")?;
-        store.prune_notes_above(outcome.last_epoch_to)?;
+        let pruned = store.prune_missing_notes(&owner, outcome.head)?;
         tracing::info!(
             floor = outcome.last_epoch_to,
-            "tail reorg: rewound to L1-final checkpoint"
+            pruned,
+            "tail replaced (generation {owner_gen} -> {generation}): rewound to checkpoint"
         );
     }
 
@@ -245,6 +271,8 @@ pub async fn sync_once(
 
     // ------------------------------------------------ spent-state refresh
     let newly_spent = store.refresh_spent(&owner, outcome.head)?;
+    // Cursors for this owner are now consistent with the current tail.
+    store.meta_set(&gen_key, &generation.to_string())?;
 
     // ------------------------------------------------------------- report
     let notes = store.notes(&owner)?;
@@ -259,7 +287,7 @@ pub async fn sync_once(
         head: outcome.head,
         l1_accepted: outcome.l1_accepted,
         last_epoch_to: outcome.last_epoch_to,
-        tail_rewound: outcome.tail_rewound,
+        tail_rewound: rewound_for_owner && generation > 0,
         incoming_complete: in_cursor.is_complete(),
         outgoing_complete: out_cursor.is_complete(),
         incoming_senders: in_cursor

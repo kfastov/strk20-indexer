@@ -45,6 +45,10 @@ enum Command {
         /// Poll interval for --watch, seconds
         #[arg(long, default_value_t = 30)]
         interval: u64,
+        /// Drop cursors and the notes registry for this address and
+        /// rediscover from scratch (mirror data is kept)
+        #[arg(long)]
+        full_resync: bool,
     },
     /// Verify discovered notes against Starknet state roots via your OWN RPC
     Verify {
@@ -58,14 +62,22 @@ enum Command {
 }
 
 fn read_key(key_file: &str) -> Result<SecretFelt> {
-    let mut raw = String::new();
+    // Pre-reserved buffer: no reallocation may strand key fragments in freed
+    // heap memory (review finding); a hex felt is at most 66 chars.
+    let mut raw = String::with_capacity(256);
     if key_file == "-" {
         std::io::stdin()
             .read_to_string(&mut raw)
             .context("read key from stdin")?;
     } else {
-        raw = std::fs::read_to_string(key_file)
+        let mut bytes = std::fs::read(key_file)
             .with_context(|| format!("read key file {key_file}"))?;
+        raw.push_str(std::str::from_utf8(&bytes).context("key file is not utf-8")?);
+        bytes.zeroize();
+    }
+    if raw.len() > 200 {
+        raw.zeroize();
+        anyhow::bail!("key input implausibly large");
     }
     let trimmed = raw.trim();
     let felt = Felt::from_hex(trimmed).map_err(|_| anyhow::anyhow!("key is not valid hex"));
@@ -92,11 +104,15 @@ async fn main() -> Result<()> {
             json,
             watch,
             interval,
+            full_resync,
         } => {
             let owner =
                 Felt::from_hex(&address).map_err(|_| anyhow::anyhow!("bad --address"))?;
             let key = read_key(&key_file)?;
             let store = FeedStore::open(&db)?;
+            if full_resync {
+                strk20_client::sync::full_resync(&store, &owner)?;
+            }
             let transport = transport_for(&feed);
             let report = sync_once(&store, transport.as_ref(), owner, &key).await?;
             if json {
@@ -106,15 +122,29 @@ async fn main() -> Result<()> {
             }
             let complete = report.incoming_complete && report.outgoing_complete;
             if watch {
+                // Advancing baseline + emitted-set: each note is reported
+                // once; a transient transport error is logged, not fatal
+                // (review finding: --watch re-emitted forever and died on
+                // any hiccup).
+                let mut emitted: std::collections::HashSet<String> =
+                    report.notes.iter().map(|n| n.note_id.clone()).collect();
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-                    let r = sync_once(&store, transport.as_ref(), owner, &key).await?;
-                    // watch mode: emit only deltas as JSON lines
-                    for n in r.notes.iter().filter(|n| n.block_number > report.head) {
-                        println!(
-                            "{}",
-                            serde_json::json!({"event": "note", "note": n})
-                        );
+                    let r = match sync_once(&store, transport.as_ref(), owner, &key).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "watch sync failed; retrying");
+                            continue;
+                        }
+                    };
+                    let fresh: Vec<_> = r
+                        .notes
+                        .iter()
+                        .filter(|n| !emitted.contains(&n.note_id))
+                        .collect();
+                    for n in fresh {
+                        println!("{}", serde_json::json!({"event": "note", "note": n}));
+                        emitted.insert(n.note_id.clone());
                     }
                     for nf in &r.newly_spent {
                         println!(

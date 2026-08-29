@@ -35,6 +35,7 @@ pub struct RpcEvent {
     pub keys: Vec<String>,
     pub data: Vec<String>,
     pub block_number: Option<u64>,
+    pub block_hash: Option<String>,
     pub transaction_hash: String,
 }
 
@@ -141,6 +142,19 @@ impl RpcClient {
 
     pub fn active_endpoint(&self) -> &str {
         &self.endpoints[self.active.load(Ordering::Relaxed) % self.endpoints.len()]
+    }
+
+    /// Monotonic-ish marker of which endpoint is active; continuation tokens
+    /// are provider-specific and must be dropped when this changes.
+    pub fn endpoint_epoch(&self) -> usize {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    /// True when `e` is a JSON-RPC "Block not found"-class answer rather than
+    /// a transport failure — the only errors reorg detection may act on.
+    pub fn is_block_not_found(e: &anyhow::Error) -> bool {
+        let msg = e.to_string();
+        msg.contains("\"code\":24") || msg.contains("Block not found")
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {

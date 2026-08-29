@@ -175,6 +175,10 @@ async fn health(State(s): State<AppState>) -> Response {
         let head_hash = db.meta_get("head_hash")?;
         let l1: Option<u64> = db.meta_get("l1_accepted_number")?.and_then(|x| x.parse().ok());
         let decode_state = db.meta_get("decode_state")?.unwrap_or_else(|| "ok".into());
+        let verify_root_failed = db
+            .meta_get("verify_root_failed")?
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let latest_epoch = db.last_epoch()?.map(|(i, _, _)| i);
         let ts = head_number
             .and_then(|n| db.block(n).ok().flatten())
@@ -184,7 +188,7 @@ async fn health(State(s): State<AppState>) -> Response {
             .map(|c| strk20_feed::felt_hex(&c));
         Ok(json!({
             "status": if head_number.is_none() { "UNHEALTHY" }
-                      else if decode_state == "degraded" { "DEGRADED" }
+                      else if decode_state == "degraded" || verify_root_failed { "DEGRADED" }
                       else { "OK" },
             "head": head_number.map(|n| json!({
                 "number": n, "hash": head_hash, "timestamp": ts
@@ -194,6 +198,7 @@ async fn health(State(s): State<AppState>) -> Response {
             "latest_epoch": latest_epoch,
             "class_hash": class,
             "decode_state": decode_state,
+            "verify_root_failed": verify_root_failed,
         }))
     });
     match result {
@@ -263,8 +268,18 @@ fn privacy_labeled(mut resp: Response) -> Response {
 
 async fn raw_read_slots(
     State(s): State<AppState>,
-    Json(req): Json<ReadSlotsRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
+    // Manual parse: an axum Json rejection would echo body fragments and
+    // skip the privacy label (review finding).
+    let req: ReadSlotsRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return privacy_labeled(
+                (StatusCode::BAD_REQUEST, "invalid request body").into_response(),
+            )
+        }
+    };
     if req.slots.len() > 1000 {
         return privacy_labeled(
             (StatusCode::BAD_REQUEST, "at most 1000 slots").into_response(),

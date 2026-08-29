@@ -184,8 +184,15 @@ impl<'a> Cutter<'a> {
             if !verified {
                 let vb = l1_accepted.min(frontier);
                 match self.verify_root(vb).await {
-                    Ok(_) => {}
-                    Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") => return Err(e),
+                    Ok(_) => {
+                        self.db.meta_set("verify_root_failed", "")?;
+                    }
+                    Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") => {
+                        // Surfaced in /health; the caller runs the §5.6
+                        // rescan slow path and retries the cut.
+                        self.db.meta_set("verify_root_failed", "1")?;
+                        return Err(e);
+                    }
                     Err(e) => {
                         // Proof unavailable (window, provider) — log and
                         // continue; the anchor below stays best-effort.

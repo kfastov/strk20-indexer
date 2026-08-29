@@ -99,7 +99,10 @@ pub async fn verify_owner(store: &FeedStore, rpc: &str, owner: &Felt) -> Result<
                 all_ok = false;
                 "MISSING: note slot empty on chain"
             }
-            Err(_) => "unprovable (slot not covered by proof)",
+            Err(_) => {
+                all_ok = false;
+                "UNPROVABLE: note slot not covered by the proof"
+            }
         };
         let spent_check = match verify_storage_proof(storage_root, &nodes, nullifier_slot) {
             Ok(ProofOutcome::Member(_)) => {
@@ -118,7 +121,10 @@ pub async fn verify_owner(store: &FeedStore, rpc: &str, owner: &Felt) -> Result<
                     "unspent-proven"
                 }
             }
-            Err(_) => "unprovable (slot not covered by proof)",
+            Err(_) => {
+                all_ok = false;
+                "UNPROVABLE: nullifier slot not covered by the proof"
+            }
         };
         results.push(json!({
             "note_id": strk20_feed::felt_hex(&n.note_id),

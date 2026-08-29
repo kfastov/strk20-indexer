@@ -301,7 +301,24 @@ async fn acceptance() {
     let unused_capture = ctx.proxy.take_captured();
     assert!(unused_report["notes"].as_array().unwrap().is_empty());
     assert_eq!(unused_report["incoming_complete"], true);
-    println!("leg b OK: keyless discovery equals oracle for alice, bob, unused");
+    // typed stats must count EVERY event, incl. the 3-event block that spans
+    // two getEvents pages (review regression: per-block event truncation)
+    let stats: Value = ctx
+        .http
+        .get(format!("{}/v1/stats", ctx.indexer_url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        stats["note_count"].as_u64(),
+        Some(6),
+        "EncNoteCreated count must survive per-block event pagination: {stats}"
+    );
+    assert_eq!(stats["registrations"].as_u64(), Some(1));
+    println!("leg b OK: keyless discovery equals oracle for alice, bob, unused; stats complete");
 
     // ---------------------------------------------------------- leg c
     let (wrong_report, ok) = ctx.sync_client("wrongkey", &alice, "0xdead", "wrong.db");
@@ -607,9 +624,21 @@ async fn acceptance() {
 
     // ---------------------------------------------------- leg f(iii) server scan
     let mut server_side = Vec::new();
-    server_side.extend(std::fs::read(ctx.dir.path().join("strk20.db")).unwrap());
+    // main db AND its live WAL/SHM (review finding: the un-checkpointed WAL
+    // is where fresh writes actually live while the server runs)
+    for name in ["strk20.db", "strk20.db-wal", "strk20.db-shm"] {
+        server_side.extend(std::fs::read(ctx.dir.path().join(name)).unwrap_or_default());
+    }
     for entry in walk(ctx.dir.path().join("feed")) {
-        server_side.extend(std::fs::read(entry).unwrap());
+        let bytes = std::fs::read(&entry).unwrap();
+        // scan zstd payloads decompressed (review finding: compressed epochs
+        // were opaque to the scanner)
+        if entry.extension().map(|e| e == "zst").unwrap_or(false) {
+            if let Ok(raw) = strk20_feed::decompress(&bytes) {
+                server_side.extend(raw);
+            }
+        }
+        server_side.extend(bytes);
     }
     server_side.extend(std::fs::read(&indexer.stdout_path).unwrap_or_default());
     server_side.extend(std::fs::read(&indexer.stderr_path).unwrap_or_default());

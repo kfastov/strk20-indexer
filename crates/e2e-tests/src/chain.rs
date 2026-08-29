@@ -77,6 +77,20 @@ impl FixtureChain {
             if number == partition_blocks[0] {
                 blk.deployed_class = Some(Felt::from_hex(KNOWN_CLASS).unwrap());
             }
+            if i == 1 {
+                // Three events on one block (> the fixture RPC's forced page
+                // size of 2): regression net for the single-page per-block
+                // event truncation found in review.
+                for extra in 0..2u64 {
+                    blk.events.push(FxEvent {
+                        keys: vec![
+                            Felt::from_hex(ENC_NOTE_CREATED_SELECTOR).unwrap(),
+                            Felt::from(0x9000 + extra),
+                        ],
+                        data: vec![Felt::from(extra)],
+                    });
+                }
+            }
             active.insert(number, blk);
         }
         Self {

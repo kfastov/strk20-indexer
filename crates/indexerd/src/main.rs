@@ -215,16 +215,13 @@ async fn run(
         };
         match outcome {
             Ok(o) => {
-                let frontier = db.ingest_cursor()?.map(|(f, _)| f).unwrap_or(0);
+                cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, o.l1_accepted).await;
                 let cutter = Cutter {
                     db: &db,
                     rpc: rpc_ref,
                     cfg: &cfg,
                     feed_dir: common.feed_dir.clone(),
                 };
-                if let Err(e) = cutter.cut_ready_epochs(o.l1_accepted, frontier).await {
-                    tracing::error!(error = %e, "epoch cutting halted");
-                }
                 if o.head_changed || o.blocks_ingested > 0 {
                     cutter.regen_head()?;
                 }
@@ -232,6 +229,58 @@ async fn run(
             Err(e) => tracing::error!(error = %e, "ingest cycle failed"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+    }
+}
+
+/// Cut ready epochs; on a verify-root mismatch run the §5.6 slow-path rescan
+/// (per-block state updates over the unverified range — catches pool writes
+/// that rode blocks with no pool event) and retry once. A second failure
+/// leaves verify_root_failed=1 in meta, which /health surfaces as DEGRADED.
+async fn cut_epochs_with_recovery(
+    db: &mut Db,
+    rpc: &RpcClient,
+    cfg: &ChainConfig,
+    common: &CommonOpts,
+    l1_accepted: u64,
+) {
+    for attempt in 0..2 {
+        let frontier = db.ingest_cursor().ok().flatten().map(|(f, _)| f).unwrap_or(0);
+        let cutter = Cutter {
+            db,
+            rpc,
+            cfg,
+            feed_dir: common.feed_dir.clone(),
+        };
+        match cutter.cut_ready_epochs(l1_accepted, frontier).await {
+            Ok(_) => return,
+            Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") && attempt == 0 => {
+                let from = db
+                    .last_epoch()
+                    .ok()
+                    .flatten()
+                    .map(|(_, _, to)| to + 1)
+                    .unwrap_or(cfg.genesis_block);
+                let to = l1_accepted.min(frontier);
+                tracing::error!(error = %e, from, to, "verify-root mismatch: rescanning range");
+                let mut ingestor = Ingestor {
+                    db,
+                    rpc,
+                    cfg,
+                    chunk_size: common.chunk_size,
+                };
+                match ingestor.rescan_range(from, to).await {
+                    Ok(n) => tracing::warn!(recovered_blocks = n, "rescan complete; retrying cut"),
+                    Err(re) => {
+                        tracing::error!(error = %re, "rescan failed");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "epoch cutting halted");
+                return;
+            }
+        }
     }
 }
 
@@ -251,6 +300,7 @@ async fn backfill(common: CommonOpts) -> Result<()> {
             };
             ingestor.run_cycle().await?
         };
+        cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, outcome.l1_accepted).await;
         let frontier = db.ingest_cursor()?.map(|(f, _)| f).unwrap_or(0);
         let cutter = Cutter {
             db: &db,
@@ -258,7 +308,6 @@ async fn backfill(common: CommonOpts) -> Result<()> {
             cfg: &cfg,
             feed_dir: common.feed_dir.clone(),
         };
-        cutter.cut_ready_epochs(outcome.l1_accepted, frontier).await?;
         cutter.regen_head()?;
         if outcome.blocks_ingested == 0 && frontier >= outcome.head_number {
             tracing::info!(
@@ -369,7 +418,10 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
         .await?;
     let dir = common.feed_dir.join("epochs");
     std::fs::create_dir_all(&dir)?;
+    let cfg = common.chain_config();
+    let mut db = Db::open(&common.db)?;
     let mut prev: Option<[u8; 32]> = None;
+    let mut last_to = 0u64;
     for entry in &manifest.epochs {
         let name = format!("{:08}.strk20e.zst", entry.e);
         let bytes = http
@@ -380,10 +432,67 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
             .bytes()
             .await?;
         let payload = strk20_feed::decompress(&bytes)?;
-        strk20_feed::manifest::verify_epoch_against_manifest(&payload, entry, prev)?;
-        prev = Some(strk20_feed::payload_sha256(&payload));
+        let epoch =
+            strk20_feed::manifest::verify_epoch_against_manifest(&payload, entry, prev)?;
+        // Ingest the verified payload into the DB: a later `strk20 run`
+        // continues from the feed head instead of clobbering the manifest
+        // (review finding: mirror_pull never populated the DB).
+        for b in &epoch.blocks {
+            let row = strk20_indexerd::db::BlockRow {
+                number: b.number,
+                hash: b.hash,
+                parent_hash: b.parent,
+                timestamp: b.timestamp,
+                l1_accepted: true, // epochs are cut ≤ l1_accepted by construction
+            };
+            let events: Vec<strk20_indexerd::db::EventRow> = b
+                .events
+                .iter()
+                .map(|e| strk20_indexerd::db::EventRow {
+                    block: b.number,
+                    event_index: e.event_index,
+                    tx_index: e.tx_index,
+                    tx_hash: e.tx_hash,
+                    keys: e.keys.clone(),
+                    data: e.data.clone(),
+                })
+                .collect();
+            db.insert_block_data(
+                &row,
+                &b.diffs,
+                &events,
+                b.replaced_class.as_ref(),
+                b.number,
+                None,
+            )?;
+            db.record_seen_head(&b.hash, b.number)?;
+        }
+        let content_hash = strk20_feed::payload_sha256(&payload);
+        let zst_hash = strk20_feed::payload_sha256(&bytes);
+        db.insert_epoch(
+            entry.e,
+            entry.from,
+            entry.to,
+            &content_hash,
+            &zst_hash,
+            bytes.len() as u64,
+            prev.as_ref(),
+            None,
+            0,
+        )?;
+        prev = Some(content_hash);
+        last_to = entry.to;
         std::fs::write(dir.join(&name), &bytes)?;
-        println!("epoch {}: verified + stored", entry.e);
+        println!("epoch {}: verified + stored + ingested", entry.e);
+    }
+    if last_to > 0 {
+        db.set_ingest_cursor(last_to, None)?;
+        db.meta_set("chain_id", &cfg.chain_id)?;
+        db.meta_set("pool_address", &strk20_feed::felt_hex(&cfg.pool))?;
+        db.meta_set("genesis_block", &cfg.genesis_block.to_string())?;
+        db.meta_set("epoch_size", &cfg.epoch_size.to_string())?;
+        db.meta_set("schema_version", &strk20_indexerd::db::SCHEMA_VERSION.to_string())?;
+        db.meta_set("decode_state", "ok")?;
     }
     // store the manifest and genesis as-is for onward serving
     let genesis = http

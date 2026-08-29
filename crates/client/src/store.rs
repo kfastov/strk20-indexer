@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use discovery_core::events_backend::RawEventAccess;
 use discovery_core::storage_backend::{RawStorageAccess, StorageError};
 use rusqlite::{params, Connection, OptionalExtension};
+#[allow(unused_imports)]
+use anyhow::Context as _;
 use starknet_core::types::{BlockId, EmittedEvent, StorageResult};
 use starknet_types_core::felt::Felt;
 use std::path::Path;
@@ -94,16 +96,46 @@ pub struct ApplyOutcome {
 
 impl FeedStore {
     pub fn open(path: &Path) -> Result<Self> {
+        // 0600 must be in place BEFORE SQLite creates -wal/-shm: those files
+        // inherit the main db's mode, and cursor material (SecretFelt-derived
+        // channel keys) lands in the WAL (review finding: sync.db-wal 0644).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !path.exists() {
+                std::fs::File::create(path)
+                    .with_context(|| format!("create {}", path.display()))?;
+            }
+            for suffix in ["", "-wal", "-shm"] {
+                let target = if suffix.is_empty() {
+                    path.to_path_buf()
+                } else {
+                    let mut os = path.as_os_str().to_owned();
+                    os.push(suffix);
+                    std::path::PathBuf::from(os)
+                };
+                if target.exists() {
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+                        .with_context(|| format!("chmod {}", target.display()))?;
+                }
+            }
+        }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(DDL)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(md) = std::fs::metadata(path) {
-                let mut perm = md.permissions();
-                perm.set_mode(0o600);
-                let _ = std::fs::set_permissions(path, perm);
+            for suffix in ["-wal", "-shm"] {
+                let mut os = path.as_os_str().to_owned();
+                os.push(suffix);
+                let target = std::path::PathBuf::from(os);
+                if target.exists() {
+                    let _ = std::fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
             }
         }
         Ok(Self {
@@ -170,6 +202,13 @@ impl FeedStore {
     /// Apply verified epochs + the head tail per the manifest. This is the
     /// whole trust pipeline of the client: any hash mismatch is a hard error
     /// naming the epoch and both hashes (U5 divergence detection).
+    ///
+    /// Reorg discipline (review findings): a newly applied epoch SUPERSEDES
+    /// any stored rows in its range (tail rows from a reorged-away chain must
+    /// not survive under the new floor — the "masked reorg"), and every tail
+    /// replacement bumps a persisted `tail_generation` in the SAME
+    /// transaction as the rebuild, so per-owner cursor rewinds survive
+    /// crashes and shared-db multi-owner use.
     pub async fn apply_feed(
         &self,
         transport: &dyn crate::transport::FeedTransport,
@@ -202,6 +241,19 @@ impl FeedStore {
             ),
             None => None,
         };
+        // A mirror switch to a divergent chain must not pass silently: the
+        // manifest's entry for our last applied epoch must carry OUR hash.
+        if let (Some(done), Some(local)) = (last_applied, prev_hash) {
+            match manifest.epoch(done) {
+                Some(entry) if entry.hash == hex::encode(local) => {}
+                Some(entry) => bail!(
+                    "feed diverged: epoch {done} hash {} != locally applied {}",
+                    entry.hash,
+                    hex::encode(local)
+                ),
+                None => bail!("feed diverged: manifest no longer lists applied epoch {done}"),
+            }
+        }
         for entry in &manifest.epochs {
             if let Some(done) = last_applied {
                 if entry.e <= done {
@@ -213,16 +265,52 @@ impl FeedStore {
             let epoch =
                 strk20_feed::manifest::verify_epoch_against_manifest(&payload, entry, prev_hash)?;
             {
-                let conn = self.conn.lock().expect("conn");
+                let mut guard = self.conn.lock().expect("conn");
+                let tx = guard.transaction()?;
+                // Masked-reorg check: stored (tail) rows inside this epoch's
+                // range that contradict the L1-final epoch content mean the
+                // old tail was replaced while we were not looking.
+                let contradiction = {
+                    let mut stmt = tx.prepare(
+                        "SELECT number, hash FROM blocks WHERE number BETWEEN ?1 AND ?2",
+                    )?;
+                    let stored: Vec<(u64, Felt)> = stmt
+                        .query_map(params![entry.from as i64, entry.to as i64], |r| {
+                            Ok((r.get::<_, i64>(0)? as u64, bf(&r.get::<_, Vec<u8>>(1)?)))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    stored.iter().any(|(n, h)| {
+                        !epoch.blocks.iter().any(|b| b.number == *n && b.hash == *h)
+                    })
+                };
+                // The epoch supersedes everything in its range.
+                tx.execute(
+                    "DELETE FROM storage_log WHERE block BETWEEN ?1 AND ?2",
+                    params![entry.from as i64, entry.to as i64],
+                )?;
+                tx.execute(
+                    "DELETE FROM events WHERE block BETWEEN ?1 AND ?2",
+                    params![entry.from as i64, entry.to as i64],
+                )?;
+                tx.execute(
+                    "DELETE FROM blocks WHERE number BETWEEN ?1 AND ?2",
+                    params![entry.from as i64, entry.to as i64],
+                )?;
                 for b in &epoch.blocks {
-                    Self::apply_block_line(&conn, b, 1)?;
+                    Self::apply_block_line(&tx, b, 1)?;
                 }
+                let hash_hex = hex::encode(strk20_feed::payload_sha256(&payload));
+                meta_set_tx(&tx, "last_epoch_applied", &entry.e.to_string())?;
+                meta_set_tx(&tx, "last_epoch_hash", &hash_hex)?;
+                meta_set_tx(&tx, "last_epoch_to", &entry.to.to_string())?;
+                if contradiction {
+                    bump_generation_tx(&tx)?;
+                    out.tail_rewound = true;
+                }
+                tx.commit()?;
             }
             prev_hash = Some(strk20_feed::payload_sha256(&payload));
             last_applied = Some(entry.e);
-            self.meta_set("last_epoch_applied", &entry.e.to_string())?;
-            self.meta_set("last_epoch_hash", &hex::encode(prev_hash.unwrap()))?;
-            self.meta_set("last_epoch_to", &entry.to.to_string())?;
             out.epochs_applied += 1;
         }
         out.last_epoch_to = self
@@ -234,40 +322,47 @@ impl FeedStore {
         let etag = self.meta_get("head_etag")?;
         if let Some((head_bytes, new_etag)) = transport.fetch_head(etag.as_deref()).await? {
             let head = codec::parse_head(&head_bytes)?;
-            // Reorg rule (spec §7.5): stored tail blocks that contradict the
-            // new tail file mean the old tail was replaced.
-            let contradiction = {
-                let conn = self.conn.lock().expect("conn");
-                let mut stmt = conn.prepare(
-                    "SELECT number, hash FROM blocks WHERE number > ?1 ORDER BY number",
-                )?;
-                let stored: Vec<(u64, Felt)> = stmt
-                    .query_map([out.last_epoch_to as i64], |r| {
-                        Ok((r.get::<_, i64>(0)? as u64, bf(&r.get::<_, Vec<u8>>(1)?)))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                stored.iter().any(|(n, h)| {
-                    match head.blocks.iter().find(|b| b.number == *n) {
-                        Some(b) => b.hash != *h,
-                        // stored tail block absent from the new tail while
-                        // still above tail_from = replaced tail
-                        None => *n >= head.header.tail_from,
-                    }
-                })
-            };
+            // Manifest/head fetch race: a server-side epoch cut between our
+            // two fetches leaves a gap the wholesale rebuild would turn into
+            // a silent mirror hole — fail cleanly, the next sync heals.
+            if head.header.tail_from > out.last_epoch_to + 1 {
+                bail!(
+                    "feed advanced mid-sync (tail starts at {}, our epoch floor is {}); retry",
+                    head.header.tail_from,
+                    out.last_epoch_to
+                );
+            }
             {
-                let conn = self.conn.lock().expect("conn");
-                // always rebuild the tail wholesale: delete rows above the
-                // epoch floor, reapply from the file
-                conn.execute(
+                let mut guard = self.conn.lock().expect("conn");
+                let tx = guard.transaction()?;
+                // Reorg rule (spec §7.5): stored tail rows that contradict
+                // the new tail file mean the old tail was replaced.
+                let contradiction = {
+                    let mut stmt = tx.prepare(
+                        "SELECT number, hash FROM blocks WHERE number > ?1 ORDER BY number",
+                    )?;
+                    let stored: Vec<(u64, Felt)> = stmt
+                        .query_map([out.last_epoch_to as i64], |r| {
+                            Ok((r.get::<_, i64>(0)? as u64, bf(&r.get::<_, Vec<u8>>(1)?)))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    stored.iter().any(|(n, h)| {
+                        match head.blocks.iter().find(|b| b.number == *n) {
+                            Some(b) => b.hash != *h,
+                            None => *n >= head.header.tail_from,
+                        }
+                    })
+                };
+                // rebuild the tail wholesale above the epoch floor
+                tx.execute(
                     "DELETE FROM storage_log WHERE block > ?1",
                     [out.last_epoch_to as i64],
                 )?;
-                conn.execute(
+                tx.execute(
                     "DELETE FROM events WHERE block > ?1",
                     [out.last_epoch_to as i64],
                 )?;
-                conn.execute(
+                tx.execute(
                     "DELETE FROM blocks WHERE number > ?1",
                     [out.last_epoch_to as i64],
                 )?;
@@ -276,18 +371,23 @@ impl FeedStore {
                         Some(codec::Finality::L1) => 1,
                         _ => 0,
                     };
-                    Self::apply_block_line(&conn, b, fin)?;
+                    Self::apply_block_line(&tx, b, fin)?;
                 }
+                meta_set_tx(&tx, "head_etag", &new_etag)?;
+                meta_set_tx(&tx, "head_number", &head.header.head.to_string())?;
+                meta_set_tx(
+                    &tx,
+                    "head_hash",
+                    &strk20_feed::felt_hex(&head.header.head_hash),
+                )?;
+                meta_set_tx(&tx, "l1_accepted", &head.header.l1_accepted.to_string())?;
+                if contradiction {
+                    bump_generation_tx(&tx)?;
+                    out.tail_rewound = true;
+                }
+                tx.commit()?;
             }
-            self.meta_set("head_etag", &new_etag)?;
-            self.meta_set("head_number", &head.header.head.to_string())?;
-            self.meta_set(
-                "head_hash",
-                &strk20_feed::felt_hex(&head.header.head_hash),
-            )?;
-            self.meta_set("l1_accepted", &head.header.l1_accepted.to_string())?;
             out.tail_changed = true;
-            out.tail_rewound = contradiction;
             out.head = head.header.head;
             out.l1_accepted = head.header.l1_accepted;
         } else {
@@ -301,6 +401,14 @@ impl FeedStore {
                 .unwrap_or(0);
         }
         Ok(out)
+    }
+
+    /// Persisted tail-replacement counter (crash-safe, shared-db-safe).
+    pub fn tail_generation(&self) -> Result<u64> {
+        Ok(self
+            .meta_get("tail_generation")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0))
     }
 
     /// A read view bound to `block` for the discovery engine.
@@ -336,12 +444,41 @@ impl FeedStore {
         Ok(())
     }
 
-    /// Drop registry rows whose creation block was reorged away.
-    pub fn prune_notes_above(&self, block: u64) -> Result<usize> {
+    /// Drop registry rows whose note slot no longer exists in the mirror —
+    /// the precise reorg cleanup (covers both direct and masked tail
+    /// replacements; a canonical note re-added by the new tail/epoch is
+    /// rediscovered by the next engine pass).
+    pub fn prune_missing_notes(&self, owner: &Felt, as_of: u64) -> Result<usize> {
+        let notes = self.notes(owner)?;
+        let conn = self.conn.lock().expect("conn");
+        let mut pruned = 0;
+        for n in notes {
+            let slot = discovery_core::privacy_pool::storage_slots::notes(n.note_id);
+            let value: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT value FROM storage_log WHERE slot = ?1 AND block <= ?2
+                     ORDER BY block DESC LIMIT 1",
+                    params![fb(&slot).as_slice(), as_of as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let exists = value.map(|v| bf(&v) != Felt::ZERO).unwrap_or(false);
+            if !exists {
+                conn.execute(
+                    "DELETE FROM notes_registry WHERE note_id = ?1",
+                    [fb(&n.note_id).as_slice()],
+                )?;
+                pruned += 1;
+            }
+        }
+        Ok(pruned)
+    }
+
+    pub fn delete_owner_notes(&self, owner: &Felt) -> Result<usize> {
         let conn = self.conn.lock().expect("conn");
         Ok(conn.execute(
-            "DELETE FROM notes_registry WHERE block > ?1",
-            [block as i64],
+            "DELETE FROM notes_registry WHERE owner = ?1",
+            [fb(owner).as_slice()],
         )?)
     }
 
@@ -427,6 +564,24 @@ impl ClientView {
             None => (Felt::ZERO, 0),
         })
     }
+}
+
+fn meta_set_tx(tx: &rusqlite::Transaction<'_>, key: &str, value: &str) -> Result<()> {
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn bump_generation_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES ('tail_generation', '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn client_err(e: anyhow::Error) -> StorageError {

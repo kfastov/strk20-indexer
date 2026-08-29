@@ -89,7 +89,8 @@ impl<'a> Ingestor<'a> {
     }
 
     /// Highest stored block that is still canonical, if a reorg is detected.
-    /// None = no reorg.
+    /// None = no reorg. Transport errors PROPAGATE — an RPC outage must never
+    /// be mistaken for a reorg (review finding: detect_reorg on Err).
     async fn detect_reorg(&self) -> Result<Option<u64>> {
         let Some(head_num) = self.db.meta_get("head_number")?.and_then(|s| s.parse().ok())
         else {
@@ -98,29 +99,33 @@ impl<'a> Ingestor<'a> {
         let Some(stored_hash) = self.db.meta_get("head_hash")? else {
             return Ok(None);
         };
-        let current = self.rpc.get_block(BlockRef::Number(head_num)).await;
-        match current {
-            Ok(h) if normalize_hex(&h.block_hash)? == stored_hash => Ok(None),
-            Ok(_) | Err(_) => {
-                // The stored head is gone. Walk stored active blocks from the
-                // top until one is still canonical; the epoch floor is never
-                // crossed because epochs are cut at l1-final blocks only.
-                let floor = self.db.last_epoch()?.map(|(_, _, to)| to).unwrap_or(0);
-                let stored = self.db.blocks_in_range(floor + 1, head_num)?;
-                for b in stored.iter().rev() {
-                    if b.l1_accepted {
-                        return Ok(Some(b.number));
-                    }
-                    match self.rpc.get_block(BlockRef::Number(b.number)).await {
-                        Ok(h) if crate::rpc::parse_felt(&h.block_hash)? == b.hash => {
-                            return Ok(Some(b.number));
-                        }
-                        _ => continue,
-                    }
+        let gone = match self.rpc.get_block(BlockRef::Number(head_num)).await {
+            Ok(h) => normalize_hex(&h.block_hash)? != stored_hash,
+            Err(e) if RpcClient::is_block_not_found(&e) => true,
+            Err(e) => return Err(e.context("canonicity check: head refetch failed")),
+        };
+        if !gone {
+            return Ok(None);
+        }
+        // The stored head is gone. Walk stored active blocks from the top
+        // until one is still canonical; the epoch floor is never crossed
+        // because epochs are cut at l1-final blocks only.
+        let floor = self.db.last_epoch()?.map(|(_, _, to)| to).unwrap_or(0);
+        let stored = self.db.blocks_in_range(floor + 1, head_num)?;
+        for b in stored.iter().rev() {
+            if b.l1_accepted {
+                return Ok(Some(b.number));
+            }
+            match self.rpc.get_block(BlockRef::Number(b.number)).await {
+                Ok(h) if crate::rpc::parse_felt(&h.block_hash)? == b.hash => {
+                    return Ok(Some(b.number));
                 }
-                Ok(Some(floor))
+                Ok(_) => continue,
+                Err(e) if RpcClient::is_block_not_found(&e) => continue,
+                Err(e) => return Err(e.context("canonicity walkback failed")),
             }
         }
+        Ok(Some(floor))
     }
 
     /// Pool-active block numbers in [from, to], with their pool events in
@@ -132,6 +137,7 @@ impl<'a> Ingestor<'a> {
     ) -> Result<Vec<(u64, Vec<crate::rpc::RpcEvent>)>> {
         let mut by_block: BTreeMap<u64, Vec<crate::rpc::RpcEvent>> = BTreeMap::new();
         let mut continuation: Option<String> = None;
+        let mut endpoint_epoch = self.rpc.endpoint_epoch();
         loop {
             let page = self
                 .rpc
@@ -143,6 +149,14 @@ impl<'a> Ingestor<'a> {
                     continuation.as_deref(),
                 )
                 .await?;
+            // Continuation tokens are provider-specific: a failover mid-scan
+            // invalidates them — restart the scan (idempotent: BTreeMap).
+            if self.rpc.endpoint_epoch() != endpoint_epoch {
+                endpoint_epoch = self.rpc.endpoint_epoch();
+                by_block.clear();
+                continuation = None;
+                continue;
+            }
             for ev in page.events {
                 let Some(bn) = ev.block_number else {
                     continue; // pre-confirmed events carry no block number
@@ -211,8 +225,21 @@ impl<'a> Ingestor<'a> {
             }
         }
 
-        // events for this block, in emission order, with tx_index resolved
-        // from the header's transaction list
+        // Fork-consistency (review finding: three non-atomic RPC calls can
+        // straddle a reorg/failover): every artifact of this block must carry
+        // the SAME block hash as the header, or the whole ingest is retried.
+        let header_hash_hex = normalize_hex(&header.block_hash)?;
+        if let Some(su_hash) = &update.block_hash {
+            if normalize_hex(su_hash)? != header_hash_hex {
+                bail!(
+                    "block {number}: state update hash {su_hash} disagrees with header                      {header_hash_hex} (reorg/failover mid-fetch); retrying next cycle"
+                );
+            }
+        }
+
+        // events for this block, in emission order (paginated — a block's
+        // events can span several getEvents pages; review critical finding),
+        // with tx_index resolved from the header's transaction list.
         let tx_index_of = |tx_hash: &str| -> Option<u64> {
             let want = normalize_hex(tx_hash).ok()?;
             header
@@ -221,23 +248,37 @@ impl<'a> Ingestor<'a> {
                 .position(|t| normalize_hex(t).map(|h| h == want).unwrap_or(false))
                 .map(|i| i as u64)
         };
-        // Re-fetch this block's events via the same filter to keep a single
-        // source of order (the scan already had them, but re-fetching per
-        // block keeps ingest_block self-contained and idempotent).
-        let page = self
-            .rpc
-            .get_events(
-                &self.cfg.pool,
-                number,
-                BlockRef::Number(number),
-                self.chunk_size.max(100),
-                None,
-            )
-            .await?;
-        let mut events = Vec::with_capacity(page.events.len());
-        for (i, ev) in page.events.iter().enumerate() {
+        let mut raw_events = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let page = self
+                .rpc
+                .get_events(
+                    &self.cfg.pool,
+                    number,
+                    BlockRef::Number(number),
+                    self.chunk_size.max(100),
+                    continuation.as_deref(),
+                )
+                .await?;
+            raw_events.extend(page.events);
+            match page.continuation_token {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
+        }
+        let mut events = Vec::with_capacity(raw_events.len());
+        let mut event_index = 0u64;
+        for ev in &raw_events {
             if ev.block_number != Some(number) {
                 continue;
+            }
+            if let Some(eh) = &ev.block_hash {
+                if normalize_hex(eh)? != header_hash_hex {
+                    bail!(
+                        "block {number}: event block hash {eh} disagrees with header                          (reorg/failover mid-fetch); retrying next cycle"
+                    );
+                }
             }
             let keys = ev
                 .keys
@@ -249,14 +290,21 @@ impl<'a> Ingestor<'a> {
                 .iter()
                 .map(|d| crate::rpc::parse_felt(d))
                 .collect::<Result<Vec<_>>>()?;
+            let tx_index = tx_index_of(&ev.transaction_hash).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "block {number}: event tx {} not in header transactions                      (cross-fork fetch); retrying next cycle",
+                    ev.transaction_hash
+                )
+            })?;
             events.push(EventRow {
                 block: number,
-                event_index: i as u64,
-                tx_index: tx_index_of(&ev.transaction_hash).unwrap_or(0),
+                event_index,
+                tx_index,
                 tx_hash: crate::rpc::parse_felt(&ev.transaction_hash)?,
                 keys,
                 data,
             });
+            event_index += 1;
         }
 
         let l1_accepted = header.status.as_deref() == Some("ACCEPTED_ON_L1");
@@ -270,6 +318,39 @@ impl<'a> Ingestor<'a> {
         self.db
             .insert_block_data(&row, &diffs, &events, replaced.as_ref(), number, None)?;
         Ok(())
+    }
+}
+
+impl<'a> Ingestor<'a> {
+    /// Verify-root recovery slow path (spec §5.6): re-ingest EVERY block in
+    /// [from, to] straight from per-block state updates — not events-first —
+    /// so a pool write that rode a block with no pool event is recovered.
+    pub async fn rescan_range(&mut self, from: u64, to: u64) -> Result<u64> {
+        let mut recovered = 0u64;
+        for number in from..=to {
+            let update = self.rpc.get_state_update(number).await?;
+            let pool_hex = strk20_feed::felt_hex(&self.cfg.pool);
+            let touches_pool = update
+                .state_diff
+                .storage_diffs
+                .iter()
+                .any(|cd| normalize_hex(&cd.address).map(|a| a == pool_hex).unwrap_or(false))
+                || update
+                    .state_diff
+                    .replaced_classes
+                    .iter()
+                    .any(|rc| normalize_hex(&rc.contract_address).map(|a| a == pool_hex).unwrap_or(false))
+                || update
+                    .state_diff
+                    .deployed_contracts
+                    .iter()
+                    .any(|dc| normalize_hex(&dc.address).map(|a| a == pool_hex).unwrap_or(false));
+            if touches_pool {
+                self.ingest_block(number).await?;
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
     }
 }
 

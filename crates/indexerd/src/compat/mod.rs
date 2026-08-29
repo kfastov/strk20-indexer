@@ -14,6 +14,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use serde::de::DeserializeOwned;
 use discovery_core::discovery::CursorLimits;
 use discovery_core::io_budget::IoBudget;
 use discovery_core::privacy_pool::types::SecretFelt;
@@ -52,7 +53,28 @@ pub fn router(state: CompatState) -> Router {
         .route("/v1/sync/outgoing_state", post(outgoing))
         .route("/v1/sync/preflight_check", post(preflight))
         .route("/v1/history", post(history))
+        // Unconditional labeling: axum-generated rejections (405, 415, …)
+        // must carry the mode header too (review finding).
+        .layer(axum::middleware::map_response(label_response))
         .with_state(state)
+}
+
+async fn label_response(mut resp: Response) -> Response {
+    resp.headers_mut()
+        .insert(MODE_HEADER, HeaderValue::from_static(MODE_VALUE));
+    resp
+}
+
+/// Manual body parse: an axum `Json` rejection echoes fragments of the body
+/// in its error text — a request body here contains a raw viewing key, so
+/// parse failures must produce a generic error that echoes NOTHING.
+fn parse_body<T: DeserializeOwned>(body: &axum::body::Bytes) -> Result<T, Response> {
+    serde_json::from_slice(body).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            ApiErrorResponse::new(error_codes::INVALID_REQUEST, "malformed request body"),
+        )
+    })
 }
 
 fn labeled(mut resp: Response) -> Response {
@@ -165,8 +187,9 @@ async fn validate_viewing_key(
 
 async fn incoming(
     State(state): State<CompatState>,
-    Json(req): Json<wire::IncomingSyncRequest>,
+    body: axum::body::Bytes,
 ) -> HandlerResult {
+    let req: wire::IncomingSyncRequest = parse_body(&body)?;
     check_last_known(&state, req.base.last_known_block)?;
     let snapshot = snapshot_for(&state, req.base.contract_address, req.base.block_ref).await?;
     check_degraded(&state, snapshot.bound_block())?;
@@ -199,8 +222,9 @@ async fn incoming(
 
 async fn outgoing(
     State(state): State<CompatState>,
-    Json(req): Json<wire::OutgoingSyncRequest>,
+    body: axum::body::Bytes,
 ) -> HandlerResult {
+    let req: wire::OutgoingSyncRequest = parse_body(&body)?;
     check_last_known(&state, req.base.last_known_block)?;
     let snapshot = snapshot_for(&state, req.base.contract_address, req.base.block_ref).await?;
     check_degraded(&state, snapshot.bound_block())?;
@@ -233,8 +257,9 @@ async fn outgoing(
 
 async fn preflight(
     State(state): State<CompatState>,
-    Json(req): Json<wire::PreflightCheckRequest>,
+    body: axum::body::Bytes,
 ) -> HandlerResult {
+    let req: wire::PreflightCheckRequest = parse_body(&body)?;
     let snapshot = snapshot_for(&state, req.contract_address, None).await?;
     check_degraded(&state, snapshot.bound_block())?;
     let result = discovery_core::sync::preflight_check::preflight_check(
@@ -262,8 +287,9 @@ async fn preflight(
 
 async fn history(
     State(state): State<CompatState>,
-    Json(req): Json<wire::HistoryRequest>,
+    body: axum::body::Bytes,
 ) -> HandlerResult {
+    let req: wire::HistoryRequest = parse_body(&body)?;
     check_last_known(&state, req.last_known_block)?;
     let snapshot = snapshot_for(&state, req.contract_address, req.block_ref).await?;
     check_degraded(&state, snapshot.bound_block())?;

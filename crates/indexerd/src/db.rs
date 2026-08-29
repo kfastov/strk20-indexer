@@ -76,8 +76,9 @@ CREATE TABLE IF NOT EXISTS ingest_cursor (
 -- compat-mode canonicity checks on last_known_block work for block hashes
 -- that never carried pool activity. Pruned on reorg rollback.
 CREATE TABLE IF NOT EXISTS seen_heads (
-  hash   BLOB PRIMARY KEY,
-  number INTEGER NOT NULL
+  hash    BLOB PRIMARY KEY,
+  number  INTEGER NOT NULL,
+  reorged INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 "#;
 
@@ -215,6 +216,12 @@ impl Db {
             .query_row("SELECT MAX(number) FROM blocks", [], |r| r.get::<_, Option<i64>>(0).map(|o| o.map(|v| v as u64)))?)
     }
 
+    /// Canonicity of a block hash for compat's `last_known_block` gate.
+    /// Three-valued knowledge collapsed honestly: a hash we hold as a live
+    /// block or head is canonical; a hash we TOMBSTONED during a rollback is
+    /// known-reorged (409); a hash this instance never observed (fresh DB,
+    /// pre-history block) is treated as canonical — a rebuilt indexer must
+    /// not 409 every existing client (review finding: db.rs is_canonical).
     pub fn is_canonical(&self, hash: &Felt) -> Result<bool> {
         let in_blocks = self
             .conn
@@ -228,20 +235,23 @@ impl Db {
         if in_blocks {
             return Ok(true);
         }
-        Ok(self
+        let seen: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM seen_heads WHERE hash = ?1",
+                "SELECT reorged FROM seen_heads WHERE hash = ?1",
                 [felt_blob(hash).as_slice()],
-                |_| Ok(()),
+                |r| r.get(0),
             )
-            .optional()?
-            .is_some())
+            .optional()?;
+        Ok(match seen {
+            Some(reorged) => reorged == 0,
+            None => true, // unknown: this instance cannot testify against it
+        })
     }
 
     pub fn record_seen_head(&self, hash: &Felt, number: u64) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO seen_heads(hash, number) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO seen_heads(hash, number, reorged) VALUES (?1, ?2, 0)",
             params![felt_blob(hash).as_slice(), number as i64],
         )?;
         Ok(())
@@ -282,8 +292,18 @@ impl Db {
     /// storage_log and events. Returns rows removed from blocks.
     pub fn rollback_above(&mut self, ancestor: u64) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        // Tombstone every hash we are about to forget, so compat can answer
+        // 409 (known-reorged) instead of guessing.
+        tx.execute(
+            "INSERT OR REPLACE INTO seen_heads(hash, number, reorged)
+             SELECT hash, number, 1 FROM blocks WHERE number > ?1",
+            [ancestor as i64],
+        )?;
+        tx.execute(
+            "UPDATE seen_heads SET reorged = 1 WHERE number > ?1",
+            [ancestor as i64],
+        )?;
         let n = tx.execute("DELETE FROM blocks WHERE number > ?1", [ancestor as i64])?;
-        tx.execute("DELETE FROM seen_heads WHERE number > ?1", [ancestor as i64])?;
         tx.execute(
             "UPDATE ingest_cursor SET scan_frontier = MIN(scan_frontier, ?1),
              events_continuation = NULL WHERE id = 1",
