@@ -631,6 +631,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "starknet-rust-crypto",
  "starknet-types-core",
  "strk20-client",
  "strk20-feed",

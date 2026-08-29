@@ -307,6 +307,35 @@ pub async fn init_checks(db: &Db, rpc: &RpcClient, cfg: &ChainConfig) -> Result<
             }
         }
     }
+    // Recompute decode_state from class_history against the CURRENT decoder
+    // map: this is the recovery path after an operator adds a class via
+    // --allow-class (spec §5.7).
+    {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT block, class_hash FROM class_history ORDER BY block")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut degraded_since: Option<u64> = None;
+        for (block, class_blob) in rows {
+            let class = crate::db::blob_felt(&class_blob);
+            if !cfg.decoder_map.contains_key(&class) {
+                degraded_since = Some(degraded_since.map_or(block, |b| b.min(block)));
+            }
+        }
+        match degraded_since {
+            Some(b) => {
+                db.meta_set("decode_state", "degraded")?;
+                db.meta_set("degraded_since_block", &b.to_string())?;
+            }
+            None => {
+                db.meta_set("decode_state", "ok")?;
+            }
+        }
+    }
     // current class sanity: warn (not fail) when the live class is unknown
     if let Ok(class) = rpc.get_class_hash_at(BlockRef::Latest, &cfg.pool).await {
         if !cfg.decoder_map.contains_key(&class) {

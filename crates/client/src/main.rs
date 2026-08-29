@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
                     let r = sync_once(&store, transport.as_ref(), owner, &key).await?;
                     // watch mode: emit only deltas as JSON lines
-                    for n in r.notes.iter().filter(|n| n.block_number + 0 > report.head) {
+                    for n in r.notes.iter().filter(|n| n.block_number > report.head) {
                         println!(
                             "{}",
                             serde_json::json!({"event": "note", "note": n})

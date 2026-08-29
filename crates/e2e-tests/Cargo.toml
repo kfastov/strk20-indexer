@@ -10,6 +10,7 @@ strk20-feed = { workspace = true, features = ["compress", "mpt"] }
 strk20-client = { workspace = true }
 discovery-core = { workspace = true }
 starknet-types-core = { workspace = true }
+starknet-crypto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }

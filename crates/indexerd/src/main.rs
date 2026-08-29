@@ -47,6 +47,10 @@ struct CommonOpts {
     /// getEvents page size
     #[arg(long, default_value_t = 1000)]
     chunk_size: u64,
+    /// Additional known pool class hash(es) for the decoder map (recovery
+    /// path after an upgrade; spec §5.7)
+    #[arg(long = "allow-class")]
+    allow_class: Vec<String>,
 }
 
 impl CommonOpts {
@@ -63,6 +67,12 @@ impl CommonOpts {
         }
         if let Some(e) = self.epoch_size {
             cfg.epoch_size = e;
+        }
+        for c in &self.allow_class {
+            cfg.decoder_map.insert(
+                Felt::from_hex(c).expect("bad --allow-class"),
+                "custom".to_owned(),
+            );
         }
         cfg
     }
