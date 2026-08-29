@@ -30,8 +30,12 @@ pub fn backend_at(chain: &crate::chain::FixtureChain, block: u64) -> MockBackend
     backend
 }
 
-/// Run incoming discovery to completion for `owner`.
-pub async fn incoming(backend: &MockBackend, owner: Felt, key: &SecretFelt) -> OracleResult {
+/// Run incoming discovery to completion for `owner` over any engine backend.
+pub async fn incoming<S: discovery_core::privacy_pool::views::IViews>(
+    backend: &S,
+    owner: Felt,
+    key: &SecretFelt,
+) -> OracleResult {
     let mut cursor = DiscoveryCursor::default();
     let mut notes = Vec::new();
     for _ in 0..1000 {

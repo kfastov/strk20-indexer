@@ -635,6 +635,7 @@ dependencies = [
  "starknet-types-core",
  "strk20-client",
  "strk20-feed",
+ "strk20-indexerd",
  "tempfile",
  "tokio",
  "tracing",
