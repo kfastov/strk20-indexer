@@ -1,0 +1,33 @@
+[package]
+name = "strk20-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "strk20-sync"
+path = "src/main.rs"
+
+[dependencies]
+strk20-feed = { workspace = true, features = ["compress", "mpt"] }
+discovery-core = { workspace = true }
+starknet-core = { workspace = true }
+starknet-crypto = { workspace = true }
+starknet-types-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

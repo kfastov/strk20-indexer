@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/feed",
+    "crates/indexerd",
+    "crates/client",
+    "crates/e2e-tests",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/kfastov/strk20-indexer"
+
+[workspace.dependencies]
+# Engine — tag is mutable upstream; Cargo.lock pins rev 74841caf0466d122117945e28ed983e2864c8fc1
+discovery-core = { git = "https://github.com/starkware-libs/starknet-privacy.git", tag = "CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08" }
+# Type identity with the engine (fork EmittedEvent, BlockId, StorageResult) — rev 7caedfef85a4d748f8e9e5a159c87c31b6fe9d71
+starknet-core = { package = "starknet-rust-core", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
+starknet-crypto = { package = "starknet-rust-crypto", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
+# crates.io 1.0.0 is a DIFFERENT Felt type — must stay 0.2.x (see docs/spec/architecture.md §3)
+starknet-types-core = { version = "=0.2.4", features = ["curve", "serde"] }
+
+strk20-feed = { path = "crates/feed" }
+strk20-client = { path = "crates/client" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+anyhow = "1"
+zstd = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
+reqwest = { version = "0.13", features = ["json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+futures = "0.3"
+tempfile = "3"
+zeroize = "1"
+
+[profile.release]
+lto = "thin"
