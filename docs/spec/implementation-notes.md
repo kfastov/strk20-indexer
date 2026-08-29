@@ -58,3 +58,26 @@ implemented as specified.
 - `strk20 bench` harness (§10.5) and the nightly live smoke (§10.4).
 - Prefix-bucket endpoint (wire frozen in §6.3; ~50 lines when wanted).
 - wasm client package, SSE tail, Postgres backend — §12 roadmap unchanged.
+
+## Post-implementation adversarial review (2026-08-30)
+
+A three-lens adversarial review (correctness / privacy / client-semantics)
+with per-finding verification confirmed 22 defects the green test suite did
+not catch — full record in
+[../research/review/adversarial-review.md](../research/review/adversarial-review.md).
+All 22 are fixed; highlights that changed observable behavior:
+
+- per-block event ingestion is paginated (a block's events can span getEvents
+  pages) and guarded by fork-consistency checks on every fetched artifact;
+- reorg rollbacks tombstone forgotten hashes instead of deleting them, so
+  compat's 409 gate distinguishes known-reorged from merely-unknown hashes
+  (a rebuilt indexer no longer 409s every existing client);
+- a verify-root mismatch now triggers the spec §5.6 per-block rescan and
+  surfaces in /health as DEGRADED instead of silently halting the feed;
+- the client supersedes epoch ranges on apply (masked-reorg poison removed)
+  and rewinds cursors per-owner via a crash-safe persisted tail generation;
+- sync.db is chmod 0600 BEFORE SQLite creates -wal/-shm; compat/raw reject
+  malformed bodies without echoing them and label every response;
+- `strk20 mirror-pull` ingests verified epochs into the DB (real bootstrap);
+  `strk20-sync --full-resync` exists; `--watch` emits each note once and
+  survives transient transport errors; `verify` fails on unprovable slots.

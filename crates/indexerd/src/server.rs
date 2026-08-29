@@ -216,7 +216,7 @@ async fn health(State(s): State<AppState>) -> Response {
 }
 
 async fn stats(State(s): State<AppState>) -> Response {
-    match with_db(&s, |db| crate::stats::compute(db)) {
+    match with_db(&s, crate::stats::compute) {
         Ok(body) => Json(body).into_response(),
         Err(resp) => resp,
     }

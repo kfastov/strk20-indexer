@@ -101,7 +101,7 @@ pub fn felts_blob(fs: &[Felt]) -> Vec<u8> {
 }
 
 pub fn blob_felts(b: &[u8]) -> Vec<Felt> {
-    assert!(b.len() % 32 == 0, "felt list blob must be a multiple of 32");
+    assert!(b.len().is_multiple_of(32), "felt list blob must be a multiple of 32");
     b.chunks_exact(32).map(blob_felt).collect()
 }
 

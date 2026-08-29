@@ -232,21 +232,21 @@ impl RpcClient {
             filter["continuation_token"] = json!(token);
         }
         let v = self.call("starknet_getEvents", json!([filter])).await?;
-        Ok(serde_json::from_value(v).context("decode getEvents")?)
+        serde_json::from_value(v).context("decode getEvents")
     }
 
     pub async fn get_state_update(&self, block: u64) -> Result<StateUpdate> {
         let v = self
             .call("starknet_getStateUpdate", json!([{ "block_number": block }]))
             .await?;
-        Ok(serde_json::from_value(v).context("decode getStateUpdate")?)
+        serde_json::from_value(v).context("decode getStateUpdate")
     }
 
     pub async fn get_block(&self, r: BlockRef) -> Result<BlockHeader> {
         let v = self
             .call("starknet_getBlockWithTxHashes", json!([r.to_json()]))
             .await?;
-        Ok(serde_json::from_value(v).context("decode getBlockWithTxHashes")?)
+        serde_json::from_value(v).context("decode getBlockWithTxHashes")
     }
 
     pub async fn get_class_hash_at(&self, r: BlockRef, contract: &Felt) -> Result<Felt> {

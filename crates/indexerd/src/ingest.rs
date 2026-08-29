@@ -199,7 +199,7 @@ impl<'a> Ingestor<'a> {
                 }
             }
         }
-        diffs.sort_by(|a, b| a.0.to_bytes_be().cmp(&b.0.to_bytes_be()));
+        diffs.sort_by_key(|a| a.0.to_bytes_be());
 
         let mut replaced: Option<Felt> = None;
         for rc in &update.state_diff.replaced_classes {

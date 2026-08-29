@@ -31,7 +31,7 @@ async fn engine_over_sqlite_equals_engine_over_mock() {
             l1_accepted: true,
         };
         let mut diffs: Vec<(Felt, Felt)> = f.slots.iter().map(|(k, v)| (*k, *v)).collect();
-        diffs.sort_by(|a, b| a.0.to_bytes_be().cmp(&b.0.to_bytes_be()));
+        diffs.sort_by_key(|a| a.0.to_bytes_be());
         let events: Vec<EventRow> = Vec::new();
         db.insert_block_data(&block, &diffs, &events, None, 46, None)
             .unwrap();

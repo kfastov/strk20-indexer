@@ -149,9 +149,9 @@ fn encode_blk_line(out: &mut String, b: &BlockLine) {
 }
 
 fn encode_end_line(out: &mut String, f: &Footer) {
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "{{\"t\":\"end\",\"blocks\":{},\"diffs\":{},\"events\":{},\"class\":\"{}\"}}\n",
+        "{{\"t\":\"end\",\"blocks\":{},\"diffs\":{},\"events\":{},\"class\":\"{}\"}}",
         f.blocks,
         f.diffs,
         f.events,
@@ -170,9 +170,9 @@ pub fn encode_epoch(e: &Epoch) -> Vec<u8> {
         Some(h) => format!("\"{}\"", hex::encode(h)),
         None => "null".to_owned(),
     };
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "{{\"t\":\"hdr\",\"v\":{},\"kind\":\"{}\",\"chain_id\":\"{}\",\"pool\":\"{}\",\"epoch\":{},\"from\":{},\"to\":{},\"prev\":{}}}\n",
+        "{{\"t\":\"hdr\",\"v\":{},\"kind\":\"{}\",\"chain_id\":\"{}\",\"pool\":\"{}\",\"epoch\":{},\"from\":{},\"to\":{},\"prev\":{}}}",
         FORMAT_VERSION,
         KIND_EPOCH,
         e.header.chain_id,
@@ -194,9 +194,9 @@ pub fn encode_head(h: &Head) -> Vec<u8> {
     assert_invariants(&h.blocks);
     debug_assert!(h.blocks.iter().all(|b| b.finality.is_some()));
     let mut out = String::new();
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "{{\"t\":\"hdr\",\"v\":{},\"kind\":\"{}\",\"tail_from\":{},\"head\":{},\"head_hash\":\"{}\",\"l1_accepted\":{}}}\n",
+        "{{\"t\":\"hdr\",\"v\":{},\"kind\":\"{}\",\"tail_from\":{},\"head\":{},\"head_hash\":\"{}\",\"l1_accepted\":{}}}",
         FORMAT_VERSION,
         KIND_HEAD,
         h.header.tail_from,

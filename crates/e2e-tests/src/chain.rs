@@ -50,7 +50,7 @@ impl FixtureChain {
     /// three groups of 16 at blocks {10, 20, 30}; head 46, l1_accepted 40.
     pub fn build(fixture: &DevnetFixture) -> Self {
         let mut slots: Vec<(Felt, Felt)> = fixture.slots.iter().map(|(k, v)| (*k, *v)).collect();
-        slots.sort_by(|a, b| a.0.to_bytes_be().cmp(&b.0.to_bytes_be()));
+        slots.sort_by_key(|a| a.0.to_bytes_be());
         let mut active = BTreeMap::new();
         let partition_blocks = [10u64, 20, 30];
         let chunk = slots.len().div_ceil(partition_blocks.len());
@@ -184,7 +184,7 @@ impl FixtureChain {
     ) {
         let blk = self.active.entry(number).or_default();
         blk.diffs.push((slot, value));
-        blk.diffs.sort_by(|a, b| a.0.to_bytes_be().cmp(&b.0.to_bytes_be()));
+        blk.diffs.sort_by_key(|a| a.0.to_bytes_be());
         blk.events.push(event);
         if number > self.head {
             self.head = number;

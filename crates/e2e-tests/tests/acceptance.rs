@@ -706,7 +706,7 @@ async fn acceptance() {
     // recovery: restart with the class allowed
     drop(indexer);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let allow = format!("{}", strk20_feed::felt_hex(&unknown_class));
+    let allow = strk20_feed::felt_hex(&unknown_class).to_string();
     let indexer = ctx.spawn_indexer(
         "indexer-recovered",
         &["--enable-compat", "--allow-class", &allow],
