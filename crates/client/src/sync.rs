@@ -62,6 +62,26 @@ fn keys(kind: &str, owner: &Felt) -> CursorKeys {
     }
 }
 
+/// Re-open a completed cursor for incremental resume. Upstream's cursor is a
+/// PAGINATION cursor: completion flags mean "complete as of the block it was
+/// computed at", and a complete cursor short-circuits the engine entirely.
+/// For a resume at a HIGHER block the completion flags are cleared and the
+/// cached totals dropped, while every progress position (last channel /
+/// subchannel / note index) is kept — the engine then re-probes only the
+/// boundary slots and discovers anything new (the "watch-set grows" property
+/// from the research, docs/research/verify-discovery-trace.md §3).
+fn reopen_cursor(cursor: &mut DiscoveryCursor) {
+    cursor.channel_discovery_complete = false;
+    cursor.total_n_channels = None;
+    for channel in cursor.channels.values_mut() {
+        channel.subchannel_discovery_complete = false;
+        for sub in channel.subchannels.values_mut() {
+            sub.note_discovery_complete = false;
+            sub.total_n_notes = None;
+        }
+    }
+}
+
 fn load_cursor(store: &FeedStore, key: &str) -> Result<Option<DiscoveryCursor>> {
     match store.meta_get(key)? {
         Some(json) => Ok(Some(serde_json::from_str(&json)?)),
@@ -81,6 +101,7 @@ async fn run_incoming(
     key: &SecretFelt,
     mut cursor: DiscoveryCursor,
 ) -> Result<(DiscoveryCursor, Vec<discovery_core::discovery::notes::DecryptedNote>)> {
+    reopen_cursor(&mut cursor);
     let view = store.view(bound);
     let mut notes = Vec::new();
     for _ in 0..MAX_PASSES {
@@ -111,6 +132,7 @@ async fn run_outgoing(
     key: &SecretFelt,
     mut cursor: DiscoveryCursor,
 ) -> Result<DiscoveryCursor> {
+    reopen_cursor(&mut cursor);
     let view = store.view(bound);
     for _ in 0..MAX_PASSES {
         let budget = IoBudget::new(PASS_BUDGET);

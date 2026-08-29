@@ -45,31 +45,35 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// All encodings of `f` a leak could plausibly take.
-pub fn encodings(f: &Felt) -> Vec<Vec<u8>> {
+/// All encodings of `f` a leak could plausibly take. For very small felts
+/// (test keys like 0xb0b) the bare short forms are statistically meaningless
+/// — three hex chars occur in any sha256 — so unprefixed-minimal and decimal
+/// needles are only used when the felt is wide enough to be distinctive.
+/// Realistic leak shapes (0x-prefixed serialization, 64-char padded hex, raw
+/// 32-byte values) are always scanned.
+pub fn encodings(f: &Felt) -> Vec<(&'static str, Vec<u8>)> {
     let be = f.to_bytes_be().to_vec();
     let mut le = be.clone();
     le.reverse();
     let min = minimal_hex_no_prefix(f);
     let padded = hex::encode(f.to_bytes_be());
-    let decimal = {
-        // felt -> decimal string via u128 pieces or big formatting
-        f.to_biguint().to_string()
-    };
-    let mut out = vec![
-        format!("0x{min}").into_bytes(),
-        min.clone().into_bytes(),
-        format!("0x{padded}").into_bytes(),
-        padded.clone().into_bytes(),
-        format!("0x{}", min.to_uppercase()).into_bytes(),
-        min.to_uppercase().into_bytes(),
-        padded.to_uppercase().into_bytes(),
-        decimal.into_bytes(),
-        be.clone(),
-        le,
-        base64_encode(&be).into_bytes(),
+    let decimal = f.to_biguint().to_string();
+    let distinctive = min.len() >= 8;
+    let mut out: Vec<(&'static str, Vec<u8>)> = vec![
+        ("0x-minimal-hex", format!("0x{min}").into_bytes()),
+        ("0x-padded-hex", format!("0x{padded}").into_bytes()),
+        ("padded-hex", padded.clone().into_bytes()),
+        ("0x-minimal-hex-upper", format!("0x{}", min.to_uppercase()).into_bytes()),
+        ("padded-hex-upper", padded.to_uppercase().into_bytes()),
+        ("be-bytes", be.clone()),
+        ("le-bytes", le),
+        ("base64-be", base64_encode(&be).into_bytes()),
     ];
-    out.dedup();
+    if distinctive {
+        out.push(("minimal-hex", min.clone().into_bytes()));
+        out.push(("minimal-hex-upper", min.to_uppercase().into_bytes()));
+        out.push(("decimal", decimal.into_bytes()));
+    }
     out
 }
 
@@ -82,24 +86,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Which encodings of `f` occur in `haystack`. Empty = clean.
 pub fn find_felt(haystack: &[u8], f: &Felt, label: &str) -> Vec<String> {
-    let names = [
-        "0x-minimal-hex",
-        "minimal-hex",
-        "0x-padded-hex",
-        "padded-hex",
-        "0x-minimal-hex-upper",
-        "minimal-hex-upper",
-        "padded-hex-upper",
-        "decimal",
-        "be-bytes",
-        "le-bytes",
-        "base64-be",
-    ];
     encodings(f)
         .iter()
-        .zip(names.iter())
-        .filter(|(needle, _)| contains(haystack, needle))
-        .map(|(_, name)| format!("{label}:{name}"))
+        .filter(|(_, needle)| contains(haystack, needle))
+        .map(|(name, _)| format!("{label}:{name}"))
         .collect()
 }
 

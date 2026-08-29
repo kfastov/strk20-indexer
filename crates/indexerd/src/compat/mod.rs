@@ -12,7 +12,7 @@ use crate::db::Db;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use discovery_core::discovery::CursorLimits;
 use discovery_core::io_budget::IoBudget;
@@ -45,8 +45,9 @@ pub struct CompatState {
 }
 
 pub fn router(state: CompatState) -> Router {
+    // NOTE: /health is served by the ops router (server.rs) for both modes;
+    // its body carries the same `status` field the SDK's isHealthy() reads.
     Router::new()
-        .route("/health", get(health))
         .route("/v1/sync/incoming_state", post(incoming))
         .route("/v1/sync/outgoing_state", post(outgoing))
         .route("/v1/sync/preflight_check", post(preflight))
@@ -160,32 +161,6 @@ async fn validate_viewing_key(
         ));
     }
     Ok(())
-}
-
-async fn health(State(state): State<CompatState>) -> Response {
-    let head = with_db(&state, |db| {
-        let number: Option<u64> = db.meta_get("head_number")?.and_then(|s| s.parse().ok());
-        let hash = db.meta_get("head_hash")?;
-        let ts = number
-            .and_then(|n| db.block(n).ok().flatten())
-            .map(|b| b.timestamp);
-        Ok(number.zip(hash).map(|(n, h)| ChainHead {
-            block_number: n,
-            block_hash: Felt::from_hex(&h).unwrap_or(Felt::ZERO),
-            timestamp: ts.unwrap_or(0),
-        }))
-    });
-    match head {
-        Ok(chain_head) => labeled(
-            Json(wire::HealthResponse {
-                status: "OK".into(),
-                chain_head,
-                lag_secs: 0,
-            })
-            .into_response(),
-        ),
-        Err(resp) => resp,
-    }
 }
 
 async fn incoming(

@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
             } else {
                 print_human(&report);
             }
-            let mut complete = report.incoming_complete && report.outgoing_complete;
+            let complete = report.incoming_complete && report.outgoing_complete;
             if watch {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
@@ -122,7 +122,6 @@ async fn main() -> Result<()> {
                             serde_json::json!({"event": "spent", "nullifier": nf})
                         );
                     }
-                    complete = r.incoming_complete && r.outgoing_complete;
                 }
             }
             if !complete {
