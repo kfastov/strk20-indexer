@@ -1,5 +1,8 @@
 # Sepolia shield run — our own `EncNoteCreated`, executed
 
+> Two runs. **Run 1** (§1–§8): register + shield under pool class `0x56ab118a…`.
+> **Run 2** (§"Run 2"): spend that note under the post-upgrade class `0x7e2bbd7c…`.
+
 Run date: 2026-08-31. Goal: produce **our own note** on the Sepolia STRK20 privacy pool
 (`0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`), headless, so the
 indexer can discover it keylessly end to end. Testnet only; no mainnet write path was
@@ -371,7 +374,8 @@ The indexer can now be pointed at Sepolia with a key we control and asked to fin
 where we own both sides. Registration state (`ViewingKeySet`), a deposit, and a note
 creation all land in one transaction, so a single block exercises three event paths.
 
-Not done, and cheap follow-ups if wanted:
+Not done at the time of Run 1, and cheap follow-ups if wanted (**the first of these was
+subsequently done — see Run 2 below**):
 
 - **Spent-state testing** needs a second transaction that consumes this note (`NoteUsed` +
   a fresh `EncNoteCreated`). Budget: another ~3 STRK of gas + 2 STRK pool fee from the
@@ -388,3 +392,175 @@ Not done, and cheap follow-ups if wanted:
 Unrelated note for whoever reads this next: the working tree picked up modifications under
 `crates/` at 17:15 local during this run that did **not** come from this task — this work
 touched only `data/sepolia/` and this file.
+
+---
+
+# Run 2 — spending the note under the upgraded class
+
+Run date: 2026-08-31, ~40 minutes after Run 1. Between the two runs **the pool was upgraded
+on chain at block 14,339,893** — 778 blocks after our note — from class
+`0x56ab118a8a6e38efc93ad758cefe909fee421fa931ce3cf72df624d345623b2` to
+`0x07e2bbd7ccc1e68b2695caef70aeb2a3be6cd017b5d5159278ba08f2d8de33f` (`get_version` went
+`3288624` = `"2.0"` → `3288625` = `"2.1"`; both OBSERVED).
+
+The coordinator's ABI diff had already established that every event our decoder consumes is
+field-level identical across the two classes, and that only an admin event changed
+(`OpenNoteDepositorBlockSet` → `OpenNoteScreeningPolicySet` — the same divergence the RC.6
+SDK tag shows in Run 1's version table, which now reads as *RC.6 tracking this upgrade*).
+What the ABI could not answer: **did the storage layout move?** Discovery walks storage
+slots, so only a note written by the new class settles it.
+
+## Result
+
+One transaction did both jobs. OBSERVED:
+
+| | |
+|---|---|
+| transaction | `0x3d253f8a5ba1d84878b3d4c328e1c6d6fe5a95f163d654de6c9f8776a16f964` |
+| block | **14,340,785**, tx_index 1, block hash `0x06aae57e71116d4d575a089136b540721da06545a6c0353d84757be0c200f01e` |
+| timestamp | 2026-08-31T15:07:52Z |
+| status | `SUCCEEDED` / `ACCEPTED_ON_L2` |
+| **pool class hash at that block** | **`0x07e2bbd7ccc1e68b2695caef70aeb2a3be6cd017b5d5159278ba08f2d8de33f`** (vs `0x56ab118a…` at block 14,339,115 — `starknet_getClassHashAt` at both heights confirms the upgrade sits between them) |
+| shape | private **self-transfer** of the whole note (SDK `.with(STRK).transfer({ recipient: self, amount })`) |
+| fee paid | 2.719346 STRK |
+
+Exactly two pool events, both under the new class:
+
+```
+NoteUsed        0x0247fc60d782e0094e7f98c47f277d92a3345d07a436f1f56b27a9b62be2322e
+  keys: [selector, 0x06f3769425be9f731773213fb6917264bfda572b2eeda180513d5cf5cbb71662]  # nullifier
+  data: []
+EncNoteCreated  0x023c20207be8b1ef4430c25eef8ce779c9745ebe04139555ae81bd4f8fdd6ec5
+  keys: [selector, 0x03aa1d44c8920593d29297e509a26445e2bc2a6389fa5e8d59fc2e5944553ecd]  # new note id
+  data: [0x00a96cff4545e1fd5b6771fc9548f3769994132036e0a644c941a140c49a5245]
+```
+
+**The nullifier in the event is `0x06f3769425be9f731773213fb6917264bfda572b2eeda180513d5cf5cbb71662`
+— bit-for-bit the value our client predicted for note `0x00ce526b…67ff`.** The nullifier
+formula is independently confirmed against the chain.
+
+The new note: id `0x03aa1d44c8920593d29297e509a26445e2bc2a6389fa5e8d59fc2e5944553ecd`,
+**3.000000 STRK**, created at block 14,340,785, `open = false`.
+
+Verified state afterwards, all OBSERVED (`verify-spend.mjs`):
+
+- `nullifier_exists(0x06f37694…1662)` → **true**
+- `get_note(old note)` still returns its packed value (notes are write-once; spentness lives
+  in `nullifiers`, not by clearing the note) — worth knowing for the indexer: **a spent note
+  is not erased**, so spent-state must be derived from `NoteUsed` / the nullifier map
+- `discoverNotes()` with the *same saved viewing key* now returns **exactly one** unspent
+  STRK note — the new one — and the old note is gone from the set
+
+Value flow (`decode-tx.mjs`): 2.000000 STRK from our account → fee collector `0x03e6c6f41…`
+(`collect_fee`, confirming Run 1's correction C3 also holds for non-deposit actions), then
+`NoteUsed`, then `EncNoteCreated`, then 2.719346 STRK gas. **No `Deposit`, no `Withdrawal`** —
+the shielded value never left the pool.
+
+## The storage-layout answer
+
+`storage-check.mjs` recomputes each slot from the Cairo storage declaration
+(`notes: Map<felt252, Note>`, `nullifiers: Map<felt252, bool>` at
+`packages/privacy/src/privacy.cairo:98,100`) with the ordinary Starknet map formula
+`pedersen(sn_keccak(var_name), key) mod (2²⁵¹−256)`, then reads it with
+`starknet_getStorageAt` at the block before and the block of each write. OBSERVED:
+
+| key | slot | @creation−1 | @creation | written by class |
+|---|---|---|---|---|
+| `notes[0x00ce526b…67ff]` | `0x02dbfb901e6081d2d1346e39f64247a66c4678e59abae160937cdb586f0db943` | `0x0` | `0x00cb93562e444a2f62b371b88d6be6350d7a019df3f3455fe4325ed78c514bb4` | `0x56ab118a…` (old) |
+| `notes[0x03aa1d44…3ecd]` | `0x02167d40d45099bcf87312a40bb87e26e0fda1e9b2d49a21be7b6a1b89e1ade8` | `0x0` | `0x00a96cff4545e1fd5b6771fc9548f3769994132036e0a644c941a140c49a5245` | **`0x7e2bbd7c…` (new)** |
+| `nullifiers[0x06f37694…1662]` | `0x05697b26bb433d4cc303e95e56272c40de9b576df6ad59568696d5ddd1e01d13` | `0x0` | `0x1` | **`0x7e2bbd7c…` (new)** |
+
+Every value read from the slot equals what the contract's own `get_note` /
+`nullifier_exists` view returns, and each slot flips from `0x0` to its value at exactly the
+creation block.
+
+**Conclusion (OBSERVED, not inferred): the note and nullifier storage layout is unchanged
+across the upgrade.** The same slot derivation locates a note written by the old class and a
+note written by the new one. A storage-walking indexer needs no change for class
+`0x7e2bbd7c…`. Note the scope: this proves it for `notes` and `nullifiers`, which is what
+discovery walks; `recipient_channels` / `subchannel_tokens` were not re-derived by hand, but
+`discoverNotes` resolving the new note through its channel exercises them end to end and
+succeeded.
+
+Aside: the `Note` struct's second slot (`slot + 1`, the `token` field) reads `0x0` for both
+notes, matching `get_note`'s `token=0x0` — the token is carried inside `packed_value`, not in
+a separate slot. Same under both classes.
+
+## Budget — it fit, with 0.29 STRK to spare
+
+The account held **6.391084 STRK** and the pool fee still had to come out of the *public*
+balance, so the allowance had to be re-established (Run 1 consumed all 5 STRK of it:
+3 deposit + 2 fee). Two adjustments made it fit:
+
+- **A transfer has no deposit**, so the approve only needs to cover the 2 STRK fee, not
+  `deposit + fee`.
+- **The `approve` was batched into the same transaction as `apply_actions`** —
+  `account.execute([approveCall, applyActionsCall], { tip: 0n, proof, proofFacts })`. This
+  works: the proof facts bind the pool's own action span, not the transaction's call list, so
+  a preceding ERC-20 call is invisible to the pool's proof check. It saved the ~0.055 STRK of
+  a separate approve tx and, more importantly, meant one estimate instead of two.
+
+OBSERVED numbers:
+
+| | |
+|---|---|
+| estimate | overall **6.102289** STRK, bounds ceiling **6.102289** STRK |
+| balance at validation | 6.391084 STRK — clears the ceiling by **0.288795 STRK** |
+| actual gas | **2.719346** STRK (again ~2.2× lower than the estimate, exactly as in Run 1) |
+| pool fee | 2.000000 STRK |
+| balance after | **1.671738** STRK |
+
+The script aborts with an explicit `SHORTFALL: balance X < required resource-bounds ceiling Y`
+before submitting if the ceiling ever exceeds the balance — a `DRY_RUN=1` pass was run first
+and cost nothing. No faucet accounts were created.
+
+## New facts, beyond Run 1's corrections
+
+**C12 — `collect_fee` charges the 2 STRK on *every* `apply_actions`, not just deposits.** Run
+1 established the fee comes from the caller's public balance; this run shows it applies to a
+pure note-to-note transfer with no `Deposit` action at all. Any pool interaction costs
+2 STRK public + gas. Budget accordingly: **~9 STRK of free public STRK per pool transaction**
+is a safe planning figure on Sepolia today (ceiling ~6.1–6.8 observed, fee 2, actual gas
+~2.7–3.0).
+
+**C13 — no screening attestation is minted for non-deposit actions, and none is needed.**
+`additional_data.signature` was **absent** on this prove response (present in Run 1), the SDK
+packed `Option::None`, and the contract accepted it. Consistent with the Cairo: screening is
+asserted only for `TransferFrom`-carrying action spans. Practical consequence: **transfer,
+withdraw and register do not depend on StarkWare's elliptic-proxy credentials** — only shield
+does. That is exactly the split `sepolia-write-path.md` Q3 predicted for a self-hosted
+prover, now confirmed from the hosted one's behaviour.
+
+**C14 — self-transfer is supported and warning-free.** `.transfer({ recipient: <own
+address>, amount })` built, proved and executed with `warnings: []` — no `USER_LINKAGE`
+warning, no contract rejection. It is the cheapest way to produce a `NoteUsed` +
+`EncNoteCreated` pair, so it is the right shape for spent-state fixtures.
+
+**C15 — a spent note's storage slot is not cleared.** `get_note(old note)` still returns its
+packed value after the spend. Spentness is *only* the `nullifiers` map / the `NoteUsed`
+event. An indexer that infers "unspent" from "slot is populated" would be wrong.
+
+**C16 — proving stayed fast and small post-upgrade**: 3.5 s, 227,886-byte proof, 9 proof
+facts, 15-felt `apply_actions` calldata (vs 59 for register+deposit). Proving block `head−9`
+(correction C7) applied unchanged.
+
+## Artifacts
+
+`data/sepolia/shield/` (gitignored) gained `spend.mjs` (the run, `SHAPE=transfer|withdraw`,
+`DRY_RUN=1` supported), `verify-spend.mjs`, `storage-check.mjs`,
+`last-spend-callandproof.json`, `dry1.log`, `spend1.log`. The key file
+`data/sepolia/viewing-key-strk20test.json` (mode 0600) gained a `transactions.spend_transfer`
+entry with the hash, block, block hash, tx_index, fee, spent note id, **nullifier**, new note
+id, new note enc data, proving block and `pool_class_hash_at_block`.
+
+## State after Run 2
+
+- Unspent shielded position: **one 3.000000 STRK STRK-note**,
+  `0x03aa1d44c8920593d29297e509a26445e2bc2a6389fa5e8d59fc2e5944553ecd`, created at block
+  14,340,785 under class `0x7e2bbd7c…`, discoverable with the saved viewing key.
+- Public balance **1.671738 STRK** — **not enough for another pool transaction** (needs
+  ~6.1 STRK of ceiling). `strk20test`'s faucet cooldown lifts ~2026-09-01T14:00Z; `fund1` /
+  `fund2` are deployed with ~0.097 STRK each and are on cooldown until roughly the same time.
+- The indexer now has fixtures for **both** classes in a 1,670-block window: a note creation
+  at 14,339,115 (old class), a class upgrade at 14,339,893, and a spend + note creation at
+  14,340,785 (new class).

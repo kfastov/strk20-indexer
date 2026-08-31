@@ -245,6 +245,42 @@ A synthetic test asserting this is worth something; the same thing happening
 unannounced, in production, during the run, is worth more. Recovery is
 `--allow-class 0x7e2bbd7c…` once the new ABI is diffed.
 
+## Session 7: spend + post-upgrade note, through our own pipeline
+
+A second transaction we made (`0x3d253f8a…`, block **14,340,785**, a private
+self-transfer) spent the first note and created a new one — under the *new*
+class, 892 blocks after the upgrade. Details in
+[sepolia-shield-run.md](sepolia-shield-run.md) Run 2.
+
+With `--allow-class 0x7e2bbd7c…` the server returned to `status: OK`,
+`decode_state: ok` — the documented recovery path, exercised against a real
+upgrade rather than a synthetic one. Then one incremental client sync:
+
+```
+note 0xce526b286fed962b9e3942771c5e519c69b8677dc24136ae380ba523a067ff  3.0 STRK  block 14339115  spent=True
+note 0x3aa1d44c8920593d29297e509a26445e2bc2a6389fa5e8d59fc2e5944553ecd  3.0 STRK  block 14340785  spent=False
+balances: 3.0 STRK
+```
+
+Three properties confirmed in one shot, all on data we created:
+
+1. **Spent-state flips on the right note.** The nullifier our client predicted
+   (`0x06f3769425be9f731773213fb6917264bfda572b2eeda180513d5cf5cbb71662`)
+   appeared verbatim in the on-chain `NoteUsed` event's `keys[1]` — an
+   independent confirmation of the nullifier formula, from the contract itself.
+2. **Discovery works across the upgrade.** The new note was written by the new
+   class and is found by the same unmodified engine over the same slot
+   derivation. The ABI diff said the events we consume are identical; this says
+   the *storage layout* is too, which no ABI could have told us.
+3. **The balance counts only the unspent note** — 3.0 STRK, not 6.0.
+
+**Indexer semantics worth pinning in a test:** a spent note's storage slot is
+**not cleared** — `get_note` still returns its packed value after the spend.
+Spentness lives only in `nullifiers` / `NoteUsed`. Anything inferring "unspent"
+from "slot is populated" would be wrong. Our engine gets this right because it
+reads nullifiers, but nothing in the suite currently pins it against a *live*
+spend.
+
 ## Network facts confirmed live (2026-08-30)
 
 - Mainnet l1_accepted at time of run: 14,108,361; the user's own
