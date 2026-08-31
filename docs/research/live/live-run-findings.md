@@ -375,6 +375,41 @@ sparse. `verify-root` stays the backstop that proves the result, and the fixture
 RPC needs a fault mode that returns a *plausible but wrong* page for a foreign
 token, so the suite can express this class of failure at all.
 
+## Session 10: the loss localized to the exact block — and the MPT proven
+
+Once retries made historical proofs available
+([proof-window.md](proof-window.md) §1), `verify-root --block` became a
+bisection tool. Run either side of the first block LIVE-8 dropped:
+
+```
+block 11263134:  verify-root OK
+                 storage_root 0x7e8ee0852af866d1b30685f5c1d1e6ac88a04f10e64f7373bbaff5fc04bffef
+block 11263135:  VERIFY-ROOT MISMATCH
+                 local 0x7e8ee0852af866d1b30685f5c1d1e6ac88a04f10e64f7373bbaff5fc04bffef
+                 chain 0x281ad37d29d947cacbaa701f6564f42b55ba236574e595f7fd4aff959a5b654
+```
+
+Two things fall out, and both matter more than the bug itself.
+
+**1. The MPT implementation is correct on real data at scale.** At block
+11,263,134 our mirror reproduces the chain's pool storage root **exactly** —
+a Pedersen Merkle-Patricia root over ~100,000 real mainnet slots, matching a
+proof served by the chain. Until now the module had only been checked against
+a live *membership* proof and small unit trees; root construction at scale was
+an open question. It is answered.
+
+**2. The divergence begins at exactly the block LIVE-8 dropped.** Our local
+root at 11,263,135 is byte-identical to our root at 11,263,134 — the mirror
+did not move, because it ingested nothing for that block — while the chain's
+root moved. The mirror was provably correct right up to the first lost block
+and wrong from it onward. That is the whole causal chain closed: unsound
+pagination → 139 dropped blocks → root divergence → the mismatch verify-root
+reported.
+
+It also demonstrates the intended debugging workflow: `verify-root --block`
+bisects a divergence to a single block without any special tooling, now that
+proofs answer at any depth.
+
 ## Network facts confirmed live (2026-08-30)
 
 - Mainnet l1_accepted at time of run: 14,108,361; the user's own
