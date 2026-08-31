@@ -94,8 +94,9 @@ const LANES: Record<Lane, LaneConfig> = {
  *   ./target/release/strk20 run --db data/sepolia/idx/strk20.db \
  *       --feed-dir data/sepolia/idx/feed --listen 127.0.0.1:8901 --network sepolia
  *
- * `?feed=` and `?network=` override both, so a run is a shareable URL. Neither
- * ever carries a key: see `keyFromFragment()`.
+ * `?feed=` and `?network=` override both, so a run is a shareable URL. Every
+ * URL parameter this page reads names a PUBLIC feed; none of them can carry a
+ * secret, and there is no URL position that accepts one.
  */
 let liveUrl = new URLSearchParams(location.search).get('feed')?.replace(/\/$/, '') ?? 'http://127.0.0.1:8901/feed';
 let liveNetwork: ChainProfile =
@@ -654,11 +655,30 @@ function cancelOp(): void {
 
 // ------------------------------------------------------------- rendering
 
+/**
+ * Coalesce on a FRAME, not on a microtask.
+ *
+ * `render()` rebuilds the whole page with `replaceChildren`. A microtask
+ * checkpoint happens at every `await`, so a microtask-coalesced render fired
+ * once per request — 610 full-page rebuilds during a cold sync, over a request
+ * list that is itself growing to 610 rows. That is O(n²), and it is paid inside
+ * the client's `fetch` phase, so it lands in the ONE number the demo exists to
+ * report.
+ *
+ * Measured on this machine, same browser, same server: the 607 epoch GETs take
+ * 642 ms raw; the demo attributed 165 s to the same fetches. The difference was
+ * entirely this function. A frame-coalesced render shows every request just the
+ * same — the panel is still the session's complete record — it simply stops
+ * rebuilding the DOM between them.
+ */
 let renderQueued = false;
+const scheduleFrame: (f: () => void) => void =
+  typeof requestAnimationFrame === 'function' ? (f) => void requestAnimationFrame(f) : queueMicrotask;
+
 function scheduleRender(): void {
   if (renderQueued) return;
   renderQueued = true;
-  queueMicrotask(() => {
+  scheduleFrame(() => {
     renderQueued = false;
     render();
   });
@@ -920,27 +940,21 @@ function renderKeyField(): HTMLElement {
 }
 
 /**
- * `#vk=<64 hex>&addr=<0x…>` — convenience for a demo run, and the ONLY URL
- * position a key may occupy. A fragment is never sent to a server, never
- * written to an access log and never included in a Referer. It is stripped
- * from `location` the moment it is read, so a screen recording of the address
- * bar does not carry it either, and it is never persisted: reloading the page
- * asks again.
+ * There is deliberately NO way to put a viewing key in the URL.
+ *
+ * A `#fragment` is never sent to a server, so it looks safe, and it is not.
+ * This page gets screen-shared, recorded and screenshotted; a key sitting in
+ * the address bar during a demo whose entire claim is "your key never leaves
+ * your machine" is the worst frame we could ship, and it survives in browser
+ * history and in anything that captures a URL.
+ *
+ * The decisive reason is the second one. The leak scanner below inspects
+ * REQUEST SURFACES — it cannot see the address bar. So the page could render
+ * "0 hits · N surfaces" in green with a viewing key visible three centimetres
+ * above it, and both statements would be true. A guarantee whose own
+ * instrument cannot see the violation is not a guarantee. The key is typed
+ * into the field and nowhere else.
  */
-function keyFromFragment(): void {
-  const frag = location.hash.slice(1);
-  if (!frag) return;
-  const p = new URLSearchParams(frag);
-  const vk = p.get('vk');
-  const addr = p.get('addr');
-  history.replaceState(null, '', location.pathname + location.search);
-  if (!vk || !addr) return;
-  // The success path is silent here: setIdentity already logs the identity it
-  // installed, and a second line would say nothing the first did not.
-  if (!useKey(vk, addr, 'key from the URL fragment')) {
-    record(state, 'identity', { text: 'bad key or address in URL fragment', status: 'warn' });
-  }
-}
 
 // ---------------------------------------------------------------- helpers
 
@@ -1029,7 +1043,6 @@ async function boot(): Promise<void> {
     state.feedUrl = feedUrl();
   }
   client = makeClient();
-  keyFromFragment();
   render();
 
   let flag: string | null = null;

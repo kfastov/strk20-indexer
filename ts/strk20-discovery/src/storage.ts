@@ -38,6 +38,14 @@ export interface StorageAdapter {
   metaSet(key: string, value: unknown): Promise<void>;
   artifactGet(key: string): Promise<{ hash: string; zbytes: Uint8Array } | null>;
   artifactPut(key: string, value: { hash: string; zbytes: Uint8Array }): Promise<void>;
+  /**
+   * Evict one row. §4.5's invalidation table needs a per-row eviction for
+   * `artifacts` the same way it needs `stateClear()` for the folded blob:
+   * without it a single row that fails its hash poisons every later sync, and
+   * the only remedy is `artifactClear()`, which throws away a good cache to
+   * remove one bad entry.
+   */
+  artifactDelete(key: string): Promise<void>;
   artifactClear(): Promise<void>;
   stateGet(): Promise<{ meta: StateMeta; frames: Uint8Array[] } | null>;
   statePut(meta: StateMeta, frames: Uint8Array[]): Promise<void>;
@@ -78,6 +86,9 @@ export class MemoryStorage implements StorageAdapter {
   }
   async artifactPut(key: string, value: { hash: string; zbytes: Uint8Array }): Promise<void> {
     this.#artifacts.set(key, value);
+  }
+  async artifactDelete(key: string): Promise<void> {
+    this.#artifacts.delete(key);
   }
   async artifactClear(): Promise<void> {
     this.#artifacts.clear();
@@ -164,6 +175,9 @@ export class IdbStorage implements StorageAdapter {
         key,
       ),
     );
+  }
+  async artifactDelete(key: string): Promise<void> {
+    await req(this.#tx('artifacts', 'readwrite').delete(key));
   }
   async artifactClear(): Promise<void> {
     await req(this.#tx('artifacts', 'readwrite').clear());
@@ -254,16 +268,42 @@ export async function openStorage(
   }
 }
 
-export async function deleteDatabase(name: string): Promise<'deleted' | 'blocked' | 'unavailable'> {
+/**
+ * Delete the database, and report what ACTUALLY happened.
+ *
+ * `onblocked` is not a terminal event. It fires when another connection is
+ * still open, and the request stays live: when that connection closes, the
+ * delete completes and `onsuccess` fires. Treating `blocked` as the outcome
+ * even after a later `onsuccess` was reporting a deletion that had in fact
+ * happened as a failure — and since `resetCache()` opens the database
+ * immediately before this runs, that raced on almost every second cold run,
+ * which then refused to start. The database was gone; only the answer was
+ * wrong.
+ *
+ * So: `onsuccess` means deleted, whenever it arrives. `blocked` is returned
+ * only when the request is still waiting after a grace period, which is the
+ * real "another tab holds it" case a caller must not treat as a cold store.
+ */
+export async function deleteDatabase(
+  name: string,
+  blockedGraceMs = 3000,
+): Promise<'deleted' | 'blocked' | 'unavailable'> {
   const idb = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
   if (!idb) return 'unavailable';
   return new Promise((resolve) => {
-    let blocked = false;
+    let settled = false;
+    const done = (v: 'deleted' | 'blocked'): void => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
     const r = idb.deleteDatabase(name);
-    r.onsuccess = () => resolve(blocked ? 'blocked' : 'deleted');
-    r.onerror = () => resolve('blocked');
+    r.onsuccess = () => done('deleted');
+    r.onerror = () => done('blocked');
     r.onblocked = () => {
-      blocked = true;
+      // Still waiting on another connection. Give it a moment to close before
+      // calling this a failure; `onsuccess` above wins if it lands first.
+      setTimeout(() => done('blocked'), blockedGraceMs);
     };
   });
 }

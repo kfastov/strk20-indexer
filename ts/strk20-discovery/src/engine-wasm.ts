@@ -60,6 +60,7 @@ import type {
   StepDone,
   StepFetch,
 } from './engine.ts';
+import type { ChainProfile } from './types.ts';
 
 // --------------------------------------------------------------- the module
 
@@ -80,7 +81,7 @@ interface WasmEngine {
   stage_manifest(manifestJson: string): void;
   stage_snapshot(e: bigint, zst: Uint8Array, payload: Uint8Array): void;
   stage_snapshot_anchor(e: bigint, json: Uint8Array): void;
-  stage_storage_proof(block: bigint, proofJson: string, blockHashHex: string): void;
+  stage_storage_proof(block: bigint, proofJson: string): void;
   free(): void;
 }
 
@@ -175,6 +176,8 @@ interface RawInfo {
   l1_accepted: number;
   slots: number;
   tail_generation: number;
+  /** The trust grade, DECIDED BY THE MODULE. Never re-derived here. */
+  verified: 'anchored' | 'server-asserted' | 'replayed';
   engine_version: string;
 }
 
@@ -232,6 +235,16 @@ class WasmEngineAdapter implements Engine {
   readonly #memory: WebAssembly.Memory;
   #inner: WasmEngine | null;
   #genesisJson: string | null;
+  /** Built by `Engine.load` from a state blob, so its artifacts are staged. */
+  readonly #restored: boolean;
+  /**
+   * The chain identity the CALLER pinned, before a byte was requested. Checked
+   * against the feed's own `genesis.json` in `sync_supply`, which is what
+   * closes trust-on-first-use (§3.10 item 3): an empty mirror must not adopt
+   * whatever chain the feed declares — and this engine takes its feed base
+   * from a URL parameter in the demo.
+   */
+  readonly #profile: ChainProfile;
 
   // -- sync state
   #manifestJson: string | null = null;
@@ -254,11 +267,19 @@ class WasmEngineAdapter implements Engine {
   /** Previous report per owner, so `added`/`spent` are a real diff. */
   #seen = new Map<string, { notes: Set<string>; spent: Set<string> }>();
 
-  constructor(glue: WasmGlue, memory: WebAssembly.Memory, inner: WasmEngine | null, genesisJson: string | null) {
+  constructor(
+    glue: WasmGlue,
+    memory: WebAssembly.Memory,
+    inner: WasmEngine | null,
+    genesisJson: string | null,
+    profile: ChainProfile,
+  ) {
     this.#glue = glue;
     this.#memory = memory;
     this.#inner = inner;
     this.#genesisJson = genesisJson;
+    this.#restored = inner !== null;
+    this.#profile = profile;
   }
 
   #call<T>(f: () => T): T {
@@ -314,16 +335,24 @@ class WasmEngineAdapter implements Engine {
   }
 
   /**
-   * The grade the mirror has EARNED, by the module's own rule: a fold from
-   * genesis is `replayed`; a snapshot start grounded only by a feed-published
-   * anchor is `server-asserted`; `anchored` needs a consumed storage proof,
-   * which this build never stages (see `sync_supply_rpc`). `discover`'s report
-   * is the authority and the client prefers it — this is the pre-discovery
-   * answer for `StepDone`.
+   * The grade the mirror has EARNED — **read from the module**, not computed
+   * here.
+   *
+   * It used to be computed here, as `snapshot_basis === null ? 'replayed' :
+   * 'server-asserted'`, which made `'anchored'` unreachable by construction: no
+   * input to this adapter could ever produce it, while the demo displayed the
+   * result labelled `provenance: 'measured'`. Two copies of a trust rule is one
+   * copy too many, and the copy that could not express the strongest grade was
+   * the one on screen. `Engine::info()` now carries `verified` and this reads
+   * it.
+   *
+   * Note what this does NOT mean: nothing in `ts/` stages a storage proof, so
+   * the module will not report `'anchored'` on this path. That is a wiring gap
+   * (see `sync_supply_rpc`), and the honest way to show it is to relay the
+   * module's own answer rather than to hard-code the same conclusion here.
    */
   #grade(): 'anchored' | 'server-asserted' | 'replayed' {
-    const basis = this.#info()?.snapshot_basis ?? null;
-    return basis === null ? 'replayed' : 'server-asserted';
+    return this.#info()?.verified ?? 'replayed';
   }
 
   // ------------------------------------------------------------------ sync
@@ -391,7 +420,14 @@ class WasmEngineAdapter implements Engine {
 
     switch (step.artifact) {
       case 'genesis': {
-        this.#genesisJson = dec.decode(served!);
+        const json = dec.decode(served!);
+        // BEFORE the engine exists. Everything downstream is checked against
+        // this document by the module, so a genesis that is not ours makes the
+        // whole fold a self-consistent fold of somebody else's chain — folded
+        // correctly, reported `replayed`, and about nothing the caller asked
+        // for. §3.10 item 3.
+        checkGenesisAgainstProfile(json, this.#profile);
+        this.#genesisJson = json;
         this.#inner = this.#call(() => new this.#glue.Engine(this.#genesisJson!));
         break;
       }
@@ -456,6 +492,30 @@ class WasmEngineAdapter implements Engine {
   #planFromManifest(): void {
     const m = this.#manifest!;
     const info = this.#info()!;
+
+    // A RESTORED engine cannot be planned for yet. `Engine.load` re-stages
+    // bytes without folding them, so `info()` still reports `last_epoch: null`
+    // and an epoch plan built here would ask for all 607 again — served from
+    // IndexedDB, but re-read, re-inflated and re-staged for nothing.
+    //
+    // So fetch only the head, fold what the blob already carries, and let
+    // `#fold`'s catch-up round plan the epochs the manifest has ABOVE that.
+    // The head must be staged before that first fold rather than after: with
+    // no tail the mirror's head is 0, the §11.3 reachability walk finds no
+    // anchor at or below it, and a snapshot-started mirror would be rejected
+    // as ungrounded and silently fall back to a full replay.
+    if (this.#restored && info.last_epoch === null) {
+      this.#queue.push({
+        artifact: 'head',
+        path: '/head.ndjson',
+        optional: false,
+        compressed: false,
+        sha256: null,
+        reason: 'the tail, before folding what the restored blob carries',
+      });
+      return;
+    }
+
     const last = info.last_epoch ?? -1;
 
     const wantSnapshot =
@@ -652,7 +712,12 @@ class WasmEngineAdapter implements Engine {
     // blob, chunked so IndexedDB is not asked to hold one 20 MB value.
     const frames: Uint8Array[] = [enc.encode(this.#genesisJson ?? '')];
     for (let off = 0; off < blob.length; off += FRAME_BYTES) {
-      frames.push(blob.subarray(off, Math.min(off + FRAME_BYTES, blob.length)));
+      // `slice`, NOT `subarray`. A subarray is a view onto the whole blob, and
+      // IndexedDB's structured clone copies the view's entire backing buffer —
+      // so three 4 MB "frames" over one 10 MB blob would store 30 MB and read
+      // 30 MB back. `slice` copies once here so each frame owns only its own
+      // bytes.
+      frames.push(blob.slice(off, Math.min(off + FRAME_BYTES, blob.length)));
     }
     this.#exportFrames = frames;
     return frames.length;
@@ -777,6 +842,61 @@ class WasmEngineAdapter implements Engine {
 
 // ------------------------------------------------------------------ helpers
 
+/** `genesis.json` as the feed publishes it — the four fields that are identity. */
+interface GenesisDoc {
+  chain_id?: unknown;
+  pool?: unknown;
+  genesis_block?: unknown;
+  epoch_size?: unknown;
+}
+
+/**
+ * The trust-on-first-use gate, ported from `engine-mock.ts` (which had it and
+ * this adapter did not, on the engine that ships by default and whose feed base
+ * comes from a `?feed=` URL parameter).
+ *
+ * Identity first, then geometry — a feed that agrees about the chain and the
+ * pool but not about where epochs start is still not the feed this caller
+ * pinned, and folding it would produce a mirror indexed against different block
+ * boundaries.
+ */
+export function checkGenesisAgainstProfile(genesisJson: string, profile: ChainProfile): void {
+  let g: GenesisDoc;
+  try {
+    g = JSON.parse(genesisJson) as GenesisDoc;
+  } catch {
+    throw new Strk20Error('FEED_MALFORMED', 'genesis.json is not JSON');
+  }
+  if (g.chain_id !== profile.chainId || !feltEq(g.pool, profile.pool)) {
+    throw new Strk20Error('CHAIN_MISMATCH', 'feed genesis does not match the expected chain profile', {
+      expected_chain_id: profile.chainId,
+      got_chain_id: String(g.chain_id ?? ''),
+      expected_pool: profile.pool,
+      got_pool: String(g.pool ?? ''),
+    });
+  }
+  if (g.genesis_block !== profile.genesisBlock || g.epoch_size !== profile.epochSize) {
+    throw new Strk20Error('CHAIN_MISMATCH', 'feed genesis disagrees with the profile geometry', {
+      expected_genesis_block: profile.genesisBlock,
+      got_genesis_block: Number(g.genesis_block ?? -1),
+      expected_epoch_size: profile.epochSize,
+      got_epoch_size: Number(g.epoch_size ?? -1),
+    });
+  }
+}
+
+/**
+ * Felt equality over hex strings. `0x040f…` and `0x40f…` are the same address
+ * and the feed is under no obligation to pick the same spelling the profile
+ * did — comparing the strings would reject an honest feed, and padding
+ * differences are exactly how a real one differs.
+ */
+function feltEq(a: unknown, b: unknown): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const norm = (s: string) => s.trim().toLowerCase().replace(/^0x/, '').replace(/^0+/, '');
+  return /^0x[0-9a-fA-F]+$/.test(a.trim()) && /^0x[0-9a-fA-F]+$/.test(b.trim()) && norm(a) === norm(b);
+}
+
 function capOf(p: Planned): number | null {
   if (!p.compressed) return null;
   return p.artifact === 'snapshot' ? SNAPSHOT_CAP : EPOCH_CAP;
@@ -827,18 +947,28 @@ export function wasmEngineFactory(opts: WasmEngineOptions): EngineFactory {
       'still key-blind, but asserted by the wrapper rather than proved by the module.',
 
     async create(profileJson: string): Promise<Engine> {
-      void profileJson;
       // No engine yet: `Engine::new` needs the FETCHED genesis.json, and this
-      // factory has no network. `sync_begin` fetches it as step 0.
+      // factory has no network. `sync_begin` fetches it as step 0 — and the
+      // adapter checks it against this profile before constructing anything.
+      const profile = JSON.parse(profileJson) as ChainProfile;
       const { glue, memory } = await boot();
-      return new WasmEngineAdapter(glue, memory, null, null);
+      return new WasmEngineAdapter(glue, memory, null, null, profile);
     },
 
     async load(profileJson: string, frames: readonly Uint8Array[]): Promise<Engine | null> {
-      void profileJson;
+      const profile = JSON.parse(profileJson) as ChainProfile;
       const { glue, memory } = await boot();
       if (frames.length < 2) return null;
       const genesisJson = dec.decode(frames[0]!);
+      // A persisted blob is a cache, and a cache is not evidence. The genesis
+      // it carries is checked against the pinned profile exactly as a freshly
+      // fetched one would be — otherwise a poisoned or stale IndexedDB row
+      // reintroduces on reload the identity hole the network path closes.
+      try {
+        checkGenesisAgainstProfile(genesisJson, profile);
+      } catch {
+        return null; // §4.5: a foreign blob is a cache miss, and deleting it is safe.
+      }
       const total = frames.slice(1).reduce((n, f) => n + f.length, 0);
       const blob = new Uint8Array(total);
       let off = 0;
@@ -848,7 +978,7 @@ export function wasmEngineFactory(opts: WasmEngineOptions): EngineFactory {
       }
       try {
         const inner = glue.Engine.load(blob, genesisJson);
-        return new WasmEngineAdapter(glue, memory, inner, genesisJson);
+        return new WasmEngineAdapter(glue, memory, inner, genesisJson, profile);
       } catch (e) {
         const err = Strk20Error.fromModuleJson(e);
         // §4.5: a blob that will not load is a cache miss, and deleting it is

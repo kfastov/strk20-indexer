@@ -19,7 +19,7 @@
  *     grade we cannot reach.
  */
 
-import { decompress } from 'fzstd';
+import { Decompress } from 'fzstd';
 import { assertKey, zeroize } from './account.ts';
 import { Strk20Error } from './errors.ts';
 import type {
@@ -335,7 +335,18 @@ export class KeylessClient implements DiscoveryClient {
         // sees the `.zst`, so this is the only place that check can happen;
         // running it before the inflate is what makes it a defence rather than
         // a post-mortem.
-        verifyServedHash(got.compressed, fetchStep.sha256, fetchStep.path);
+        try {
+          verifyServedHash(got.compressed, fetchStep.sha256, fetchStep.path);
+        } catch (e) {
+          // §4.5's invalidation table is honoured for the folded blob and was
+          // not for `artifacts`: a row that fails its hash was left in place,
+          // so one bad read became a permanent sync failure until somebody
+          // called `resetCache()`. Bytes that came off the wire are a feed
+          // defect and must be seen; bytes that came out of IndexedDB are OUR
+          // copy going bad, and the copy is what has to go.
+          if (got.source === 'idb-cache') await storage.artifactDelete(artifactKey(fetchStep));
+          throw e;
+        }
         payload = inflateWithin(got.compressed, cap, fetchStep.path);
         phases.decompress += nowMs() - td;
       }
@@ -354,8 +365,14 @@ export class KeylessClient implements DiscoveryClient {
       // Design R: the bytes exactly as served are what gets persisted, so a
       // reload re-runs the same verification ladder over the same bytes the
       // network would have delivered.
+      // The hash recorded is the one these bytes were VERIFIED against a few
+      // lines above — never a hash nothing checked. A row that carries the
+      // hash it was admitted under can be rejected cheaply on a later read.
       if (got.source === 'network' && got.compressed && cacheable(fetchStep.artifact)) {
-        await storage.artifactPut(artifactKey(fetchStep), { hash: '', zbytes: got.compressed });
+        await storage.artifactPut(artifactKey(fetchStep), {
+          hash: fetchStep.sha256 ?? '',
+          zbytes: got.compressed,
+        });
       }
     }
   }
@@ -379,7 +396,13 @@ export class KeylessClient implements DiscoveryClient {
     if (this.#opts.persist !== 'folded' && cacheable(step.artifact)) {
       const t0 = nowMs();
       const stored = await storage.artifactGet(artifactKey(step));
-      if (stored) {
+      // A row whose recorded hash is not the one this step expects is not this
+      // artifact — a stale epoch under a reused key, or a row written before
+      // the hash was recorded. Cheaper to reject here than to inflate it and
+      // find out, and rejecting is a cache miss, not an error.
+      if (stored && step.sha256 && stored.hash !== step.sha256) {
+        await storage.artifactDelete(artifactKey(step));
+      } else if (stored) {
         cacheRecord(
           this.#net,
           { base: this.#opts.feedUrl, path: step.path, artifact: step.artifact, purpose: 'feed' },
@@ -424,11 +447,13 @@ export class KeylessClient implements DiscoveryClient {
     await Promise.all(side);
     phases.fetch += nowMs() - tf;
 
-    if (out.bytes && cacheable(step.artifact)) {
-      for (const [path, s] of staged) {
-        if (s.source === 'network') await storage.artifactPut(pathKey(path), { hash: '', zbytes: s.compressed });
-      }
-    }
+    // Prefetch bytes are NOT persisted here. They used to be, with `hash: ''`
+    // — bytes nothing had hash-checked, written into the cache under the
+    // manifest's key, which is a hostile feed's cheapest way to leave a
+    // permanent artifact behind. A hint that gets consumed goes through the
+    // ordinary path above and is persisted there, after `verifyServedHash`; a
+    // hint that does not get consumed was never verified and has no business
+    // outliving the tab.
     return { compressed: out.bytes, status: out.status, etag: out.etag, source: 'network' };
   }
 
@@ -886,17 +911,40 @@ function verifyServedHash(compressed: Uint8Array, expected: string | null, path:
   }
 }
 
-function inflateWithin(compressed: Uint8Array, cap: number, path: string): Uint8Array {
+export function inflateWithin(compressed: Uint8Array, cap: number, path: string): Uint8Array {
   // TypeScript's SOLE obligation here is the cap (§4.7). The module hashes both
   // buffers, so a decoder bug or a substituted payload becomes a loud hash
   // mismatch inside the engine — this is a resource bound, not a verification.
-  const out = decompress(compressed);
-  if (out.length > cap) {
-    throw new Strk20Error('DECOMPRESS_LIMIT', 'inflated artifact exceeds its declared cap', {
-      artifact: path,
-      cap,
-      got: out.length,
-    });
+  //
+  // It has to bound what gets ALLOCATED. The one-shot `decompress()` reads the
+  // frame header's declared content size and allocates that up front, so a
+  // `if (out.length > cap)` after the call is a post-mortem: a frame declaring
+  // a terabyte has already asked for a terabyte by the time the comparison
+  // runs, and a hostile feed only has to publish a manifest whose `zst` hash
+  // matches the bomb (the hash check upstream passes, because the bomb IS the
+  // bytes it published). The streaming decoder allocates only the frame's
+  // window and hands output over block by block, so the cap is enforced while
+  // inflating and the run stops at the first block that crosses it.
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const d = new Decompress((chunk) => {
+    total += chunk.length;
+    if (total > cap) {
+      throw new Strk20Error('DECOMPRESS_LIMIT', 'inflated artifact exceeds its declared cap', {
+        artifact: path,
+        cap,
+        got: total,
+      });
+    }
+    if (chunk.length) chunks.push(chunk);
+  });
+  d.push(compressed, true);
+  if (chunks.length === 1) return chunks[0]!;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
   }
   return out;
 }

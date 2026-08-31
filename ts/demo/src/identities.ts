@@ -18,7 +18,15 @@
 import type { Account } from 'strk20-discovery';
 import FIXTURE from '../fixtures/replay-identities.json' with { type: 'json' };
 
-export const ALLOW_PASTE = import.meta.env.DEV;
+/**
+ * The build flag the note above says this costs. `dev` has it; a published
+ * build does not, unless someone deliberately sets `VITE_ALLOW_PASTE=1` — which
+ * is how you produce a local static bundle (for a recorded demo, or for testing
+ * the real path without a dev server) that can still take a real key.
+ *
+ * It must stay OFF for anything deployed under our name.
+ */
+export const ALLOW_PASTE = import.meta.env.DEV || import.meta.env.VITE_ALLOW_PASTE === '1';
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);

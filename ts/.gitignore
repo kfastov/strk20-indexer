@@ -1,0 +1,7 @@
+# Build output. Tracking it broke `scripts/check-invariants.py` check 4: the
+# demo bundle inlines the fixture viewing keys, so the "no secrets in tracked
+# files" gate went permanently red and stopped being readable. A check that is
+# always red cannot catch the run where the key material is real.
+node_modules/
+dist/
+dist-dev/
