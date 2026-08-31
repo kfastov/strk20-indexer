@@ -44,5 +44,30 @@ futures = "0.3"
 tempfile = "3"
 zeroize = "1"
 
+# Upstream fork gate — see docs/ops/fork.md and patches/discovery-core-providers-gate.patch.
+#
+# The fork branch `strk20/providers-gate-74841ca` is the pinned upstream rev
+# 74841caf0466d122117945e28ed983e2864c8fc1 plus exactly one commit that makes
+# `starknet-providers` an optional dependency of `discovery-core` behind a
+# default-on `providers` feature. Zero lines under `discovery-core/src` differ
+# from upstream; CI job `fork-delta-check` enforces that mechanically.
+#
+# Purpose: with `default-features = false` a wasm consumer drops 24 crates from
+# the wasm32-unknown-unknown graph (142 -> 118), including `starknet-providers`,
+# `reqwest`, `web-sys`, `wasm-bindgen-futures` and the `ethereum-types` stack.
+# NOTE, measured 2026-08-31: `discovery-core` already builds for
+# wasm32-unknown-unknown with default features. This is a dependency-surface
+# reduction, not a fix for a broken target — do not claim otherwise.
+# The feature is default-on, so this patch is a no-op for the native build.
+#
+# ONE workspace-wide patch, never a split pin: two `[patch]` entries resolving
+# to two `discovery-core` sources would put two incompatible `Felt` identities
+# in one workspace (see docs/spec/architecture.md §3).
+#
+# Remove this section and `patches/` in a single commit once the upstream PR
+# merges.
+[patch."https://github.com/starkware-libs/starknet-privacy.git"]
+discovery-core = { git = "https://github.com/kfastov/starknet-privacy.git", rev = "e7f0177aab66a9c79699c358b728f9b0324f437e" }
+
 [profile.release]
 lto = "thin"

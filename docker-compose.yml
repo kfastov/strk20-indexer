@@ -1,0 +1,85 @@
+# Two independent indexers, one per network. Nothing is shared between them:
+# separate volumes, separate published ports, separate health. A Sepolia feed
+# and a mainnet feed are different chains with different pools, and an
+# instance that mixed them would be publishing a lie — `mirror-pull` already
+# refuses a manifest whose `chain_id` disagrees with its own profile.
+#
+# Every knob below is an env wrapper over a flag that already exists; nothing
+# here is a compose-only concept. Put overrides in a `.env` file next to this
+# one (it is gitignored) or export them in the shell.
+#
+#   docker compose up -d --build
+#   docker compose logs -f mainnet
+#   curl -s localhost:8080/health | jq
+#
+# Ports bind to 127.0.0.1 by default. Putting the indexer straight onto a
+# public interface is a deployment decision, not a default — see
+# docs/ops/hosting.md.
+
+services:
+  mainnet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strk20-indexer:latest
+    # `--network mainnet` selects the whole verified profile: pool address,
+    # genesis block, chain id, epoch size and the decoder class map. The RPC
+    # URLs below default to the profile's own endpoints, so an operator who
+    # sets nothing at all still gets a working mainnet instance.
+    environment:
+      STRK20_NETWORK: mainnet
+      STRK20_RPC_URL: ${MAINNET_RPC_URL:-https://rpc.starknet.lava.build}
+      STRK20_RPC_FALLBACK: ${MAINNET_RPC_FALLBACK:-https://starknet.publicnode.com}
+      RUST_LOG: ${RUST_LOG:-info}
+    # `--allow-class` has no env binding in the CLI, so it is interpolated
+    # into the argument list instead. Empty by default: the mainnet profile
+    # already carries both classes the pool has ever run. Set
+    # MAINNET_ALLOW_CLASS="--allow-class 0x..." after an upgrade the profile
+    # does not know about yet, to keep decoding instead of degrading.
+    command: run --listen 0.0.0.0:8080 ${MAINNET_ALLOW_CLASS:-}
+    ports:
+      - "${MAINNET_BIND:-127.0.0.1}:${MAINNET_PORT:-8080}:8080"
+    volumes:
+      - mainnet-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # `/health` reports UNHEALTHY until the first ingest cycle writes a head,
+      # and on a cold mainnet start that first cycle IS the backfill (~70 min
+      # measured). A shorter start period would just mean staring at a red
+      # container that is working correctly.
+      start_period: 90m
+
+  sepolia:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strk20-indexer:latest
+    # The real profile, not a pile of hand-copied hashes: `--network sepolia`
+    # carries the Sepolia pool, its genesis block 8_271_125 and all six class
+    # hashes the pool has run, each verified on-chain
+    # (docs/research/live/sepolia-abi-compat.md).
+    environment:
+      STRK20_NETWORK: sepolia
+      STRK20_RPC_URL: ${SEPOLIA_RPC_URL:-https://starknet-sepolia-rpc.publicnode.com}
+      STRK20_RPC_FALLBACK: ${SEPOLIA_RPC_FALLBACK:-https://rpc.starknet-testnet.lava.build}
+      RUST_LOG: ${RUST_LOG:-info}
+    command: run --listen 0.0.0.0:8080 ${SEPOLIA_ALLOW_CLASS:-}
+    ports:
+      - "${SEPOLIA_BIND:-127.0.0.1}:${SEPOLIA_PORT:-8081}:8080"
+    volumes:
+      - sepolia-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90m
+
+volumes:
+  mainnet-data:
+  sepolia-data:

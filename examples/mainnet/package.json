@@ -1,0 +1,12 @@
+{
+  "name": "strk20-mainnet-examples",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Full STRK20 privacy-pool lifecycle on Starknet mainnet, headless.",
+  "engines": { "node": ">=24" },
+  "dependencies": {
+    "@starkware-libs/starknet-privacy-sdk": "file:./vendor/starknet-privacy-sdk",
+    "starknet": "10.5.0"
+  }
+}

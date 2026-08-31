@@ -1,0 +1,40 @@
+# Build context = the sources cargo needs, and nothing else.
+#
+# `target/`, `data/` and `examples/` are the three that matter. `data/` alone is
+# ~600 MB of live mainnet + Sepolia feed and databases, and shipping any of them
+# into the context would make every build upload them to the daemon.
+#
+# `examples/` is excluded for a second reason on top of its 515 MB (a vendored
+# starknet-privacy clone plus node_modules): the demo scripts write operator key
+# material to `examples/*/keystore/`, gitignored but still present on disk. The
+# `COPY . .` below would bake that into the *builder* stage's layer, which is
+# recoverable with `--target builder`, a buildx cache export, or `docker save`,
+# even though the runtime stage copies only the binary. Nothing under
+# `examples/` is a cargo workspace member, so the build never needs it.
+
+target/
+data/
+examples/
+.git/
+.gitignore
+.env
+*.log
+
+# Docs and notes are not compiled.
+docs/
+README.md
+LICENSE
+
+# Not excluded, on purpose:
+#   Cargo.lock  — the build runs `--locked` against it
+#   crates/     — every workspace member's manifest must exist for `-p` to
+#                 resolve the workspace, even though only `strk20-indexerd`
+#                 is compiled
+#   fixtures/   — only referenced from `#[cfg(test)]` code, so the release
+#                 build never opens it, but at 44 KB it is cheaper to keep
+#                 than to have `cargo test` inside the image fail to compile
+
+# Anything docker-related is read by the daemon, not copied into the image.
+Dockerfile
+.dockerignore
+docker-compose.yml

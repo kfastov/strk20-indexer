@@ -580,7 +580,7 @@ dependencies = [
 [[package]]
 name = "discovery-core"
 version = "0.1.0"
-source = "git+https://github.com/starkware-libs/starknet-privacy.git?tag=CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08#74841caf0466d122117945e28ed983e2864c8fc1"
+source = "git+https://github.com/kfastov/starknet-privacy.git?rev=e7f0177aab66a9c79699c358b728f9b0324f437e#e7f0177aab66a9c79699c358b728f9b0324f437e"
 dependencies = [
  "async-trait",
  "futures",

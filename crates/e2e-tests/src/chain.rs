@@ -81,9 +81,11 @@ impl FixtureChain {
                 blk.deployed_class = Some(Felt::from_hex(KNOWN_CLASS).unwrap());
             }
             if i == 1 {
-                // Three events on one block (> the fixture RPC's forced page
-                // size of 2): regression net for the single-page per-block
-                // event truncation found in review.
+                // Three events on one block: a block whose events do not fit
+                // in a two-event page. It was the regression net for the
+                // single-page per-block event truncation found in review, and
+                // under LIVE-8 it is also the block that decides whether a
+                // scan can answer every window in one page (rpc_server.rs).
                 for extra in 0..2u64 {
                     blk.events.push(FxEvent {
                         keys: vec![

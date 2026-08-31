@@ -44,13 +44,14 @@ pub struct ManifestEpoch {
     pub anchor: Option<EpochAnchor>,
 }
 
-/// Snapshot entry (consumer-path.md §1.8, as amended by §11.1).
+/// Snapshot entry (consumer-path.md §1.8, §1.3, as corrected by §12).
 ///
-/// There is deliberately NO `anchor` object: a storage proof at a snapshot's
-/// basis block cannot be obtained from any public provider (the window is
-/// ~1024 blocks, a basis block is thousands of blocks old at cut time), so a
-/// schema that required one would publish no snapshots at all. Grounding is
-/// the §11.3 reachability check against `anchors.ndjson` instead.
+/// §11.1 struck the `anchor` object out on the measurement that a storage
+/// proof at a snapshot's basis block cannot be obtained. That measurement was
+/// a bisection over a nondeterministic predicate and is RETRACTED: deep proofs
+/// answer for any block on retry (docs/research/live/proof-window.md §1), so
+/// §1.3's required anchor is reinstated as the PRIMARY grounding, with the
+/// §11.3 reachability walk kept as the fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSnapshot {
     pub e: u64,
@@ -66,6 +67,35 @@ pub struct ManifestSnapshot {
     pub bytes: u64,
     pub slots: u64,
     pub storage_root: String,
+    /// §1.3 / §12 point 1 — the chain-bound anchor at the basis block itself,
+    /// backed by the stored proof at `snapshots/{e:08}.anchor.json`. `null`
+    /// when no proof for the basis could be obtained.
+    #[serde(default)]
+    pub anchor: Option<EpochAnchor>,
+    /// §12 B4 — how this snapshot is grounded: `"basis-anchor"` (the proof at
+    /// the basis block) or `"reachability"` (the §11.3 walk to a published
+    /// anchor at or above it). Publication is the SERVER's decision and the
+    /// manifest is its only published record; a client needs it to know
+    /// whether the reachability walk is its primary check or a fallback.
+    /// An absent or unrecognised value reads as `"reachability"`, the
+    /// conservative half — reachability runs either way.
+    #[serde(default = "grounding_reachability")]
+    pub grounding: String,
+}
+
+/// §12 B4 fallback grounding, and the default for a feed published before the
+/// field existed.
+pub const GROUNDING_REACHABILITY: &str = "reachability";
+/// §12 B4 primary grounding: a chain-bound proof at the basis block.
+pub const GROUNDING_BASIS_ANCHOR: &str = "basis-anchor";
+
+fn grounding_reachability() -> String {
+    GROUNDING_REACHABILITY.to_owned()
+}
+
+/// Feed-relative path of a snapshot's basis-block proof sidecar (§1.3).
+pub fn snapshot_anchor_file_name(e: u64) -> String {
+    format!("snapshots/{e:08}.anchor.json")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

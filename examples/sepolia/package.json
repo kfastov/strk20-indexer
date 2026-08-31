@@ -1,0 +1,19 @@
+{
+  "name": "strk20-sepolia-demo",
+  "private": true,
+  "type": "module",
+  "description": "Sepolia STRK20 privacy-pool demo runs (shield + private transfer) for strk20-indexer. Testnet only.",
+  "scripts": {
+    "status": "node status.mjs",
+    "save-keys": "node save-keys.mjs",
+    "shield": "node shield.mjs",
+    "verify": "node verify.mjs",
+    "spend": "node spend.mjs",
+    "verify-spend": "node verify-spend.mjs",
+    "storage-check": "node storage-check.mjs"
+  },
+  "dependencies": {
+    "@starkware-libs/starknet-privacy-sdk": "file:./upstream/sdk",
+    "starknet": "10.5.0"
+  }
+}

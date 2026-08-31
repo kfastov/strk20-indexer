@@ -30,6 +30,22 @@
 //! S4 tampered / unreachable snapshots are rejected by name (negative of S3)
 //! S5 the publication gate: no anchor >= basis, no snapshot; it resumes
 //! S6 retention keeps the newest N without 404ing the previous manifest
+//!
+//! **§12 correction (2026-08-31, same day).** The premise above — that a proof
+//! for the basis block cannot be obtained — was measured against an
+//! aggregating endpoint with single attempts and is RETRACTED: deep proofs
+//! answer for any block on retry (research/live/proof-window.md §1). §1.3's
+//! per-snapshot anchor sidecar is reinstated as the PRIMARY grounding, and the
+//! reachability check above is demoted to the fallback for snapshots whose
+//! basis anchor could not be obtained — and kept, because it is the only thing
+//! that catches an internally-consistent forgery (S4(ii)) and it validates the
+//! intervening epochs as well. The legs above keep their meaning: their
+//! fixture has a narrow proof window, which is exactly the fallback world.
+//!
+//! S8 the basis-block anchor is obtained (with retries) and grounds the
+//!    snapshot: sidecar + manifest anchor, and the client uses it
+//! S9 no basis anchor obtainable => publication still happens on reachability,
+//!    and the manifest says which grounding was used
 
 use discovery_core::privacy_pool::types::SecretFelt;
 use discovery_core::storage_backend::MockBackend;
@@ -56,10 +72,12 @@ const BASIS_EPOCH: u64 = 1;
 const BASIS_BLOCK: u64 = 31;
 const SNAPSHOT_FILE: &str = "snapshots/00000001.strk20s.zst";
 
-/// Pathfinder's measured ~1024-block window, scaled to the fixture. It is
-/// deliberately NARROWER than head − basis (46 − 31 = 15): the superseded
-/// per-epoch/per-snapshot anchor path cannot contribute a single record, so
-/// every anchor these legs rely on comes from the head-side capture of §11.2.
+/// An endpoint whose trie retention really is narrow, scaled to the fixture.
+/// It is deliberately NARROWER than head − basis (46 − 31 = 15), so no retry
+/// count can obtain a proof at the basis and every anchor these legs rely on
+/// comes from the head-side capture of §11.2. (The "~1024 blocks measured on
+/// mainnet" reading of this number is retracted — proof-window.md §3 — but a
+/// node that cannot serve deep proofs is still a real deployment.)
 const PROOF_WINDOW: u64 = 4;
 
 /// Pre-basis note blocks and the post-basis (head tail) note block.
@@ -1784,4 +1802,345 @@ async fn s7_a_server_that_forges_the_anchors_log_too_is_caught_only_by_ring_6() 
     assert!(ok, "the restored feed must verify again: {restored}");
     assert_eq!(restored["verified"].as_str(), Some("anchored"), "{restored}");
     assert_eq!(client_notes(&restored), honest_notes);
+}
+
+// ------------------------------------------------------------------- S8
+
+/// The per-snapshot proof sidecar, `snapshots/{e:08}.anchor.json`.
+const SNAPSHOT_ANCHOR_FILE: &str = "snapshots/00000001.anchor.json";
+
+/// Serve a feed directory over HTTP: `GET /feed/<path>` → the file, 404 when
+/// it is absent. A keyless client only GETs static artifacts, so this is a
+/// complete server for it — and unlike `strk20 run` it publishes a FIXED feed,
+/// so a leg about which artifacts the client fetches has nothing racing it.
+async fn serve_feed_dir(root: PathBuf) -> std::net::SocketAddr {
+    use axum::extract::{Path as AxPath, State};
+    use axum::http::StatusCode;
+    let app = axum::Router::new()
+        .route(
+            "/feed/{*path}",
+            axum::routing::get(
+                |State(root): State<PathBuf>, AxPath(path): AxPath<String>| async move {
+                    match std::fs::read(root.join(&path)) {
+                        Ok(bytes) => (StatusCode::OK, bytes),
+                        Err(_) => (StatusCode::NOT_FOUND, Vec::new()),
+                    }
+                },
+            ),
+        )
+        .with_state(root);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// S8 — §12 point 1: a snapshot's basis block CAN be proved, so the snapshot
+/// carries the anchor sidecar §1.3 always required, and the client grounds on
+/// it.
+///
+/// This leg exists because this repo talked itself out of the sidecar on a
+/// measurement error. `getStorageProof` refuses often — a fifth to a half of
+/// attempts succeed — and a bisection over that nondeterministic predicate
+/// produced the "~1024-block window" that §11 was built on. Retried, proofs
+/// come back from 5.15M blocks behind head. So the fixture here refuses the
+/// first attempts at every block and then answers, and the anchor must be
+/// obtained anyway: the retry is the whole mechanism, and
+/// `proofs_denied() > 0` below is what stops this leg passing on an endpoint
+/// that never refused anything.
+///
+/// "The client grounds on it" is pinned two ways: the sidecar is actually
+/// FETCHED (and its URL is inside the closed address-blind allowlist), and a
+/// sidecar that disagrees with the snapshot's own slot set is REFUSED. Without
+/// the second half, publishing the file and ignoring it would pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s8_the_snapshot_carries_a_basis_block_anchor_and_the_client_uses_it() {
+    ensure_built();
+    let seed = seed_chain().await;
+    // No window — §12 retracts it. Proofs answer for any block, but only after
+    // the aggregator has routed a few attempts to backends without tries.
+    const FLAKY: usize = 2;
+    let rpc = FixtureRpc::with_faults(
+        seed.chain.clone(),
+        CHAIN_ID,
+        FaultSpec {
+            proof_flaky_attempts: FLAKY,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+    let (out, err, ok) = backfill(dir.path(), &url, &seed.pool_hex);
+    assert!(ok, "backfill failed\nstdout:\n{out}\nstderr:\n{err}");
+    assert!(
+        !read_manifest(dir.path())["snapshot"].is_null(),
+        "§12 B1 first: this endpoint refuses the first {FLAKY} proof attempts at each \
+         block and answers afterwards, exactly as lava does. Without a bounded retry on \
+         error 42 nothing downstream happens at all — no proof, no anchor, no snapshot — \
+         which is where a single-attempt implementation stands.\nstderr:\n{err}"
+    );
+    assert_snapshot_published(dir.path());
+
+    let chain = &seed.chain;
+    let basis_root = felt_hex(&strk20_feed::mpt::storage_root(&expected_slots(chain, BASIS_BLOCK)));
+    let manifest = read_manifest(dir.path());
+    let snapshot = &manifest["snapshot"];
+    let anchor = &snapshot["anchor"];
+    assert!(
+        !anchor.is_null(),
+        "§12 point 1: the basis block IS provable (with a bounded retry on error 42), so \
+         §1.3's required anchor is obtainable and must be published. manifest.snapshot = \
+         {snapshot}"
+    );
+    assert_eq!(
+        anchor["block"].as_u64(),
+        Some(BASIS_BLOCK),
+        "the anchor must be for the snapshot's OWN basis block, not for some later block \
+         that happens to be easier to prove: {anchor}"
+    );
+    assert_eq!(
+        anchor["storage_root"].as_str(),
+        Some(basis_root.as_str()),
+        "the anchor's root must be the chain's root at the basis: {anchor}"
+    );
+    assert_eq!(
+        anchor["block_hash"].as_str(),
+        Some(felt_hex(&chain.block_hash(BASIS_BLOCK)).as_str()),
+        "§12 B2: the anchor must carry the block hash the proof was BOUND to: {anchor}"
+    );
+    assert_eq!(
+        anchor["class"].as_str(),
+        Some(felt_hex(&chain.class_at(BASIS_BLOCK).unwrap_or(Felt::ZERO)).as_str()),
+        "§1.5 ring 5 compares header.class with the anchor's class: {anchor}"
+    );
+    assert_eq!(
+        snapshot["grounding"].as_str(),
+        Some("basis-anchor"),
+        "§12 B4: the manifest is the only published record of HOW this snapshot is \
+         grounded, and a client needs it to know whether the reachability walk is its \
+         primary check or a fallback: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["storage_root"].as_str(),
+        Some(basis_root.as_str()),
+        "manifest, snapshot header and anchor must all name one root: {snapshot}"
+    );
+
+    let sidecar_path = feed_dir(dir.path()).join(SNAPSHOT_ANCHOR_FILE);
+    assert!(
+        sidecar_path.exists(),
+        "§1.3: the full stored getStorageProof response for the basis block is published \
+         as {SNAPSHOT_ANCHOR_FILE}, so the manifest's anchor can be checked against the \
+         proof it claims to come from (and, through the snapshot's own root, against the \
+         slot set) rather than taken on the manifest's word. It is not offline-strong \
+         against the publisher itself — that is reachability's job, and ring 6's, for \
+         which this file is the audit material."
+    );
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap())
+        .expect("the anchor sidecar is JSON");
+    assert_eq!(
+        sidecar["contracts_proof"]["contract_leaves_data"][0]["storage_root"].as_str(),
+        Some(basis_root.as_str()),
+        "the sidecar must be the proof for the basis block: {sidecar}"
+    );
+    assert_eq!(
+        sidecar["global_roots"]["block_hash"].as_str(),
+        Some(felt_hex(&chain.block_hash(BASIS_BLOCK)).as_str()),
+        "§12 B2: a stored proof whose block hash is not the block's must never have been \
+         accepted, let alone published: {sidecar}"
+    );
+    assert!(
+        rpc.proofs_denied() > 0,
+        "vacuity guard: this endpoint never refused a proof, so the leg says nothing \
+         about the retry that §12 B1 is entirely about"
+    );
+
+    // ---- the client fetches it, inside the closed allowlist
+    let static_addr = serve_feed_dir(feed_dir(dir.path())).await;
+    let proxy = RecordingProxy::new(&format!("http://{static_addr}"));
+    let proxy_addr = proxy.serve().await;
+    let feed_url = format!("http://{proxy_addr}/feed");
+    proxy.take_captured();
+    let (report, ok) = sync_with(
+        dir.path(),
+        &feed_url,
+        &seed.bob,
+        "0xb0b",
+        "s8-snap.db",
+        &["--cold-start", "snapshot"],
+    );
+    assert!(ok, "snapshot cold start failed: {report}");
+    assert_eq!(report["snapshot_basis"].as_u64(), Some(BASIS_BLOCK), "{report}");
+    let urls = assert_capture_allowed(&proxy.take_captured(), "snapshot cold start");
+    assert!(
+        urls.iter().any(|u| u == "/feed/snapshots/00000001.anchor.json"),
+        "§1.5 ring 5: the client must fetch the basis-block proof sidecar. It fetched \
+         {urls:?}"
+    );
+
+    // ---- and it is load-bearing: a sidecar that disagrees is refused
+    let honest_notes = client_notes(&report);
+    let original = std::fs::read(&sidecar_path).unwrap();
+    let mut forged: Value = serde_json::from_slice(&original).unwrap();
+    forged["contracts_proof"]["contract_leaves_data"][0]["storage_root"] =
+        Value::String(felt_hex(&(strk20_feed::mpt::storage_root(&expected_slots(
+            chain,
+            BASIS_BLOCK,
+        )) + Felt::ONE)));
+    std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
+    let (err, ok) = sync_with(
+        dir.path(),
+        &feed_url,
+        &seed.bob,
+        "0xb0b",
+        "s8-forged.db",
+        &["--cold-start", "snapshot"],
+    );
+    assert!(
+        !ok,
+        "a snapshot whose anchor sidecar does not agree with its own slot set must be \
+         refused — otherwise the sidecar is decoration and §1.3 buys nothing: {err}"
+    );
+    let text = err["error"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        text.contains("SNAPSHOT_ROOT_MISMATCH"),
+        "§1.5 ring 5 names this failure SNAPSHOT_ROOT_MISMATCH. Got:\n{text}"
+    );
+
+    // control: the honest bytes still verify, so the refusal was about the lie
+    std::fs::write(&sidecar_path, &original).unwrap();
+    let (restored, ok) = sync_with(
+        dir.path(),
+        &feed_url,
+        &seed.bob,
+        "0xb0b",
+        "s8-restored.db",
+        &["--cold-start", "snapshot"],
+    );
+    assert!(ok, "the restored sidecar must verify again: {restored}");
+    assert_eq!(client_notes(&restored), honest_notes);
+
+    // ---- §12 B4: the manifest's grounding field is a CLAIM, and a claim with
+    // nothing behind it must be refused rather than silently downgraded.
+    // Server-side the anchor object and the grounding string come from one
+    // Option, so they can only disagree through corruption or malice; a client
+    // that accepts the disagreement reports "basis-anchor" in its own log while
+    // checking nothing of the kind.
+    let manifest_path = feed_dir(dir.path()).join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    tampered["snapshot"]["anchor"] = Value::Null;
+    assert_eq!(
+        tampered["snapshot"]["grounding"].as_str(),
+        Some("basis-anchor"),
+        "the point of this case is a manifest that still CLAIMS the stronger grounding"
+    );
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+    let (err, ok) = sync_with(
+        dir.path(),
+        &feed_url,
+        &seed.bob,
+        "0xb0b",
+        "s8-nogrounding.db",
+        &["--cold-start", "snapshot"],
+    );
+    assert!(
+        !ok,
+        "a manifest declaring grounding \"basis-anchor\" with no anchor to check must be \
+         refused: accepting it downgrades every consumer to the fallback while both the \
+         manifest and the client log claim otherwise: {err}"
+    );
+    let text = err["error"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        text.contains("FEED_MALFORMED"),
+        "the two fields are produced together server-side, so a disagreement is a \
+         malformed feed and must be named as one. Got:\n{text}"
+    );
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+}
+
+// ------------------------------------------------------------------- S9
+
+/// S9 — §12 B4's other half: when the basis-block anchor cannot be obtained,
+/// the snapshot is still PUBLISHED, grounded by the §11.3 reachability check,
+/// and the manifest says so.
+///
+/// Both halves matter. A design that requires the sidecar unconditionally
+/// publishes nothing whenever an operator's endpoint cannot serve a deep proof
+/// (Juno-backed providers serve head only, by design) — that is the mistake
+/// §11 was over-correcting. A design that never publishes the sidecar throws
+/// away the one grounding that is bound to the chain at the basis itself.
+/// So the outcome is per-snapshot, and it is reported rather than inferred.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s9_an_unobtainable_basis_anchor_falls_back_to_reachability() {
+    ensure_built();
+    let seed = seed_chain().await;
+    // The fixture's window is narrower than head - basis, so no retry count
+    // can obtain a proof at the basis: this endpoint really cannot serve it.
+    let (rpc, dir) = backfilled_feed(&seed).await;
+    assert_snapshot_published(dir.path());
+
+    let manifest = read_manifest(dir.path());
+    let snapshot = &manifest["snapshot"];
+    assert!(
+        snapshot["anchor"].is_null(),
+        "the basis {BASIS_BLOCK} is more than {PROOF_WINDOW} blocks behind head here, so \
+         no proof for it exists to publish: {snapshot}"
+    );
+    assert!(
+        !feed_dir(dir.path()).join(SNAPSHOT_ANCHOR_FILE).exists(),
+        "no proof was obtained, so no sidecar may be published — an empty or fabricated \
+         one would be worse than none"
+    );
+    assert_eq!(
+        snapshot["grounding"].as_str(),
+        Some("reachability"),
+        "§12 B4: the snapshot is published on the fallback grounding, and the manifest \
+         must SAY that rather than leaving a client to infer it from a missing field: \
+         {snapshot}"
+    );
+    assert!(
+        rpc.proof_attempts(BASIS_BLOCK) > 0,
+        "vacuity guard: no storage proof was ever requested AT THE BASIS BLOCK, so this \
+         leg would pass just as well against a build that never tries for a basis anchor \
+         at all. `proofs_denied` is not enough on its own — the head-side probe and the \
+         per-epoch anchors both feed it."
+    );
+    assert!(
+        rpc.proofs_denied() > 0,
+        "vacuity guard: the fixture never refused a proof, so nothing forced the fallback"
+    );
+    let anchors = published_anchors(dir.path());
+    assert!(
+        anchors.iter().any(|(b, _)| *b >= BASIS_BLOCK),
+        "the fallback gate's input must exist: an anchors.ndjson record at A >= basis \
+         {BASIS_BLOCK}; got {:?}",
+        anchors.iter().map(|(b, _)| *b).collect::<Vec<_>>()
+    );
+
+    // The client still cold-starts, and reachability still grounds it.
+    let feed = feed_dir(dir.path()).display().to_string();
+    let (report, ok) = sync_with(
+        dir.path(),
+        &feed,
+        &seed.bob,
+        "0xb0b",
+        "s9-snap.db",
+        &["--cold-start", "snapshot"],
+    );
+    assert!(
+        ok,
+        "§12 B4: a snapshot without a basis anchor is publishable and consumable — the \
+         reachability gate is a FALLBACK, not a removal: {report}"
+    );
+    assert_eq!(report["snapshot_basis"].as_u64(), Some(BASIS_BLOCK), "{report}");
+    let (stdout, stderr, ok) = verify_anchors(&feed, &dir.path().join("s9-snap.db"));
+    assert!(
+        ok,
+        "reachability must still verify the mirror across the snapshot seam\
+         \nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let v: Value = serde_json::from_str(&stdout).expect("verify-anchors --json report");
+    assert_eq!(v["all_ok"], Value::Bool(true), "{v}");
 }

@@ -1,0 +1,57 @@
+From e7f0177aab66a9c79699c358b728f9b0324f437e Mon Sep 17 00:00:00 2001
+From: Konstantin Fastov <kfastov@nullref.cc>
+Date: Mon, 31 Aug 2026 21:38:28 +0300
+Subject: [PATCH] discovery-core: make unused starknet-providers optional
+ behind a default-on feature
+
+`starknet-providers` is declared as a dependency of `discovery-core` but is
+not referenced anywhere under `crates/discovery-core/src` or its `tests` at
+this revision (`grep -rn 'starknet.providers' src tests` returns nothing).
+
+This makes it `optional = true` behind a `providers` feature that is enabled
+by default. Every existing consumer resolves an identical dependency graph:
+the feature is on unless explicitly disabled, and no public API of the crate
+mentions the provider types, so this is source-compatible either way.
+
+The benefit is for consumers that build `discovery-core` for a constrained
+target and do not need a provider. With `default-features = false` the
+wasm32-unknown-unknown graph drops from 142 to 118 crates, removing
+`starknet-providers`, `reqwest`, `web-sys`, `wasm-bindgen-futures` and the
+`ethereum-types`/`primitive-types` stack.
+
+To be precise about what this does not do: `discovery-core` already builds
+for wasm32-unknown-unknown with default features today. This is a reduction
+in dependency surface, not a fix for a broken target.
+
+No lines under `crates/discovery-core/src` are changed.
+---
+ crates/discovery-core/Cargo.toml | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/crates/discovery-core/Cargo.toml b/crates/discovery-core/Cargo.toml
+index 818cfc8..49bc3b2 100644
+--- a/crates/discovery-core/Cargo.toml
++++ b/crates/discovery-core/Cargo.toml
+@@ -3,6 +3,10 @@ name = "discovery-core"
+ version = "0.1.0"
+ edition = "2021"
+ 
++[features]
++default = ["providers"]
++providers = ["dep:starknet-providers"]
++
+ [dependencies]
+ thiserror = "1.0"
+ async-trait = "0.1"
+@@ -10,7 +14,7 @@ num-traits = "0.2"
+ starknet-core = { package = "starknet-rust-core", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
+ starknet-crypto = { package = "starknet-rust-crypto", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
+ starknet-types-core = { version = "0.2", features = ["curve", "serde"] }
+-starknet-providers = { package = "starknet-rust-providers", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
++starknet-providers = { package = "starknet-rust-providers", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe", optional = true }
+ tracing = "0.1"
+ serde = { version = "1.0", features = ["derive"] }
+ url = "2"
+-- 
+2.50.1 (Apple Git-155)
+

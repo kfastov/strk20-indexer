@@ -1,0 +1,9 @@
+# Nothing produced by a run belongs in the repository.
+.env
+node_modules/
+upstream/
+package-lock.json
+.local/
+*.json.local
+accounts.json
+viewing-key-*.json

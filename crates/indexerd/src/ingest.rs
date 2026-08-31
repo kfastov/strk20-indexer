@@ -11,6 +11,33 @@ use anyhow::{bail, Context, Result};
 use starknet_types_core::felt::Felt;
 use std::collections::BTreeMap;
 
+/// Largest block range the scan asks about in one request. Not a correctness
+/// bound — correctness comes from the absence of a continuation token in the
+/// answer — just a sane first probe so a 5M-block backfill does not open with
+/// a request that can only be refused.
+const MAX_SCAN_WINDOW: u64 = 100_000;
+
+/// Blocks a single scan+ingest pass covers before the frontier is checkpointed
+/// and the accumulated events are dropped. The scan buffers every event it
+/// finds, so without a segment a genesis backfill holds ~120k `RpcEvent`s
+/// before a single row lands, and ANY failure — an irreducible window, a
+/// transport give-up, a kill — discards every call the scan made and restarts
+/// at the old frontier. Segmenting bounds both to one segment.
+const SCAN_SEGMENT: u64 = MAX_SCAN_WINDOW;
+
+/// Next window length, predicted from what the last one answered: aim at three
+/// quarters of a page. Prediction, not dogma — an overshoot comes back with a
+/// continuation token and costs exactly one call to halve.
+fn next_window_len(len: u64, events: u64, page_cap: u64) -> u64 {
+    let ceiling = len.saturating_mul(8).max(1);
+    let target = if events == 0 {
+        ceiling
+    } else {
+        len.saturating_mul(page_cap).saturating_mul(3) / events.saturating_mul(4).max(1)
+    };
+    target.clamp(1, ceiling).min(MAX_SCAN_WINDOW)
+}
+
 pub struct Ingestor<'a> {
     pub db: &'a mut Db,
     pub rpc: &'a RpcClient,
@@ -64,19 +91,37 @@ impl<'a> Ingestor<'a> {
 
         // 3+4. events-first scan and per-block ingest
         let frontier = match self.db.ingest_cursor()? {
-            Some((f, _)) => f,
+            Some(f) => f,
             None => self.cfg.genesis_block.saturating_sub(1),
         };
-        if latest.block_number > frontier {
-            let active = self
-                .scan_active_blocks(frontier + 1, latest.block_number)
-                .await?;
-            for (number, _) in &active {
-                self.ingest_block(*number).await?;
-                self.db.set_ingest_cursor(*number, None)?;
+        // Scanned in SEGMENTS, not in one pass over the whole remaining range:
+        // the segment bounds both the memory the scan holds and what a failure
+        // costs, since the frontier is checkpointed at each segment's end.
+        let mut seg_from = frontier + 1;
+        while seg_from <= latest.block_number {
+            let seg_to = seg_from
+                .saturating_add(SCAN_SEGMENT - 1)
+                .min(latest.block_number);
+            let active = self.scan_active_blocks(seg_from, seg_to).await?;
+            let found = active.len();
+            // The scan's own answer carries this block's events, so nothing
+            // re-asks for them: a second getEvents per active block is both
+            // 28,655 wasted calls on a full mainnet backfill and, once it has
+            // to page, the LIVE-8 defect all over again.
+            for (number, events) in active {
+                self.ingest_block(number, Some(events)).await?;
+                self.db.set_ingest_cursor(number)?;
                 out.blocks_ingested += 1;
             }
-            self.db.set_ingest_cursor(latest.block_number, None)?;
+            self.db.set_ingest_cursor(seg_to)?;
+            tracing::info!(
+                segment_from = seg_from,
+                segment_to = seg_to,
+                scan_to = latest.block_number,
+                active_blocks = found,
+                "scan segment ingested; frontier checkpointed"
+            );
+            seg_from = seg_to + 1;
         }
 
         // update head meta last (a crash before this point just rescans)
@@ -134,69 +179,167 @@ impl<'a> Ingestor<'a> {
 
     /// Pool-active block numbers in [from, to], with their pool events in
     /// emission order (getEvents order within a block is emission order).
+    ///
+    /// LIVE-8, the critical one. A `getEvents` continuation token is NODE-LOCAL
+    /// state, and the primary endpoint is an AGGREGATOR: the next request
+    /// reaches a different backend, which does not reject the token — it
+    /// resumes from somewhere else and the events in between are dropped with
+    /// no error. Measured on one mainnet range: 13 pages found 2,628 blocks,
+    /// 62 pages found 2,608; a full backfill lost 139 blocks and 489 events,
+    /// which is what made verify-root report a genuine root mismatch.
+    ///
+    /// So the scan never presents a token. It subdivides the block range until
+    /// EVERY window is answered in a single page with no continuation token and
+    /// takes the union: one response carries no cross-request state, so it is
+    /// sound under any routing, and a mid-scan endpoint change is harmless
+    /// rather than a reason to restart. A window that still cannot be answered
+    /// at single-block granularity is a hard error — keeping the first page
+    /// would be this very defect, silently.
     async fn scan_active_blocks(
         &mut self,
         from: u64,
         to: u64,
     ) -> Result<Vec<(u64, Vec<crate::rpc::RpcEvent>)>> {
         let mut by_block: BTreeMap<u64, Vec<crate::rpc::RpcEvent>> = BTreeMap::new();
-        let mut continuation: Option<String> = None;
-        let mut endpoint_epoch = self.rpc.endpoint_epoch();
         let interval = std::time::Duration::from_secs(self.progress_secs);
         let mut last_report = std::time::Instant::now();
         let mut events_seen = 0u64;
+        let mut calls = 0u64;
+        let mut subdivisions = 0u64;
+        let mut rerequests = 0u64;
+        // How many events the endpoint puts in one FULL page, which can be
+        // below what we asked for. Only a page that came back full teaches us
+        // this: `chunk_size` is a maximum in the JSON-RPC spec, so a short page
+        // carrying a token says the endpoint stopped for some other reason
+        // (a scanned-block-range budget is the usual one) and says nothing
+        // about how many events fit.
+        let requested = self.chunk_size.max(1);
+        let mut page_cap = requested;
         let mut cursor = from;
-        loop {
+        let mut window = (to.saturating_sub(from) + 1).clamp(1, MAX_SCAN_WINDOW);
+        // One re-request of the SAME window is allowed before a short-page
+        // token is treated as a reason to subdivide; reset whenever the window
+        // moves or changes.
+        let mut rerequested = false;
+        while cursor <= to {
+            let end = cursor.saturating_add(window - 1).min(to);
             let page = self
                 .rpc
-                .get_events(
-                    &self.cfg.pool,
-                    from,
-                    BlockRef::Number(to),
-                    self.chunk_size,
-                    continuation.as_deref(),
-                )
+                .get_events(&self.cfg.pool, cursor, BlockRef::Number(end), requested)
                 .await?;
-            // Continuation tokens are provider-specific: a failover mid-scan
-            // invalidates them — restart the scan (idempotent: BTreeMap).
-            if self.rpc.endpoint_epoch() != endpoint_epoch {
-                endpoint_epoch = self.rpc.endpoint_epoch();
-                by_block.clear();
-                continuation = None;
+            calls += 1;
+            if page.continuation_token.is_some() {
+                let served = page.events.len() as u64;
+                let full = served >= requested;
+                if full {
+                    page_cap = page_cap.min(served.max(1));
+                } else if !rerequested {
+                    // A SHORT page with a token is not evidence about event
+                    // density, and letting it clamp `page_cap` would shrink
+                    // every later window for the rest of a multi-hour scan
+                    // (page_cap never recovers). A fresh single-page request
+                    // carries no cross-request state, so asking the same
+                    // window again is sound and costs one call.
+                    rerequested = true;
+                    rerequests += 1;
+                    tracing::debug!(
+                        from = cursor,
+                        to = end,
+                        served,
+                        requested,
+                        "short page carried a continuation token; re-requesting the same window"
+                    );
+                    continue;
+                }
+                if end == cursor {
+                    // Two different endpoint defects, two different remedies:
+                    // saying "raise --chunk-size" to an operator whose
+                    // endpoint returned an empty page would be advice that
+                    // cannot work.
+                    let cause = if full {
+                        "the page was filled to the endpoint's own limit, which is below this \
+                         block's event count. Raise --chunk-size, or use an endpoint whose page \
+                         limit is at least this block's event count."
+                    } else {
+                        "the page was NOT full and a re-request did not help, so this endpoint \
+                         bounds getEvents by something other than event count and cannot answer \
+                         a one-block window in one page at all. It must be replaced, not tuned."
+                    };
+                    bail!(
+                        "block {cursor}: this endpoint answered a ONE-BLOCK window with a \
+                         continuation token ({served} events returned for a requested \
+                         chunk_size of {requested}), so no single-page request can cover this \
+                         block and the window is IRREDUCIBLE. Following the token is unsound — \
+                         it is node-local state and an aggregator's next backend resumes \
+                         elsewhere, silently (LIVE-8) — and keeping the first page would \
+                         truncate the block. {cause}"
+                    );
+                }
+                subdivisions += 1;
+                window = (end - cursor).div_ceil(2);
+                rerequested = false;
+                tracing::debug!(
+                    from = cursor,
+                    to = end,
+                    next_window = window,
+                    page_cap,
+                    "scan window did not fit in one page; subdividing"
+                );
                 continue;
             }
+            let len = end - cursor + 1;
+            let mut in_window = 0u64;
             for ev in page.events {
                 let Some(bn) = ev.block_number else {
                     continue; // pre-confirmed events carry no block number
                 };
-                if bn < from || bn > to {
+                if bn < cursor || bn > end {
                     continue;
                 }
-                cursor = cursor.max(bn);
+                in_window += 1;
                 events_seen += 1;
                 by_block.entry(bn).or_default().push(ev);
             }
             if last_report.elapsed() >= interval {
                 tracing::info!(
-                    cursor,
+                    cursor = end,
                     scan_to = to,
                     blocks_ingested = by_block.len(),
                     events = events_seen,
+                    window = len,
+                    calls,
+                    subdivisions,
+                    rerequests,
                     endpoint = %self.rpc.active_endpoint(),
                     "scan progress"
                 );
                 last_report = std::time::Instant::now();
             }
-            match page.continuation_token {
-                Some(token) => continuation = Some(token),
-                None => break,
-            }
+            cursor = end + 1;
+            window = next_window_len(len, in_window, page_cap);
+            rerequested = false;
         }
+        tracing::info!(
+            from,
+            to,
+            active_blocks = by_block.len(),
+            events = events_seen,
+            calls,
+            subdivisions,
+            rerequests,
+            "scan complete (single-page windows only; no continuation token presented)"
+        );
         Ok(by_block.into_iter().collect())
     }
 
-    /// Fetch and store one pool-active block.
-    async fn ingest_block(&mut self, number: u64) -> Result<()> {
+    /// Fetch and store one pool-active block. `events` is the block's pool
+    /// events as the scan already saw them; `None` (the §5.6 rescan path) asks
+    /// the endpoint for them in ONE page.
+    async fn ingest_block(
+        &mut self,
+        number: u64,
+        events: Option<Vec<crate::rpc::RpcEvent>>,
+    ) -> Result<()> {
         let header = self
             .rpc
             .get_block(BlockRef::Number(number))
@@ -258,9 +401,8 @@ impl<'a> Ingestor<'a> {
             }
         }
 
-        // events for this block, in emission order (paginated — a block's
-        // events can span several getEvents pages; review critical finding),
-        // with tx_index resolved from the header's transaction list.
+        // events for this block, in emission order, with tx_index resolved
+        // from the header's transaction list.
         let tx_index_of = |tx_hash: &str| -> Option<u64> {
             let want = normalize_hex(tx_hash).ok()?;
             header
@@ -269,25 +411,32 @@ impl<'a> Ingestor<'a> {
                 .position(|t| normalize_hex(t).map(|h| h == want).unwrap_or(false))
                 .map(|i| i as u64)
         };
-        let mut raw_events = Vec::new();
-        let mut continuation: Option<String> = None;
-        loop {
-            let page = self
-                .rpc
-                .get_events(
-                    &self.cfg.pool,
-                    number,
-                    BlockRef::Number(number),
-                    self.chunk_size.max(100),
-                    continuation.as_deref(),
-                )
-                .await?;
-            raw_events.extend(page.events);
-            match page.continuation_token {
-                Some(token) => continuation = Some(token),
-                None => break,
+        let raw_events = match events {
+            Some(evs) => evs,
+            None => {
+                // LIVE-8 applies to a one-block window exactly as it does to
+                // the scan's: a page 2 for this block would be answered by a
+                // backend that never issued the token. Ask once, with the
+                // largest page we are willing to request, and treat a token as
+                // the irreducible case.
+                let requested = self.chunk_size.max(1000);
+                let page = self
+                    .rpc
+                    .get_events(&self.cfg.pool, number, BlockRef::Number(number), requested)
+                    .await?;
+                if page.continuation_token.is_some() {
+                    bail!(
+                        "block {number}: this endpoint answered a ONE-BLOCK window with a \
+                         continuation token ({} events returned for a requested chunk_size \
+                         of {requested}), so no single-page request can cover this block and \
+                         the window is IRREDUCIBLE. Following the token is unsound (LIVE-8) \
+                         and keeping the first page would truncate the block.",
+                        page.events.len()
+                    );
+                }
+                page.events
             }
-        }
+        };
         let mut events = Vec::with_capacity(raw_events.len());
         let mut event_index = 0u64;
         for ev in &raw_events {
@@ -337,7 +486,7 @@ impl<'a> Ingestor<'a> {
             l1_accepted,
         };
         self.db
-            .insert_block_data(&row, &diffs, &events, replaced.as_ref(), number, None)?;
+            .insert_block_data(&row, &diffs, &events, replaced.as_ref(), number)?;
         Ok(())
     }
 }
@@ -367,7 +516,7 @@ impl<'a> Ingestor<'a> {
                     .iter()
                     .any(|dc| normalize_hex(&dc.address).map(|a| a == pool_hex).unwrap_or(false));
             if touches_pool {
-                self.ingest_block(number).await?;
+                self.ingest_block(number, None).await?;
                 recovered += 1;
             }
         }

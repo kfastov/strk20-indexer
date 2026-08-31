@@ -81,6 +81,11 @@ fn entry_for(snap: &Snapshot) -> (Vec<u8>, ManifestSnapshot) {
         bytes: zst.len() as u64,
         slots: snap.slots.len() as u64,
         storage_root: felt_hex(&snap.header.storage_root),
+        // Offline rings 1-5 are about the file itself; the basis-block anchor
+        // (§12 point 1) is checked by the client against the published sidecar,
+        // which no offline ring can see.
+        anchor: None,
+        grounding: strk20_feed::manifest::GROUNDING_REACHABILITY.to_owned(),
     };
     (zst, entry)
 }

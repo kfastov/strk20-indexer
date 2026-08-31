@@ -19,6 +19,11 @@ pub trait FeedTransport: Send + Sync {
     /// feed progress, never anything derived from a user.
     async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>>;
     async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>>;
+    /// The stored `getStorageProof` response for snapshot `e`'s basis block
+    /// (§1.3, reinstated by §12 point 1); `None` when the feed publishes none.
+    /// `e` is a manifest-supplied epoch index — feed progress, never anything
+    /// derived from a user.
+    async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>>;
     /// The append-only anchor log; `None` when the feed publishes none.
     async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>>;
     /// `None` = unchanged (ETag matched). Returns (payload, new_etag).
@@ -113,6 +118,11 @@ impl FeedTransport for HttpTransport {
             .await
     }
 
+    async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>> {
+        self.get_optional(&strk20_feed::manifest::snapshot_anchor_file_name(e))
+            .await
+    }
+
     async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {
         self.get_optional("anchors.ndjson").await
     }
@@ -194,6 +204,14 @@ impl FeedTransport for DirTransport {
 
     async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>> {
         read_optional(self.dir.join("epochs").join(format!("{idx:08}.anchor.json"))).await
+    }
+
+    async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>> {
+        read_optional(
+            self.dir
+                .join(strk20_feed::manifest::snapshot_anchor_file_name(e)),
+        )
+        .await
     }
 
     async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {

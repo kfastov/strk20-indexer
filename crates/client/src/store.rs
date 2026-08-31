@@ -780,11 +780,13 @@ impl FeedStore {
                 entry.e
             );
         }
+        check_basis_anchor(transport, entry, &snap).await?;
         self.apply_snapshot(&snap)?;
         tracing::info!(
             epoch = snap.header.epoch,
             block = snap.header.block,
             slots = snap.slots.len(),
+            grounding = %entry.grounding,
             "cold started from a snapshot; history floor is {}",
             snap.header.block + 1
         );
@@ -1019,6 +1021,120 @@ impl ClientView {
             None => (Felt::ZERO, 0),
         })
     }
+}
+
+/// §12 point 1 — the basis-block anchor, when the publisher obtained one.
+///
+/// **What this check is worth, stated exactly.** Every value compared here is
+/// produced by the same server: the manifest's anchor, the published proof
+/// sidecar, and the snapshot's own slot set. The comparison is still worth
+/// making — it is proof-against-data rather than claim-against-claim, since
+/// `snap.header.storage_root` was already proved equal to the fold of the slot
+/// set by ring 5 of `verify_snapshot`, so a publisher whose proof and data
+/// disagree is caught, as is one that publishes an anchor for another block or
+/// one that names a root no proof backs. But nothing here binds
+/// `global_roots` to a chain this client independently knows, so a publisher
+/// that forges the slot set and the sidecar TOGETHER is internally consistent
+/// and passes. That adversary is the §11.3 reachability walk's (it runs on
+/// every cold start regardless of grounding) and ring 6's, against the user's
+/// own RPC. The sidecar is the audit material for the latter.
+async fn check_basis_anchor(
+    transport: &dyn crate::transport::FeedTransport,
+    entry: &strk20_feed::manifest::ManifestSnapshot,
+    snap: &strk20_feed::snapshot::Snapshot,
+) -> Result<()> {
+    let Some(anchor) = &entry.anchor else {
+        // Server-side the two are produced from one Option, so they can only
+        // disagree through corruption or design: a manifest that ADVERTISES
+        // the stronger grounding while carrying nothing to check would have
+        // every client silently downgrade to the fallback while both the
+        // manifest and the client's own log claimed otherwise.
+        if entry.grounding == strk20_feed::manifest::GROUNDING_BASIS_ANCHOR {
+            bail!(
+                "FEED_MALFORMED: manifest.snapshot for epoch {} declares grounding \"{}\" but \
+                 carries no anchor object, so there is nothing to check and the claim cannot \
+                 be honoured",
+                entry.e,
+                entry.grounding
+            );
+        }
+        return Ok(());
+    };
+    let file = strk20_feed::manifest::snapshot_anchor_file_name(entry.e);
+    let bytes = transport
+        .fetch_snapshot_anchor(entry.e)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "SNAPSHOT_ROOT_MISMATCH: the manifest claims a basis-block anchor for \
+                 snapshot {} but the feed does not publish {file}, so there is no proof \
+                 behind the claim",
+                entry.e
+            )
+        })?;
+    let sidecar: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("SNAPSHOT_ROOT_MISMATCH: {file} is not JSON"))?;
+    let proof_root = sidecar["contracts_proof"]["contract_leaves_data"][0]["storage_root"]
+        .as_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "SNAPSHOT_ROOT_MISMATCH: {file} carries no \
+                 contracts_proof.contract_leaves_data[0].storage_root"
+            )
+        })?;
+    let proof_root = strk20_feed::felt_from_hex(proof_root)?;
+    // `snap.header.storage_root` was already proved equal to the root of the
+    // slot set the snapshot carries (ring 5 of verify_snapshot), so this
+    // compares the proof against the data, not against another claim.
+    if proof_root != snap.header.storage_root {
+        bail!(
+            "SNAPSHOT_ROOT_MISMATCH: the basis-block proof published at {file} attests \
+             storage_root {} at block {}, but this snapshot's slot set folds to {}",
+            strk20_feed::felt_hex(&proof_root),
+            snap.header.block,
+            strk20_feed::felt_hex(&snap.header.storage_root)
+        );
+    }
+    if anchor.block != snap.header.block {
+        bail!(
+            "SNAPSHOT_ROOT_MISMATCH: manifest.snapshot.anchor is for block {} but the \
+             snapshot's basis is block {}; an anchor for some other block attests \
+             nothing about this one",
+            anchor.block,
+            snap.header.block
+        );
+    }
+    if strk20_feed::felt_from_hex(&anchor.storage_root)? != proof_root {
+        bail!(
+            "SNAPSHOT_ROOT_MISMATCH: manifest.snapshot.anchor.storage_root {} is not the \
+             root in the proof it points at ({})",
+            anchor.storage_root,
+            strk20_feed::felt_hex(&proof_root)
+        );
+    }
+    let proof_block_hash = sidecar["global_roots"]["block_hash"]
+        .as_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "SNAPSHOT_ROOT_MISMATCH: {file} carries no global_roots.block_hash, so the \
+                 proof cannot be bound to a block at all"
+            )
+        })?;
+    if strk20_feed::felt_from_hex(proof_block_hash)?
+        != strk20_feed::felt_from_hex(&anchor.block_hash)?
+    {
+        bail!(
+            "SNAPSHOT_ROOT_MISMATCH: manifest.snapshot.anchor.block_hash {} is not the \
+             block hash the published proof is bound to ({proof_block_hash})",
+            anchor.block_hash
+        );
+    }
+    tracing::info!(
+        block = snap.header.block,
+        "the published basis-block proof agrees with this snapshot's slot set (§12 point 1); \
+         the §11.3 reachability walk still runs"
+    );
+    Ok(())
 }
 
 fn meta_set_tx(tx: &rusqlite::Transaction<'_>, key: &str, value: &str) -> Result<()> {

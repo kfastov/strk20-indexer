@@ -16,6 +16,14 @@
 //! T8  pack B  --network sepolia selects the whole Sepolia profile
 //! T9  pack B  the client refuses a feed from another chain
 //! T10 LIVE-2  the scan phase reports progress
+//! T14 LIVE-8  the scan presents no continuation token, so a foreign backend
+//!             cannot silently drop the events in between
+//! T15 LIVE-8  the union over subdivided windows is the true active-block set
+//! T16 LIVE-8  an irreducible window is a loud error, never a truncation
+//! T17 §12 B1  a storage proof survives transient error 42s (retry, not fail)
+//! T18 §12 B1  an exhausted retry budget is UNAVAILABLE, not MISMATCH
+//! T19 §12 B2  a proof whose global_roots.block_hash is not the block's is
+//!             rejected as a hard error and never becomes a root
 
 use e2e_tests::bins::{bin, ensure_built, run_capture};
 use e2e_tests::chain::{ActiveBlock, FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR};
@@ -995,6 +1003,765 @@ async fn t13_verify_anchors_never_reports_success_without_checking_anything() {
     assert!(
         report["status"].as_str().is_some_and(|s| s != "verified"),
         "the report must say WHY nothing was checked: {report}"
+    );
+}
+
+// ------------------------------------------------------- LIVE-8 harness
+
+/// `count` consecutive pool-active blocks from `from`, one storage write and
+/// one pool event each. Dense on purpose: with a small `--chunk-size` the
+/// whole scan range cannot be answered in one page, so an implementation
+/// either subdivides or pages — and paging is what LIVE-8 forbids.
+fn dense_chain(pool: Felt, from: u64, count: u64, head: u64) -> FixtureChain {
+    let mut chain = FixtureChain::synthetic(pool, head, head.saturating_sub(10));
+    for i in 0..count {
+        chain.active.insert(from + i, active_block(i));
+    }
+    chain
+}
+
+/// Backfill a synthetic (non-devnet) chain: explicit pool, genesis and page
+/// size, everything else as in `base_args`.
+fn backfill_synthetic(
+    dir: &Path,
+    url: &str,
+    pool: &Felt,
+    genesis: u64,
+    chunk: &str,
+) -> (String, String, bool) {
+    let mut cmd = Command::new(bin("strk20"));
+    cmd.arg("backfill")
+        .args(["--db", &dir.join("strk20.db").display().to_string()])
+        .args(["--feed-dir", &dir.join("feed").display().to_string()])
+        .args(["--rpc-url", url])
+        .args(["--rpc-fallback", url])
+        .args(["--pool", &felt_hex(pool)])
+        .args(["--chain-id", CHAIN_ID])
+        .args(["--genesis-block", &genesis.to_string()])
+        .args(["--epoch-size", "16"])
+        .args(["--chunk-size", chunk]);
+    run_capture(cmd, false)
+}
+
+/// One raw `starknet_getEvents` call against the fixture, returning the whole
+/// JSON-RPC response. Used to prove a fault mode is armed rather than assuming
+/// it (the scanner self-test pattern of session 5).
+async fn raw_get_events(
+    url: &str,
+    pool: &Felt,
+    from: u64,
+    to: u64,
+    chunk: u64,
+    token: Option<&str>,
+) -> Value {
+    let mut filter = serde_json::json!({
+        "from_block": {"block_number": from},
+        "to_block": {"block_number": to},
+        "address": felt_hex(pool),
+        "chunk_size": chunk,
+    });
+    if let Some(t) = token {
+        filter["continuation_token"] = Value::String(t.to_owned());
+    }
+    reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "starknet_getEvents",
+            "params": [filter],
+        }))
+        .send()
+        .await
+        .expect("fixture reachable")
+        .json()
+        .await
+        .expect("fixture answers JSON")
+}
+
+/// Block numbers of the events in a getEvents result, in order.
+fn page_blocks(result: &Value) -> Vec<u64> {
+    result["result"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no events array in {result}"))
+        .iter()
+        .map(|e| e["block_number"].as_u64().expect("event block_number"))
+        .collect()
+}
+
+// ------------------------------------------------------------------ T14
+
+/// LIVE-8, the critical one: a `getEvents` continuation token is NODE-LOCAL
+/// state. `rpc.starknet.lava.build` is an aggregator, so the next request goes
+/// to a different backend, which does not reject the token — it resumes from
+/// somewhere else and the events in between vanish with no error. Measured on
+/// the same range and endpoint: 13 pages found 2,628 blocks, 62 pages found
+/// 2,608. A full mainnet backfill lost 139 blocks and 489 events this way, and
+/// verify-root reported a genuine root mismatch because of it.
+///
+/// The property is therefore not "handle tokens carefully" but **never present
+/// one**: every window must be answered in a single page with no continuation
+/// token, and the scan must subdivide until that holds. A single response
+/// carries no cross-request state, so it is sound under any routing.
+///
+/// The fixture corrupts any token presented to it, so an implementation that
+/// pages loses blocks here. The zero-token assertion is what stops the leg
+/// passing by luck (a corruption that happened to skip nothing).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t14_the_scan_never_presents_a_continuation_token() {
+    ensure_built();
+    let pool = Felt::from(0x9101u64);
+    const FROM: u64 = 100;
+    const COUNT: u64 = 40;
+    let chain = dense_chain(pool, FROM, COUNT, 200);
+    let active: Vec<u64> = chain.active.keys().copied().collect();
+    let rpc = FixtureRpc::with_faults(
+        chain,
+        CHAIN_ID,
+        FaultSpec {
+            foreign_token: true,
+            // publicnode's measured posture (LIVE-6): no storage proofs at any
+            // height. verify-root is therefore UNAVAILABLE and its rescan
+            // backstop cannot run, so the scan is on its own — which is the
+            // production situation LIVE-8 was found in, and the reason the
+            // loss went unnoticed for a whole mainnet backfill.
+            proofs_unsupported: true,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, FROM, "3");
+    assert!(ok, "backfill failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let ingested: Vec<u64> = db
+        .blocks_in_range(FROM, FROM + COUNT - 1)
+        .unwrap()
+        .iter()
+        .map(|b| b.number)
+        .collect();
+    assert_eq!(
+        ingested, active,
+        "LIVE-8: the mirror is missing pool-active blocks. Chain has {} active blocks, \
+         the mirror has {}. This is exactly the 139-block loss measured on mainnet.",
+        active.len(),
+        ingested.len()
+    );
+    for n in &active {
+        assert_eq!(
+            db.events_of_block(*n).unwrap().len(),
+            1,
+            "block {n} lost its pool event"
+        );
+    }
+
+    // ...and completeness must not be luck. The only sound way to get it from
+    // an aggregating endpoint is never to present a token at all.
+    assert_eq!(
+        rpc.tokens_presented(),
+        0,
+        "LIVE-8: the indexer presented {} continuation token(s) back to the endpoint. \
+         A token is node-local state; the aggregator's next backend resumes from \
+         somewhere else and drops the events in between WITHOUT an error. The scan must \
+         subdivide the block range until every window is answered in one page instead.",
+        rpc.tokens_presented()
+    );
+
+    // The fault is armed — proven, not assumed. Presenting a token to this
+    // endpoint yields a plausible page from the WRONG offset and no error, so
+    // the assertions above are about the indexer's discipline and not about a
+    // fixture that quietly behaves.
+    let first = raw_get_events(&url, &pool, FROM, FROM + COUNT - 1, 3, None).await;
+    let token = first["result"]["continuation_token"]
+        .as_str()
+        .expect("the fixture must page a 40-event range at chunk 3")
+        .to_owned();
+    let honest_next = page_blocks(&first).last().copied().unwrap() + 1;
+    let second = raw_get_events(&url, &pool, FROM, FROM + COUNT - 1, 3, Some(&token)).await;
+    assert!(
+        second.get("error").filter(|e| !e.is_null()).is_none(),
+        "the foreign backend must answer silently, never with an error: {second}"
+    );
+    let got = page_blocks(&second);
+    assert!(
+        got.first().copied() != Some(honest_next),
+        "fixture self-test: presenting a token must resume from the WRONG offset \
+         (honest next block {honest_next}, got {got:?})"
+    );
+    assert!(
+        rpc.foreign_pages() >= 1,
+        "fixture self-test: the foreign-token fault never fired"
+    );
+}
+
+// ------------------------------------------------------------------ T15
+
+/// LIVE-8, the positive half: the union of single-page windows is the WHOLE
+/// truth. The range here cannot be answered in one page at `--chunk-size 2`
+/// (60 events across 40 blocks), so a correct scan subdivides and unions; the
+/// result must equal the chain's active-block set exactly, block for block and
+/// event for event, with nothing dropped and nothing duplicated. Both halves
+/// matter: lava at chunk=100 returned MORE events than the truth as well as
+/// fewer.
+///
+/// Vacuity guards: the fixture is asserted to be unanswerable in one page, and
+/// the endpoint is asserted to have been asked more than one window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t15_the_union_over_subdivided_windows_is_the_true_active_set() {
+    ensure_built();
+    let pool = Felt::from(0x9201u64);
+    const FROM: u64 = 100;
+    const COUNT: u64 = 40;
+    const CHUNK: u64 = 2;
+    let mut chain = dense_chain(pool, FROM, COUNT, 200);
+    // Uneven density: every third block carries a second event, so a scan that
+    // subdivides on block COUNT rather than on what the endpoint answered gets
+    // it wrong.
+    for i in (0..COUNT).step_by(3) {
+        let n = FROM + i;
+        let blk = chain.active.get_mut(&n).unwrap();
+        blk.events.push(FxEvent {
+            keys: vec![
+                Felt::from_hex(ENC_NOTE_CREATED_SELECTOR).unwrap(),
+                Felt::from(0xf000u64 + i),
+            ],
+            data: vec![Felt::from(i)],
+        });
+        blk.diffs.push((Felt::from(0x20_0000u64 + i), Felt::from(i + 1)));
+    }
+    let expected: Vec<(u64, usize)> = chain
+        .active
+        .iter()
+        .map(|(n, b)| (*n, b.events.len()))
+        .collect();
+    let total_events: usize = expected.iter().map(|(_, c)| c).sum();
+    assert!(
+        total_events as u64 > CHUNK,
+        "fixture precondition: {total_events} events at chunk {CHUNK} must not fit in \
+         one page, or subdivision is never exercised"
+    );
+
+    let rpc = FixtureRpc::new(chain, CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) =
+        backfill_synthetic(dir.path(), &url, &pool, FROM, &CHUNK.to_string());
+    assert!(ok, "backfill failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let got: Vec<(u64, usize)> = db
+        .blocks_in_range(FROM, FROM + COUNT - 1)
+        .unwrap()
+        .iter()
+        .map(|b| (b.number, db.events_of_block(b.number).unwrap().len()))
+        .collect();
+    assert_eq!(
+        got, expected,
+        "LIVE-8: the union over the scan's windows must equal the chain's active-block \
+         set exactly — no block dropped (mainnet lost 139) and no event duplicated \
+         (lava at chunk=100 returned MORE than the truth)"
+    );
+
+    assert_eq!(
+        rpc.tokens_presented(),
+        0,
+        "the union must be built from single-page answers only"
+    );
+    let windows = rpc.event_windows();
+    let full = (FROM, FROM + COUNT - 1);
+    assert!(
+        windows.len() > 1 && windows.iter().any(|w| *w != full),
+        "vacuity guard: the endpoint was asked {} window(s) {:?}, none of them narrower \
+         than the whole range. The range holds {total_events} events at chunk {CHUNK}, so \
+         one window cannot answer it — together with the zero-token assertion above, that \
+         means the scan must have SUBDIVIDED to have seen everything it stored.",
+        windows.len(),
+        windows
+    );
+}
+
+// ------------------------------------------------------------------ T16
+
+/// LIVE-8's boundary: a window that STILL returns a continuation token at
+/// single-block granularity cannot be subdivided further. There is exactly one
+/// honest answer — a loud, hard error naming the block. Silently keeping the
+/// first page would be the original defect in miniature: a truncated block,
+/// published as if complete.
+///
+/// The fixture caps pages at 2 events (providers really do cap `chunk_size`;
+/// lava's maximum is 1000) and gives one block 4 events, so no request the
+/// indexer can construct answers that block in one page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t16_an_irreducible_window_is_a_loud_error_not_a_truncation() {
+    ensure_built();
+    let pool = Felt::from(0x9301u64);
+    const FROM: u64 = 100;
+    const FAT_BLOCK: u64 = 105;
+    const FAT_EVENTS: usize = 4;
+    let mut chain = dense_chain(pool, FROM, 10, 200);
+    let blk = chain.active.get_mut(&FAT_BLOCK).unwrap();
+    for extra in 0..(FAT_EVENTS - 1) as u64 {
+        blk.events.push(FxEvent {
+            keys: vec![
+                Felt::from_hex(ENC_NOTE_CREATED_SELECTOR).unwrap(),
+                Felt::from(0xfa70u64 + extra),
+            ],
+            data: vec![Felt::from(extra)],
+        });
+    }
+    assert_eq!(chain.active[&FAT_BLOCK].events.len(), FAT_EVENTS);
+
+    let rpc = FixtureRpc::with_faults(
+        chain,
+        CHAIN_ID,
+        FaultSpec {
+            // Below the fat block's event count: irreducible by construction.
+            max_page: Some(2),
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, FROM, "1000");
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        !ok,
+        "LIVE-8: block {FAT_BLOCK} holds {FAT_EVENTS} events and this endpoint will not \
+         return more than 2 per page, so no single-page window covers it. Following the \
+         token is unsound and truncating is silent data loss — the run must FAIL \
+         loudly.\n{out}"
+    );
+    assert!(
+        out.contains(&format!("block {FAT_BLOCK}")),
+        "the error must name the block that could not be answered ({FAT_BLOCK}), and name \
+         it as a block: a bare \"{FAT_BLOCK}\" could be a timing or another number that \
+         happened to appear:\n{out}"
+    );
+    let lower = out.to_lowercase();
+    assert!(
+        ["continuation", "irreducible", "single page", "one page"]
+            .iter()
+            .any(|w| lower.contains(w)),
+        "the error must say what happened — a window that cannot be answered in one page \
+         even at single-block granularity — in words an operator can act on:\n{out}"
+    );
+
+    // Whatever was written must never be a PARTIAL view of the fat block: a
+    // mirror that stores 2 of 4 events and moves on is the defect, dressed up.
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let stored = db.events_of_block(FAT_BLOCK).unwrap().len();
+    assert!(
+        stored == 0 || stored == FAT_EVENTS,
+        "block {FAT_BLOCK} was stored with {stored} of {FAT_EVENTS} events: a silent \
+         truncation is exactly what this leg forbids"
+    );
+}
+
+// ------------------------------------------------------------------ T17
+
+/// §12 B1: `getStorageProof` error 42 says "the backend that answered this
+/// call has no archive trie", not "this block has no proof". Measured against
+/// mainnet, proofs come back for ANY block on retry — 2 successes in 10
+/// attempts at 2.89M blocks behind head, 2 in 4 at 5.15M behind — and the
+/// ~1024-block window this project once recorded was a bisection over a
+/// nondeterministic predicate (proof-window.md §3).
+///
+/// So a bounded retry against the SAME endpoint must recover, and verify-root
+/// must report MATCH. Failing over instead is forbidden by LIVE-6: publicnode
+/// implements no proofs at any height, so a failover guarantees a false alarm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t17_a_storage_proof_survives_transient_error_42s() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let chain = FixtureChain::build(&fixture);
+    const FLAKY: usize = 3;
+    let rpc = FixtureRpc::with_faults(
+        chain.clone(),
+        CHAIN_ID,
+        FaultSpec {
+            proof_flaky_attempts: FLAKY,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (bo, be, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "backfill failed\nstdout:\n{bo}\nstderr:\n{be}");
+
+    // A fresh budget, so the retries counted below are this command's.
+    rpc.reset_proof_attempts();
+    let denied_before = rpc.proofs_denied();
+    let (stdout, stderr, ok) = verify_root(dir.path(), &url, &url, &pool_hex);
+    let out = format!("{stdout}\n{stderr}");
+    let denied = rpc.proofs_denied() - denied_before;
+
+    assert!(
+        ok && stdout.contains("verify-root OK"),
+        "§12 B1: this endpoint refuses the first {FLAKY} proof attempts at a block and \
+         serves the proof afterwards — exactly what lava does. A bounded retry on error \
+         42 must reach it.\n{out}"
+    );
+    assert!(
+        (FLAKY..=16).contains(&denied),
+        "vacuity guard: the fixture denied {denied} proof(s) during verify-root. Below \
+         {FLAKY} the proof was never actually retried past a refusal; far above it the \
+         retry is not bounded."
+    );
+    let block = block_after(&stdout, "at block ")
+        .unwrap_or_else(|| panic!("verify-root must name the verified block: {stdout}"));
+    let want = felt_hex(&strk20_feed::mpt::storage_root(&chain.state_at(block)));
+    assert!(
+        stdout.contains(&want),
+        "the proof that was finally served must be the chain's root at block {block} \
+         ({want}):\n{stdout}"
+    );
+    assert_ne!(
+        meta(dir.path(), "verify_root_failed").as_deref(),
+        Some("1"),
+        "a proof that succeeded on retry must not leave health latched DEGRADED"
+    );
+}
+
+// ------------------------------------------------------------------ T18
+
+/// §12 B1's other end, and the half §11.4 contributed that survives the
+/// retraction: when the retry budget IS exhausted, the answer is UNAVAILABLE —
+/// a statement about the provider — and never MISMATCH. Conflating the two is
+/// what made a capability-poor endpoint look like mirror corruption (LIVE-6).
+///
+/// The retry must also be bounded: an endpoint that refuses forever must not
+/// spin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t18_an_exhausted_proof_retry_budget_is_unavailable_not_mismatch() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let rpc = FixtureRpc::with_faults(
+        FixtureChain::build(&fixture),
+        CHAIN_ID,
+        // Refuses far beyond any sane budget, but never says "unsupported":
+        // the retry has to give up on its own.
+        FaultSpec {
+            proof_flaky_attempts: 10_000,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (bo, be, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(
+        ok,
+        "an endpoint whose proofs never arrive must not break ingest\nstdout:\n{bo}\nstderr:\n{be}"
+    );
+
+    rpc.reset_proof_attempts();
+    let denied_before = rpc.proofs_denied();
+    let (stdout, stderr, ok) = verify_root(dir.path(), &url, &url, &pool_hex);
+    let out = format!("{stdout}\n{stderr}");
+    let denied = rpc.proofs_denied() - denied_before;
+
+    assert!(
+        out.contains("UNAVAILABLE"),
+        "§12 B1 + §11.4: after the retry budget is spent the answer is UNAVAILABLE, not \
+         an error and not a verdict about the mirror.\n{out}"
+    );
+    assert!(
+        !out.contains("MISMATCH"),
+        "a provider that will not answer must never be reported as a divergence:\n{out}"
+    );
+    assert!(ok, "UNAVAILABLE is not a verification failure:\n{out}");
+    assert_ne!(
+        meta(dir.path(), "verify_root_failed").as_deref(),
+        Some("1"),
+        "UNAVAILABLE must never latch verify_root_failed (health DEGRADED)"
+    );
+    assert!(
+        denied >= 3,
+        "vacuity guard: only {denied} proof attempt(s) were made. Asking each configured \
+         endpoint once is not a retry — §12 B1 requires a bounded retry against the SAME \
+         endpoint, because error 42 names the backend and not the block."
+    );
+    assert!(
+        denied <= 64,
+        "the retry must be BOUNDED; {denied} attempts against an endpoint that always \
+         refuses is a spin, not a budget"
+    );
+}
+
+// ------------------------------------------------------------------ T19
+
+/// §12 B2, the check that makes retry-until-success safe rather than
+/// wishful: the proof pool is anonymous and load-balanced, so an accepted
+/// proof must be BOUND to the chain — `global_roots.block_hash` compared with
+/// `getBlockWithTxHashes(block).block_hash` — before its `storage_root` is
+/// believed. Without it, "retry until one succeeds" is indistinguishable from
+/// "accept whichever answer we liked".
+///
+/// This is the negative of T17: there the retried proof is genuine, here the
+/// served proof carries an honest-looking root under the WRONG block hash. It
+/// must be a hard error — never a retry-and-hope, never UNAVAILABLE (that
+/// would file a lying endpoint under "capability gap"), and the root must
+/// never reach the published anchors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t19_a_proof_that_is_not_bound_to_the_block_is_rejected() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let rpc = FixtureRpc::new(FixtureChain::build(&fixture), CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    // Built against an honest endpoint, so nothing below is about a broken
+    // mirror.
+    let (bo, be, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "backfill failed\nstdout:\n{bo}\nstderr:\n{be}");
+    let (stdout, _, ok) = verify_root(dir.path(), &url, &url, &pool_hex);
+    assert!(
+        ok && stdout.contains("verify-root OK"),
+        "control: with an honest endpoint the mirror verifies: {stdout}"
+    );
+    let anchors_path = dir.path().join("feed/anchors.ndjson");
+    let anchors_before = std::fs::read(&anchors_path).unwrap_or_default();
+
+    // Now the pool answers for a block that is not the one we asked about.
+    rpc.set_lying_proof(true);
+    let (stdout, stderr, ok) = verify_root(dir.path(), &url, &url, &pool_hex);
+    let out = format!("{stdout}\n{stderr}");
+
+    assert!(
+        !ok,
+        "§12 B2: the proof's global_roots.block_hash is not the block's hash, so it is \
+         not a proof about this block at all. Accepting its storage_root is how a \
+         load-balanced pool gets to choose our answer. This must be a hard error.\n{out}"
+    );
+    assert!(
+        !out.contains("verify-root OK"),
+        "the unbound proof must never be reported as a match:\n{out}"
+    );
+    assert!(
+        !out.contains("UNAVAILABLE"),
+        "an endpoint that ANSWERS with a proof that does not belong to the block has not \
+         had a capability gap; filing it as UNAVAILABLE hides a lie behind LIVE-6:\n{out}"
+    );
+    let lower = out.to_lowercase();
+    assert!(
+        lower.contains("block_hash") || lower.contains("block hash"),
+        "the rejection must name the chain binding that failed:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read(&anchors_path).unwrap_or_default(),
+        anchors_before,
+        "§12 B2: a root from an unbound proof must never be published as an anchor"
+    );
+}
+
+// ------------------------------------------------------------------ T20
+
+/// A continuation token does NOT mean "the page was filled". `chunk_size` is a
+/// maximum in the JSON-RPC spec, and a provider is free to stop early on an
+/// internal budget — a scanned-block-range limit is the usual one — and hand
+/// back a short page plus a token. That is the same class of provider variance
+/// as LIVE-1 and LIVE-8: an answer about the backend, not about the data.
+///
+/// Two things must follow, and neither did before. The short page must not be
+/// read as evidence about event density (the scan's page estimate is
+/// monotonically non-increasing, so one short page clamps every later window
+/// for the rest of a multi-hour scan), and — the sharp end, pinned here — a
+/// one-block window that comes back short with a token must be RE-REQUESTED
+/// rather than declared irreducible. A fresh single-page request carries no
+/// cross-request state, so asking again is sound, and it is the only thing
+/// that distinguishes "this block holds more events than a page" from "this
+/// answer was cut short".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t20_a_short_page_with_a_token_is_re_requested_not_called_irreducible() {
+    ensure_built();
+    let pool = Felt::from(0x9401u64);
+    const ONLY: u64 = 105;
+    // Exactly one block in the whole scan range, so the FIRST window the scan
+    // asks is already a one-block window: there is nothing left to subdivide
+    // and the re-request is the only way forward.
+    let chain = dense_chain(pool, ONLY, 1, ONLY);
+    let rpc = FixtureRpc::with_faults(
+        chain,
+        CHAIN_ID,
+        FaultSpec {
+            // One short-and-tokened answer, then the endpoint behaves.
+            range_budget_tokens: 1,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, ONLY, "1000");
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        ok,
+        "the endpoint cut ONE answer short and then served the same window whole. Calling \
+         that block irreducible aborts a backfill over an endpoint that can answer it \
+         perfectly well:\n{out}"
+    );
+    assert!(
+        rpc.short_token_pages() >= 1,
+        "vacuity guard: the fixture never truncated a page, so nothing about short-page \
+         tokens was exercised"
+    );
+    assert_eq!(
+        rpc.tokens_presented(),
+        0,
+        "LIVE-8 is unchanged by any of this: a token is never presented, only re-asked \
+         around"
+    );
+    let windows = rpc.event_windows();
+    assert!(
+        windows.iter().filter(|w| **w == (ONLY, ONLY)).count() >= 2,
+        "the same window must be asked again — that is the re-request. Windows asked: \
+         {windows:?}"
+    );
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    assert_eq!(
+        db.events_of_block(ONLY).unwrap().len(),
+        1,
+        "and the block must be mirrored in full: a short page kept as if it were complete \
+         is the LIVE-8 data loss under another name"
+    );
+}
+
+/// The other side of T20: an endpoint that cuts EVERY answer short is not a
+/// tuning problem and must not be described as one. It cannot serve a
+/// single-page window for one block at all, so the run fails — with advice
+/// that can be acted on. "Raise --chunk-size" is the wrong answer here (the
+/// page was not full; raising the cap changes nothing), and telling an
+/// operator to raise a limit that is not the limit costs a support cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t20b_an_endpoint_that_always_truncates_is_named_as_the_problem() {
+    ensure_built();
+    let pool = Felt::from(0x9402u64);
+    const ONLY: u64 = 105;
+    let chain = dense_chain(pool, ONLY, 1, ONLY);
+    let rpc = FixtureRpc::with_faults(
+        chain,
+        CHAIN_ID,
+        FaultSpec {
+            range_budget_tokens: usize::MAX,
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, ONLY, "1000");
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        !ok,
+        "no single-page request covers this block, and keeping a truncated page would be \
+         silent data loss:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("block {ONLY}")),
+        "the error must name the block:\n{out}"
+    );
+    assert!(
+        out.contains("chunk_size of 1000"),
+        "the error must report what was ASKED for as well as what came back — the two \
+         together are what say the page was not full:\n{out}"
+    );
+    assert!(
+        !out.contains("Raise --chunk-size"),
+        "the page was not full, so raising the page size cannot help. Advice that cannot \
+         work is worse than none:\n{out}"
+    );
+    assert!(
+        out.contains("replaced"),
+        "the operator has to be told the endpoint itself is the problem:\n{out}"
+    );
+}
+
+// ------------------------------------------------------------------ T21
+
+/// The scan is SEGMENTED, so a failure costs one segment and not the whole
+/// backfill.
+///
+/// The scan buffers every event it finds and the frontier is only written once
+/// ingest has run, so a scan over the entire remaining range holds ~120k
+/// events on a genesis backfill and throws away every call it made if anything
+/// fails at the end of it. Here the last segment contains a block no endpoint
+/// can answer in one page (T16's irreducible window), and what must survive is
+/// everything the earlier segments already learned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t21_a_failure_late_in_a_backfill_costs_one_segment_not_all_of_it() {
+    ensure_built();
+    let pool = Felt::from(0x9501u64);
+    const EARLY: u64 = 1_000;
+    const FAT: u64 = 210_000;
+    const HEAD: u64 = 250_000;
+    const SEGMENT: u64 = 100_000;
+    let mut chain = FixtureChain::synthetic(pool, HEAD, HEAD - 10);
+    chain.active.insert(EARLY, active_block(1));
+    let mut fat = active_block(2);
+    for extra in 0..3u64 {
+        fat.events.push(FxEvent {
+            keys: vec![
+                Felt::from_hex(ENC_NOTE_CREATED_SELECTOR).unwrap(),
+                Felt::from(0xfa70u64 + extra),
+            ],
+            data: vec![Felt::from(extra)],
+        });
+    }
+    assert_eq!(fat.events.len(), 4);
+    chain.active.insert(FAT, fat);
+
+    let rpc = FixtureRpc::with_faults(
+        chain,
+        CHAIN_ID,
+        FaultSpec {
+            // Below the fat block's event count: irreducible by construction,
+            // and it lives in the THIRD segment.
+            max_page: Some(2),
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, 0, "1000");
+    let out = format!("{stdout}\n{stderr}");
+    assert!(!ok, "the irreducible window at block {FAT} must still fail loudly:\n{out}");
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    assert_eq!(
+        db.events_of_block(EARLY).unwrap().len(),
+        1,
+        "block {EARLY} was found in the FIRST segment and ingested there. An unsegmented \
+         scan discards everything it accumulated when a later window fails, so this block \
+         would not be in the mirror at all:\n{out}"
+    );
+    let cursor = db.ingest_cursor().unwrap();
+    assert!(
+        cursor.unwrap_or(0) >= 2 * SEGMENT - 1,
+        "the frontier must be checkpointed at each segment boundary, or the work is redone \
+         from the start on every restart: cursor = {cursor:?}"
+    );
+    assert!(
+        cursor.unwrap_or(u64::MAX) < FAT,
+        "...and it must NOT have advanced past the block that could not be answered: \
+         cursor = {cursor:?}"
     );
 }
 

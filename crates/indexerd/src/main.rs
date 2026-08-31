@@ -296,7 +296,7 @@ async fn cut_epochs_with_recovery(
     l1_accepted: u64,
 ) -> u64 {
     for attempt in 0..2 {
-        let frontier = db.ingest_cursor().ok().flatten().map(|(f, _)| f).unwrap_or(0);
+        let frontier = db.ingest_cursor().ok().flatten().unwrap_or(0);
         let cutter = Cutter {
             db,
             rpc,
@@ -306,12 +306,14 @@ async fn cut_epochs_with_recovery(
         match cutter.cut_ready_epochs(l1_accepted, frontier).await {
             Ok(n) => return n,
             Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") && attempt == 0 => {
-                let from = db
-                    .last_epoch()
-                    .ok()
-                    .flatten()
-                    .map(|(_, _, to)| to + 1)
-                    .unwrap_or(cfg.genesis_block);
+                // The lower bound must COVER the block the mismatch names: a
+                // basis-block mismatch is reported at the newest cut epoch's
+                // end block, which `last_epoch.to + 1` sits above.
+                let from = strk20_indexerd::cutter::rescan_lower_bound(
+                    &format!("{e:#}"),
+                    db.last_epoch().ok().flatten().map(|(_, _, to)| to),
+                    cfg,
+                );
                 // Up to the FRONTIER, not to l1_accepted: verify-root now
                 // checks at min(frontier, rpc_head) (LIVE-4), and l1_accepted
                 // lags head by ~5000 blocks on mainnet, so a rescan capped at
@@ -334,6 +336,20 @@ async fn cut_epochs_with_recovery(
                         return 0;
                     }
                 }
+            }
+            Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") => {
+                // The rescan widened to the epoch containing the divergence and
+                // the mirror still disagrees, so the missing write is older
+                // than that. Nothing short of a full resync will find it, and
+                // saying so is the difference between an operator who acts and
+                // one who watches a line repeat.
+                tracing::error!(
+                    error = %e,
+                    "epoch cutting halted: the §5.6 rescan did not repair this divergence, so \
+                     the missing write is below the rescanned range — re-run with \
+                     --full-resync. Publication stays blocked until verify-root passes."
+                );
+                return 0;
             }
             Err(e) => {
                 tracing::error!(error = %e, "epoch cutting halted");
@@ -362,7 +378,7 @@ async fn backfill(common: CommonOpts) -> Result<()> {
             ingestor.run_cycle().await?
         };
         let _ = cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, outcome.l1_accepted).await;
-        let frontier = db.ingest_cursor()?.map(|(f, _)| f).unwrap_or(0);
+        let frontier = db.ingest_cursor()?.unwrap_or(0);
         let cutter = Cutter {
             db: &db,
             rpc: &rpc,
@@ -453,9 +469,8 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
         None => {
             let frontier = db
                 .ingest_cursor()?
-                .map(|(f, _)| f)
                 .ok_or_else(|| anyhow::anyhow!("no ingest cursor in db; run ingest first"))?;
-            cutter.verify_root_in_window(frontier).await?
+            cutter.verify_root_at_target(frontier).await?
         }
     };
     match outcome {
@@ -468,8 +483,9 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
         // "We could not check" is not "the mirror is wrong": a capability gap
         // is reported, and the exit status stays zero.
         VerifyOutcome::Unavailable(why) => println!(
-            "verify-root UNAVAILABLE: no block inside the live storage-proof window is \
-             covered by this mirror ({why}). This says nothing about mirror correctness."
+            "verify-root UNAVAILABLE: every configured endpoint spent its whole storage-proof \
+             retry budget refusing ({why}). This is a statement about the providers and says \
+             nothing about mirror correctness."
         ),
     }
     Ok(())
@@ -549,7 +565,6 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
                 &events,
                 b.replaced_class.as_ref(),
                 b.number,
-                None,
             )?;
             db.record_seen_head(&b.hash, b.number)?;
         }
@@ -572,7 +587,7 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
         println!("epoch {}: verified + stored + ingested", entry.e);
     }
     if last_to > 0 {
-        db.set_ingest_cursor(last_to, None)?;
+        db.set_ingest_cursor(last_to)?;
         db.meta_set("chain_id", &cfg.chain_id)?;
         db.meta_set("pool_address", &strk20_feed::felt_hex(&cfg.pool))?;
         db.meta_set("genesis_block", &cfg.genesis_block.to_string())?;

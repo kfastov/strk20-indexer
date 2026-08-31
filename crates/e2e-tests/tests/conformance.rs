@@ -33,7 +33,7 @@ async fn engine_over_sqlite_equals_engine_over_mock() {
         let mut diffs: Vec<(Felt, Felt)> = f.slots.iter().map(|(k, v)| (*k, *v)).collect();
         diffs.sort_by_key(|a| a.0.to_bytes_be());
         let events: Vec<EventRow> = Vec::new();
-        db.insert_block_data(&block, &diffs, &events, None, 46, None)
+        db.insert_block_data(&block, &diffs, &events, None, 46)
             .unwrap();
         db.meta_set("head_number", "46").unwrap();
         db.meta_set("head_hash", &strk20_feed::felt_hex(&block.hash))

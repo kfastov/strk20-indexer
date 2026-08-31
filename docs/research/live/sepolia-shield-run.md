@@ -564,3 +564,57 @@ id, new note enc data, proving block and `pool_class_hash_at_block`.
 - The indexer now has fixtures for **both** classes in a 1,670-block window: a note creation
   at 14,339,115 (old class), a class upgrade at 14,339,893, and a spend + note creation at
   14,340,785 (new class).
+
+---
+
+# Addendum — the scripts now ship in `examples/sepolia/`
+
+Added 2026-08-31, after Run 2. The working copies described above live under
+gitignored `data/sepolia/shield/` and are staying there; what ships is a
+key-free port of the same code at
+[`examples/sepolia/`](../../../examples/sepolia), so the two runs are
+reproducible by someone with their own testnet account.
+
+**Only code was copied. No key material was.** The changes that made that true:
+
+- `lib.mjs` no longer hard-codes `DATA_DIR`. The account comes from
+  `STRK20_ACCOUNTS_FILE` (an sncast accounts file the operator supplies) or from
+  `STRK20_ACCOUNT_PRIVATE_KEY` / `STRK20_ACCOUNT_ADDRESS` in the environment.
+- The derived viewing key is written to `STRK20_KEY_FILE`, mode 0600, at a path
+  the operator names and which must be outside the repo. `keyFilePath()` throws
+  with an explanatory message when the variable is unset, so there is no
+  in-repo default to fall into.
+- The shipped `save-keys.mjs` **drops `account_private_key` from the key file**.
+  The working copy carried it for convenience; the published flow reads the
+  account key from the operator's own source every time, so the derived-key file
+  holds one secret instead of two.
+- `verify-spend.mjs` and `storage-check.mjs` took their note ids, nullifier and
+  block numbers from hard-coded constants of Run 1/Run 2. They now read them
+  from the operator's key-file transaction record, with env overrides.
+- `.env.example` carries placeholders only; `.env` is gitignored at the repo
+  root, and `examples/sepolia/.gitignore` additionally excludes `node_modules/`,
+  `upstream/`, `.local/`, `accounts.json` and `viewing-key-*.json`.
+- `faucet/flow4.py` ships as `faucet/faucet.py` with the two findings that made
+  it work written into its docstring: the undocumented required
+  `network: "sepolia"` field, and connection pinning for the intermittent
+  `POW_CHALLENGE_INVALID`.
+
+**Secret scan of everything created under `examples/`** (run before finishing):
+
+- Every secret-derived string from `data/sepolia/accounts.json`,
+  `viewing-key-strk20test.json`, `vk.txt` and `vk_b.txt` — account private keys,
+  public keys, salts, the viewing key in hex and decimal — expanded into 79
+  variants (raw, lower, upper, 0x-stripped, zero-padded to 64, decimal) and
+  searched across every file under `examples/`: **0 hits**.
+- Every `0x`-hex literal of 32 or more hex digits under `examples/`: **9 total,
+  all public constants** — the Sepolia pool address, the STRK token address, and
+  four event selectors (`EncNoteCreated`, `ViewingKeySet`, `Deposit`,
+  `NoteUsed`), which are `starknet_keccak` of the event names.
+- `private_key` / `viewing_key` / `privateKey` / `secret` / `mnemonic`: hits are
+  all env-var names, function parameters, field names and prose. No values.
+- No occurrence of the run's account address, note ids, or nullifier, and no
+  reference to `data/sepolia` or any absolute local path.
+
+`examples/sepolia/README.md` carries the three corrections that cost the most in
+this run — the faucet's `network` field, the head−9 proving block, and the ~9
+STRK per pool transaction budget — so the next operator does not rediscover them.

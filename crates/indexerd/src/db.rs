@@ -89,13 +89,24 @@ CREATE TABLE IF NOT EXISTS snapshots (
   zst          TEXT NOT NULL,
   bytes        INTEGER NOT NULL,
   slots        INTEGER NOT NULL,
-  storage_root TEXT NOT NULL
+  storage_root TEXT NOT NULL,
+  -- §12 B4: the chain-bound proof at the basis block, when one was obtained,
+  -- and which grounding the manifest therefore publishes.
+  anchor_block        INTEGER,
+  anchor_block_hash   BLOB,
+  anchor_storage_root BLOB,
+  anchor_class_hash   BLOB,
+  grounding           TEXT NOT NULL DEFAULT 'reachability'
 );
 
+-- LIVE-8: there is no continuation cursor here on purpose. A getEvents
+-- continuation token is node-local state and every endpoint we use is an
+-- aggregator, so a token stored and presented later is answered by a backend
+-- that never issued it. Windows are subdivided until each fits one page
+-- instead, and nothing about a scan survives the request that made it.
 CREATE TABLE IF NOT EXISTS ingest_cursor (
   id                  INTEGER PRIMARY KEY CHECK (id = 1),
-  scan_frontier       INTEGER NOT NULL,
-  events_continuation TEXT
+  scan_frontier       INTEGER NOT NULL
 );
 
 -- Every canonical head hash ever observed (incl. non-pool-active blocks), so
@@ -162,6 +173,18 @@ impl Db {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(DDL)?;
+        // Columns added after the table shipped. `CREATE TABLE IF NOT EXISTS`
+        // leaves an existing table alone, so a db opened from an earlier build
+        // needs them added; already-present is not an error worth surfacing.
+        for add in [
+            "ALTER TABLE snapshots ADD COLUMN anchor_block INTEGER",
+            "ALTER TABLE snapshots ADD COLUMN anchor_block_hash BLOB",
+            "ALTER TABLE snapshots ADD COLUMN anchor_storage_root BLOB",
+            "ALTER TABLE snapshots ADD COLUMN anchor_class_hash BLOB",
+            "ALTER TABLE snapshots ADD COLUMN grounding TEXT NOT NULL DEFAULT 'reachability'",
+        ] {
+            let _ = conn.execute(add, []);
+        }
         Ok(Self {
             conn,
             path: path.to_owned(),
@@ -337,8 +360,7 @@ impl Db {
         // report a permanent divergence that nothing can clear.
         tx.execute("DELETE FROM anchors WHERE block > ?1", [ancestor as i64])?;
         tx.execute(
-            "UPDATE ingest_cursor SET scan_frontier = MIN(scan_frontier, ?1),
-             events_continuation = NULL WHERE id = 1",
+            "UPDATE ingest_cursor SET scan_frontier = MIN(scan_frontier, ?1) WHERE id = 1",
             [ancestor as i64],
         )?;
         // The next probe must re-run at the rewound frontier.
@@ -360,7 +382,6 @@ impl Db {
         events: &[EventRow],
         replaced_class: Option<&Felt>,
         new_frontier: u64,
-        continuation: Option<&str>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -419,35 +440,32 @@ impl Db {
         // the only thing that moves the frontier down, and `rollback_above`
         // does that explicitly.
         tx.execute(
-            "INSERT INTO ingest_cursor(id, scan_frontier, events_continuation)
-             VALUES (1, ?1, ?2)
+            "INSERT INTO ingest_cursor(id, scan_frontier) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET
-               scan_frontier = MAX(scan_frontier, excluded.scan_frontier),
-               events_continuation = excluded.events_continuation",
-            params![new_frontier as i64, continuation],
+               scan_frontier = MAX(scan_frontier, excluded.scan_frontier)",
+            params![new_frontier as i64],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn ingest_cursor(&self) -> Result<Option<(u64, Option<String>)>> {
+    /// Last fully-ingested block, if any.
+    pub fn ingest_cursor(&self) -> Result<Option<u64>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT scan_frontier, events_continuation FROM ingest_cursor WHERE id = 1",
+                "SELECT scan_frontier FROM ingest_cursor WHERE id = 1",
                 [],
-                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Option<String>>(1)?)),
+                |r| Ok(r.get::<_, i64>(0)? as u64),
             )
             .optional()?)
     }
 
-    pub fn set_ingest_cursor(&self, frontier: u64, continuation: Option<&str>) -> Result<()> {
+    pub fn set_ingest_cursor(&self, frontier: u64) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO ingest_cursor(id, scan_frontier, events_continuation)
-             VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET scan_frontier = excluded.scan_frontier,
-                                           events_continuation = excluded.events_continuation",
-            params![frontier as i64, continuation],
+            "INSERT INTO ingest_cursor(id, scan_frontier) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET scan_frontier = excluded.scan_frontier",
+            params![frontier as i64],
         )?;
         Ok(())
     }
@@ -640,10 +658,16 @@ impl Db {
     // --------------------------------------------------------- snapshots
 
     pub fn insert_snapshot(&self, s: &strk20_feed::manifest::ManifestSnapshot) -> Result<()> {
+        let anchor = s.anchor.as_ref();
+        let felt_of = |hex: Option<&String>| -> Option<Vec<u8>> {
+            hex.and_then(|h| Felt::from_hex(h).ok())
+                .map(|f| felt_blob(&f).to_vec())
+        };
         self.conn.execute(
             "INSERT OR REPLACE INTO snapshots(e, block, epoch_hash, file, hash, zst, bytes,
-                slots, storage_root)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                slots, storage_root, anchor_block, anchor_block_hash, anchor_storage_root,
+                anchor_class_hash, grounding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 s.e as i64,
                 s.block as i64,
@@ -653,7 +677,12 @@ impl Db {
                 s.zst,
                 s.bytes as i64,
                 s.slots as i64,
-                s.storage_root
+                s.storage_root,
+                anchor.map(|a| a.block as i64),
+                felt_of(anchor.map(|a| &a.block_hash)),
+                felt_of(anchor.map(|a| &a.storage_root)),
+                felt_of(anchor.map(|a| &a.class)),
+                s.grounding,
             ],
         )?;
         Ok(())
@@ -662,11 +691,28 @@ impl Db {
     /// Published snapshots, ascending by epoch.
     pub fn snapshot_rows(&self) -> Result<Vec<strk20_feed::manifest::ManifestSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT e, block, epoch_hash, file, hash, zst, bytes, slots, storage_root
+            "SELECT e, block, epoch_hash, file, hash, zst, bytes, slots, storage_root,
+                    anchor_block, anchor_block_hash, anchor_storage_root, anchor_class_hash,
+                    grounding
              FROM snapshots ORDER BY e",
         )?;
         let rows = stmt
             .query_map([], |r| {
+                let anchor_block: Option<i64> = r.get(9)?;
+                let hex_at = |i: usize| -> rusqlite::Result<String> {
+                    Ok(strk20_feed::felt_hex(&blob_felt(
+                        &r.get::<_, Vec<u8>>(i)?,
+                    )))
+                };
+                let anchor = match anchor_block {
+                    Some(b) => Some(strk20_feed::manifest::EpochAnchor {
+                        block: b as u64,
+                        block_hash: hex_at(10)?,
+                        storage_root: hex_at(11)?,
+                        class: hex_at(12)?,
+                    }),
+                    None => None,
+                };
                 Ok(strk20_feed::manifest::ManifestSnapshot {
                     e: r.get::<_, i64>(0)? as u64,
                     block: r.get::<_, i64>(1)? as u64,
@@ -677,6 +723,8 @@ impl Db {
                     bytes: r.get::<_, i64>(6)? as u64,
                     slots: r.get::<_, i64>(7)? as u64,
                     storage_root: r.get(8)?,
+                    anchor,
+                    grounding: r.get(13)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

@@ -305,3 +305,216 @@ running an archive node (§11.6) can restore both.
   same fixture RPC — real byte-determinism, not operator independence — and the
   harness's independent encoder borrows the product's `felt_hex`, with the hex
   spelling pinned separately by `feed/tests/snapshot.rs::golden_snapshot_bytes`.
+
+## LIVE-8 + §12 correction pass (2026-08-31)
+
+Two defects, both measured against live mainnet, both with one root cause:
+`rpc.starknet.lava.build` is an **aggregator**, so successive calls to the same
+URL reach different backend nodes with different capabilities and different
+local state. Code that assumed "the endpoint" is one node was unsound.
+
+### A — the scan no longer presents a continuation token (LIVE-8)
+
+`ingest.rs::scan_active_blocks` used to page through one big `getEvents` range
+with a `continuation_token`. A token is **node-local state**: handed to a
+different backend it does not error — it resumes from somewhere else and the
+events in between are dropped silently. Measured on the same range and
+endpoint, `chunk_size=1000` found 2,628 distinct blocks in 13 pages while
+`chunk_size=200` found 2,608 in 62; a full mainnet backfill lost 139 blocks and
+489 events (chain 120,135 events in 28,655 blocks, mirror 119,646 in 28,532),
+which is what made `verify-root` report a genuine root mismatch.
+
+The scan now **subdivides the block range until every window is answered in a
+single page with no continuation token**, and takes the union. A single
+response carries no cross-request state, so it is sound under any routing —
+which also removed the "restart the scan when our own failover fired" branch,
+since an endpoint change mid-scan is now harmless.
+
+- Window sizing is predictive (`next_window_len`: aim at three quarters of a
+  page, using the page capacity the endpoint has actually demonstrated), with
+  halving whenever an answer carries a token. An overshoot costs exactly one
+  call.
+- A window that still carries a token at **single-block granularity** is a hard
+  error naming the block. Keeping the first page would be this very defect,
+  silently; following the token is what the whole change forbids.
+- `ingest_block` no longer re-fetches a block's events: the scan already has
+  them. That removed one `getEvents` per active block — the dominant cost — and
+  with it a per-block paging loop that was unsound for the same reason. Only
+  the §5.6 rescan path fetches, in one page, with the same irreducible-window
+  error.
+
+**Cost, measured** against the fixture RPC on a mainnet-shaped sparse chain
+(5,200,000 blocks, clustered bursts, 25,797 pool-active blocks carrying 116,095
+events — the real backfill saw 28,655 / 120,135; `chunk_size` 1000):
+
+| | `getEvents` calls |
+|---|---|
+| subdivision scan (new) | **156** |
+| paged scan, old | 117 pages |
+| + one page per active block, old | 25,797 |
+| old total | **25,914** |
+
+So the scan itself costs 1.33x the old page count — 39 extra calls, the
+halvings and the growth probes — and the run as a whole costs **166x less**,
+because dropping the per-block re-fetch removes the term that dominated. A
+200,000-block run at the same density: 20 calls versus 12 + 2,511.
+
+### B — basis-block anchors restored (consumer-path §12)
+
+`docs/research/live/proof-window.md` retracts the "~1024-block proof window":
+that was a bisection over a nondeterministic predicate. Deep proofs answer for
+any block, back to genesis, from the endpoint we already use — measured 2
+successes in 4 attempts at 5.15M blocks behind head, with every proof's
+`global_roots.block_hash` matching the real header.
+
+- **B1** `get_storage_proof` retries error 42 against the **same** endpoint
+  (`PROOF_RETRIES`) before moving on, and never fails over on a proof refusal
+  (LIVE-6: publicnode implements no proofs at any height, so a failover
+  guarantees a false alarm). Only after every endpoint has spent its budget is
+  the answer `UNAVAILABLE`.
+- **B2** `Cutter::bound_proof` is the only door to a proof: the response's
+  `global_roots.block_hash` must equal `getBlockWithTxHashes(block).block_hash`
+  before any `storage_root` is believed. The proof pool is anonymous and
+  load-balanced, so without this, retry-until-success is indistinguishable from
+  accepting whichever answer we liked. A disagreement — or a proof with no
+  block hash to bind — is a hard error (`PROOF NOT BOUND TO BLOCK`), never a
+  retry and never `UNAVAILABLE`; filing it under LIVE-6 would hide a lie behind
+  a capability gap.
+- **B3** `verify-root` keeps its three-valued `MATCH` / `MISMATCH` /
+  `UNAVAILABLE` outcome and its capability awareness — those survive the
+  retraction — and now actually reaches a verdict at a block of our choosing.
+- **B4** a snapshot's **basis-block anchor is the primary grounding again**:
+  `snapshots/{e:08}.anchor.json` carries the stored proof, `manifest.snapshot.
+  anchor` carries `{block, block_hash, storage_root, class}`, and
+  `manifest.snapshot.grounding` says which grounding was used
+  (`"basis-anchor"` or `"reachability"`) rather than leaving a client to infer
+  it from a missing field. The §11.3 reachability walk is **kept**, demoted to
+  the fallback for a basis whose proof could not be obtained: it also validates
+  the intervening epochs and it is the only check that catches an internally
+  consistent forged slot set (S4(ii)). The client refuses a manifest that
+  claims an anchor it cannot show, or whose sidecar does not agree with the
+  snapshot's own slot set — `SNAPSHOT_ROOT_MISMATCH`.
+
+The basis proof is attempted over a **bounded number of cycles per basis
+epoch** (`BASIS_PROBE_ATTEMPTS`, tracked by `snapshot_basis_probe_epoch` +
+`snapshot_basis_probe_attempts`), and the counter is written only by an attempt
+that actually happened and actually failed. Both halves matter: a refusal is
+per-call routing luck rather than a property of the block, so one unlucky group
+of retries must not cost a snapshot its primary grounding for good; and a
+counter written *before* the call would make the mismatch path below into the
+silent skip it exists to prevent. The budget is bounded because an endpoint
+that implements no proofs at any height must not be asked once per poll for the
+life of the process.
+
+**Method note, unchanged and still binding:** against an aggregating endpoint a
+single failed request proves nothing. Three defects in this project now share
+that root cause (LIVE-1 pruned history, LIVE-8 continuation tokens, the
+retracted proof-window measurement).
+
+
+## Repair pass on the LIVE-8 / §12 change set (2026-08-31, same day)
+
+An adversarial review of the change set above found ten issues; nine are fixed
+here, one is rejected with reasoning. Every fix carries a leg that fails when
+the fix is reverted (verified by mutation, not by inspection).
+
+**The live data-integrity hole (F1 + F2), one defect in two places.** A basis
+proof that was OBTAINED and DISAGREED with the snapshot's slot set was detected
+once and then lost: the per-epoch probe marker was committed before the proof
+call, so the `bail!` left the marker behind, and the very next call — which
+`cut_epochs_with_recovery` makes inside the same function — skipped the proof,
+found the §11.3 anchor gate met, and published the slot set the chain had just
+contradicted, with `grounding: "reachability"` and health still OK. The comment
+above that `bail!` asserted the opposite of what the code did. Fixed on both
+sides: the probe counter is written only after a definitive answer and never on
+the mismatch path, and a basis mismatch now **latches** `verify_root_failed`,
+which is what stops the fallback grounding from publishing while the divergence
+stands. Pinned by `publication_gate.rs::a_basis_proof_that_contradicts_the_
+slot_set_latches_instead_of_falling_back`, whose primary assertion is the
+published file, not the latch.
+
+F2 is the same hole's other end: the §5.6 recovery rescan started at
+`last_epoch.to + 1`, and a basis mismatch is reported AT `last_epoch.to`, so the
+rescan covered a range that provably could not contain the divergence and
+reported "recovered 0 blocks". `cutter::rescan_lower_bound` now widens the range
+to the start of the epoch containing the block the mismatch names, and a
+mismatch that survives the rescan says so and names `--full-resync` instead of
+repeating one line.
+
+**F4 — reorg versus lie.** `bound_proof` compares a proof's
+`global_roots.block_hash` with a header hash from a second, independently
+routed call, at a block deliberately chosen near head. At that depth two hashes
+for one block number are ordinary reorg behaviour, and reporting them as
+`PROOF NOT BOUND TO BLOCK` puts routine chain noise on the one channel that
+must stay quiet to be believed. A disagreement is now re-tested once — proof
+and header both re-fetched — and only a disagreement that survives is the hard
+error. A missing `block_hash` is still fatal on the first answer: no re-read
+supplies a field the proof does not have.
+
+**F5 — a continuation token does not mean the page was full.** `chunk_size` is
+a maximum in the JSON-RPC spec and a provider may stop early on an internal
+budget. The scan treated every token as evidence about event density, which
+(a) clamped its page estimate monotonically for the rest of a multi-hour scan
+and (b) aborted a backfill at a one-block window with "raise --chunk-size" —
+advice that cannot work when the page was not full, and which fires on a block
+with no pool events at all. Now: the estimate shrinks only on a page that came
+back full, a short page carrying a token is re-requested once (a fresh
+single-page request carries no cross-request state, so asking again is sound),
+and the irreducible-window error reports both what was asked for and what came
+back, with different guidance for the two causes.
+
+**F6 — retry budget sized against the measurement.** `PROOF_RETRIES` was 8
+against a worst observed success rate of ~0.2 per attempt, i.e. `0.8^8` ≈ 17%:
+roughly one obtainable deep proof in six answered `UNAVAILABLE`. It is 16 now
+(2.8%), and no caller depends on one group of attempts any more (see the basis
+probe budget above). Also: `proofs_served` is incremented only after the
+response parses, so an endpoint answering unparseable JSON no longer promotes
+itself to the head of `proof_order`.
+
+**F7 — a grounding claim with nothing behind it.** `manifest.snapshot.grounding`
+was published and never enforced: a manifest claiming `"basis-anchor"` with
+`anchor: null` was accepted, silently downgrading every consumer to the fallback
+while both the manifest and the client's log said otherwise. The two fields come
+from one `Option` server-side, so a disagreement is `FEED_MALFORMED`. (Base leg
+m(iv) names this case `SNAPSHOT_ANCHOR_MISSING` for a design in which the anchor
+was unconditional; under §12 B4 `anchor: null` is legitimate whenever grounding
+says `"reachability"`, so only the contradiction is an error.)
+
+**F9 / F10 — structural, not behavioural.** `RpcClient::get_events` no longer
+takes a `continuation` parameter and `ingest_cursor` no longer has a
+continuation column: "never present a token" is enforced by the type and the
+schema rather than by two call sites and one integration counter. And the scan
+is segmented (`SCAN_SEGMENT`), so a failure costs one segment instead of the
+whole backfill — pinned by `t21`, where an irreducible window in the third
+segment leaves the first segment's blocks mirrored and the frontier
+checkpointed.
+
+**F3 — REJECTED in part, and the false claim removed.** The review is right
+that the code claimed more than it delivered: `cutter.rs` said the sidecar is
+walked by "§1.5 ring 5, so the roots are not merely asserted", and the client
+reads only `contracts_proof.contract_leaves_data[0].storage_root` — a scalar —
+never `contracts_proof.nodes`. That comment is gone, and both the cutter and
+`check_basis_anchor` now state exactly what the sidecar buys.
+
+The proposed remedy — walk the contracts proof from the leaf to
+`global_roots.contracts_tree_root` — is **rejected**: it would not change the
+adversary model it is offered against. A keyless client has no independent
+source for the block's state root, so `global_roots` is a publisher claim
+however it is reached; a publisher forging the slot set can forge a
+self-consistent trie over it just as easily, and the walk would buy a stronger-
+sounding log line for no additional security. Note the base spec never claimed
+otherwise — §1.5 defines ring 5 as self-consistency against the server's
+declared root and leg m(ii-b) pins that nothing below ring 6 catches a
+consistently recomputed tamper. This is therefore a code-comment defect, not a
+missing check, and it is fixed by making the comments true. **Spec delta:**
+§1.3's line about "the `contracts_proof` node set that §1.5 ring 5 walks" (in
+the `db:`-transport discussion) overstates the shipped client for the same
+reason; the conclusion it supports — `db:` cannot serve a snapshot cold start —
+is unaffected.
+
+**F8 — retracted reasoning deleted from the code.** `verify_root_in_window`
+still carried the "~1024-block proof window" premise and told the reader that
+"retrying the same block within one batch cannot change that", which is now
+precisely backwards: retrying is the mechanism. Renamed
+`verify_root_at_target`, with the UNAVAILABLE meaning restated as "every
+endpoint spent its retry budget refusing" rather than "the block is too old".

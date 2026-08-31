@@ -24,6 +24,28 @@ const PROOF_TRANSPORT_ATTEMPTS: usize = 2;
 /// endpoint and must be bounded (docs/research/live/live-run-findings.md
 /// LIVE-1).
 const CAPABILITY_RETRIES: usize = 5;
+/// Storage-proof refusals (error 42) absorbed AGAINST THE SAME ENDPOINT before
+/// that endpoint is given up on (consumer-path.md §12 B1). Error 42 names the
+/// backend that happened to answer, not the block: lava routes each call to a
+/// different backend and only some run archive tries, so a deep proof comes
+/// back after a handful of attempts (measured: 2 successes in 10 attempts at
+/// 2.89M blocks behind head, back to genesis — docs/research/live/proof-window.md
+/// §1). The earlier "~1024-block window" was a bisection over that
+/// nondeterministic predicate and is retracted. Bounded, because an endpoint
+/// that implements no proofs at any height (publicnode) must still terminate.
+///
+/// SIZED AGAINST THE MEASUREMENT, not picked round: the worst observed success
+/// rate is ~0.2 per attempt (2 in 10 at 2.89M behind head), so a budget of n
+/// answers UNAVAILABLE to an obtainable proof with probability 0.8^n — 17% at
+/// the 8 this started at, which is one deep proof in six wrongly given up on.
+/// At 16 it is 2.8%, and no caller depends on a single group of attempts: the
+/// head-side probe re-runs every ingest cycle and the snapshot basis probe
+/// spends `BASIS_PROBE_ATTEMPTS` cycles (cutter.rs), so the residual is that
+/// figure raised to the number of cycles.
+const PROOF_RETRIES: usize = 16;
+/// Pause between proof retries. The routing that decides the answer is
+/// per-call, so this exists to avoid hammering, not to wait for anything.
+const PROOF_RETRY_DELAY: Duration = Duration::from_millis(20);
 /// HTTP 429 answers absorbed in place per call. Throttling is not a failure of
 /// the endpoint (LIVE-3): counting it toward failover flips a deep backfill
 /// onto an endpoint that cannot serve the range at all.
@@ -43,13 +65,26 @@ pub fn is_pruned_history(e: &anyhow::Error) -> bool {
     msg.contains("has been pruned") || msg.contains("oldest retained block")
 }
 
-/// A JSON-RPC error saying this endpoint cannot serve a storage proof for the
-/// requested block — pathfinder's sliding trie window (code 42), or a provider
-/// that does not implement proofs at all. Never evidence about the mirror.
+/// A JSON-RPC error saying the BACKEND THAT ANSWERED cannot serve a storage
+/// proof for the requested block (code 42), because it runs no archive trie or
+/// implements proofs nowhere at all. Never evidence about the mirror, and —
+/// since an aggregator routes the next call elsewhere — never evidence about
+/// the block either: `get_storage_proof` answers it with a retry (§12 B1).
 pub fn is_proof_unavailable(e: &anyhow::Error) -> bool {
     let msg = error_text(e);
     msg.contains("too far in the past")
         || (msg.contains("starknet_getStorageProof") && msg.contains("\"code\":42"))
+}
+
+/// Marker carried by a §12 B2 chain-binding failure: the endpoint ANSWERED
+/// with a proof that is not about the block we asked for. Deliberately not
+/// `is_proof_unavailable` — filing a lie under "capability gap" is how a
+/// load-balanced pool would get to choose our answer.
+pub const PROOF_NOT_BOUND: &str = "PROOF NOT BOUND TO BLOCK";
+
+/// A proof that could not be bound to the block it names (§12 B2).
+pub fn is_proof_unbound(e: &anyhow::Error) -> bool {
+    error_text(e).contains(PROOF_NOT_BOUND)
 }
 
 /// An endpoint that ran out of retry budget — transport failures or sustained
@@ -228,12 +263,6 @@ impl RpcClient {
         order
     }
 
-    /// Monotonic-ish marker of which endpoint is active; continuation tokens
-    /// are provider-specific and must be dropped when this changes.
-    pub fn endpoint_epoch(&self) -> usize {
-        self.active.load(Ordering::Relaxed)
-    }
-
     /// True when `e` is a JSON-RPC "Block not found"-class answer rather than
     /// a transport failure — the only errors reorg detection may act on.
     pub fn is_block_not_found(e: &anyhow::Error) -> bool {
@@ -378,23 +407,27 @@ impl RpcClient {
         Ok(String::from_utf8(ascii).unwrap_or_else(|_| felt.to_owned()))
     }
 
+    /// One `getEvents` page. There is deliberately NO continuation parameter:
+    /// LIVE-8 is that a token is node-local state and the endpoints we use are
+    /// aggregators, so a token presented on a later request is answered by a
+    /// backend that never issued it — from the wrong offset, with no error and
+    /// no way to notice. Callers subdivide the block range until every window
+    /// fits in one page (`Ingestor::scan_active_blocks`). The absence of the
+    /// parameter is the enforcement: with it present, "never present a token"
+    /// was a property of two call sites and one integration counter.
     pub async fn get_events(
         &self,
         address: &Felt,
         from_block: u64,
         to_block: BlockRef,
         chunk_size: u64,
-        continuation: Option<&str>,
     ) -> Result<EventsPage> {
-        let mut filter = json!({
+        let filter = json!({
             "from_block": { "block_number": from_block },
             "to_block": to_block.to_json(),
             "address": strk20_feed::felt_hex(address),
             "chunk_size": chunk_size,
         });
-        if let Some(token) = continuation {
-            filter["continuation_token"] = json!(token);
-        }
         let v = self.call("starknet_getEvents", json!([filter])).await?;
         serde_json::from_value(v).context("decode getEvents")
     }
@@ -448,46 +481,71 @@ impl RpcClient {
             [strk20_feed::felt_hex(contract)],
             keys_param
         ]);
-        // LIVE-6: proofs are a per-endpoint capability. publicnode answers
-        // code 42 at EVERY height, so a failover taken for unrelated reasons
-        // must not turn every root check into a failure — ask each endpoint in
-        // capability order before concluding the proof is unavailable, and
-        // never move the active endpoint on account of a proof refusal.
+        // §12 B1: RETRY, don't fail over. Error 42 means "this backend
+        // cannot", not "this block cannot", so the first response to a refusal
+        // is another attempt against the SAME endpoint — bounded by
+        // PROOF_RETRIES. Only once that budget is spent is the next endpoint
+        // asked, and only once every endpoint has spent it is the answer
+        // UNAVAILABLE.
+        //
+        // LIVE-6 is unchanged: proofs are a per-endpoint capability (publicnode
+        // answers code 42 at EVERY height), so a proof refusal must never move
+        // the active endpoint — failing over to a proof-less endpoint
+        // guarantees a false alarm.
         let mut last: Option<anyhow::Error> = None;
         for idx in self.proof_order() {
-            match self
-                .call_at(
-                    idx,
-                    "starknet_getStorageProof",
-                    &params,
-                    false,
-                    PROOF_TRANSPORT_ATTEMPTS,
-                )
-                .await
-            {
-                Ok(raw) => {
-                    self.caps[idx].proofs_served.fetch_add(1, Ordering::Relaxed);
-                    let typed: StorageProof = serde_json::from_value(raw.clone())
-                        .context("decode getStorageProof")?;
-                    return Ok((typed, raw));
+            let mut refusals = 0usize;
+            loop {
+                match self
+                    .call_at(
+                        idx,
+                        "starknet_getStorageProof",
+                        &params,
+                        false,
+                        PROOF_TRANSPORT_ATTEMPTS,
+                    )
+                    .await
+                {
+                    Ok(raw) => {
+                        // Counted only once the answer is a proof we could
+                        // parse: `proofs_served` promotes this endpoint to the
+                        // head of `proof_order` for the rest of the process,
+                        // and an endpoint that answers unparseable JSON has
+                        // demonstrated the opposite of the capability.
+                        let typed: StorageProof = serde_json::from_value(raw.clone())
+                            .context("decode getStorageProof")?;
+                        self.caps[idx].proofs_served.fetch_add(1, Ordering::Relaxed);
+                        return Ok((typed, raw));
+                    }
+                    Err(e) if is_proof_unavailable(&e) => {
+                        self.caps[idx].proofs_denied.fetch_add(1, Ordering::Relaxed);
+                        refusals += 1;
+                        last = Some(e);
+                        if refusals >= PROOF_RETRIES {
+                            tracing::debug!(
+                                endpoint = %self.endpoints[idx % self.endpoints.len()],
+                                refusals,
+                                "storage proof refused for the whole retry budget"
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(PROOF_RETRY_DELAY).await;
+                    }
+                    // An unreachable or throttled endpoint is not an answer about
+                    // the proof: keep asking the remaining candidates, or a dead
+                    // primary defeats the capability fallback entirely. Only
+                    // semantic answers (block not found, bad params) short-circuit.
+                    Err(e) if is_endpoint_exhausted(&e) => {
+                        tracing::warn!(
+                            endpoint = %self.endpoints[idx % self.endpoints.len()],
+                            error = %e,
+                            "endpoint could not be reached for a storage proof; trying the next"
+                        );
+                        last = Some(e);
+                        break;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) if is_proof_unavailable(&e) => {
-                    self.caps[idx].proofs_denied.fetch_add(1, Ordering::Relaxed);
-                    last = Some(e);
-                }
-                // An unreachable or throttled endpoint is not an answer about
-                // the proof: keep asking the remaining candidates, or a dead
-                // primary defeats the capability fallback entirely. Only
-                // semantic answers (block not found, bad params) short-circuit.
-                Err(e) if is_endpoint_exhausted(&e) => {
-                    tracing::warn!(
-                        endpoint = %self.endpoints[idx % self.endpoints.len()],
-                        error = %e,
-                        "endpoint could not be reached for a storage proof; trying the next"
-                    );
-                    last = Some(e);
-                }
-                Err(e) => return Err(e),
             }
         }
         Err(last.unwrap_or_else(|| anyhow!("no rpc endpoint configured for storage proofs")))

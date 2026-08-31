@@ -1,0 +1,109 @@
+name: fork-delta-check
+
+# Mechanical form of the claim "discovery-core is consumed unmodified".
+#
+# The workspace [patch] in Cargo.toml redirects discovery-core to a fork branch.
+# That is only acceptable while the fork changes packaging and nothing else. This
+# job diffs the fork branch against the pinned upstream rev, restricted to
+# crates/discovery-core/src, and fails if a single line differs.
+#
+# If this job goes red, the README/spec sentence "the engine is consumed
+# unmodified" has stopped being true. Fix the fork, not this job.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: https://github.com/starkware-libs/starknet-privacy.git
+  UPSTREAM_REV: 74841caf0466d122117945e28ed983e2864c8fc1
+  FORK_REPO: https://github.com/kfastov/starknet-privacy.git
+  FORK_REF: strk20/providers-gate-74841ca
+
+jobs:
+  fork-delta-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream rev and fork branch into one repo
+        run: |
+          set -euo pipefail
+          git init -q fork-delta
+          cd fork-delta
+          git remote add upstream "$UPSTREAM_REPO"
+          git remote add fork "$FORK_REPO"
+          git fetch -q --depth=1 upstream "$UPSTREAM_REV"
+          echo "$UPSTREAM_REV" > ../.upstream-sha
+          git fetch -q --depth=50 fork "$FORK_REF"
+          echo "$(git rev-parse FETCH_HEAD)" > ../.fork-sha
+
+      - name: Assert the [patch] rev in Cargo.toml is the fork branch head
+        run: |
+          set -euo pipefail
+          pinned=$(grep -A1 '^\[patch\."https://github.com/starkware-libs/starknet-privacy.git"\]' Cargo.toml \
+                   | grep -o 'rev = "[0-9a-f]\{40\}"' | grep -o '[0-9a-f]\{40\}')
+          actual=$(cat .fork-sha)
+          if [ "$pinned" != "$actual" ]; then
+            echo "::error::Cargo.toml [patch] pins discovery-core at $pinned, but $FORK_REF is at $actual."
+            echo "Either the fork branch moved without updating the pin, or the pin points at an orphaned commit."
+            exit 1
+          fi
+          echo "patch pin matches fork branch head: $pinned"
+
+      - name: discovery-core/src must be byte-identical to upstream
+        run: |
+          set -euo pipefail
+          cd fork-delta
+          delta=$(git diff "$(cat ../.upstream-sha)".."$(cat ../.fork-sha)" -- crates/discovery-core/src)
+          if [ -n "$delta" ]; then
+            echo "::error::discovery-core/src differs from upstream rev $UPSTREAM_REV."
+            echo ""
+            echo "This project claims, in its README and its spec, that the discovery engine is"
+            echo "CONSUMED UNMODIFIED: the fork exists only to make an unused dependency optional"
+            echo "in discovery-core/Cargo.toml, and is allowed to touch nothing else. A non-empty"
+            echo "diff under discovery-core/src means that claim is now FALSE. Revert the source"
+            echo "change on the fork, or stop making the claim."
+            echo ""
+            echo "$delta"
+            exit 1
+          fi
+          echo "discovery-core/src: 0 lines differ from upstream $UPSTREAM_REV — unmodified claim holds."
+
+      - name: The fork may only touch discovery-core/Cargo.toml
+        run: |
+          set -euo pipefail
+          cd fork-delta
+          files=$(git diff --name-only "$(cat ../.upstream-sha)".."$(cat ../.fork-sha)")
+          unexpected=$(echo "$files" | grep -v '^crates/discovery-core/Cargo.toml$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::The fork branch changes files outside crates/discovery-core/Cargo.toml:"
+            echo "$unexpected"
+            exit 1
+          fi
+          echo "fork delta is confined to crates/discovery-core/Cargo.toml"
+
+      - name: Checked-in patch file reproduces the fork tree exactly
+        run: |
+          set -euo pipefail
+          cd fork-delta
+          # Apply the checked-in patch on top of the pinned upstream rev and
+          # require the resulting tree to equal the fork branch's tree. This is
+          # an exact check: patches/ cannot drift from the branch it documents.
+          git checkout -q "$(cat ../.upstream-sha)"
+          git apply ../patches/discovery-core-providers-gate.patch
+          git add -A
+          rebuilt=$(git write-tree)
+          expected=$(git rev-parse "$(cat ../.fork-sha)^{tree}")
+          if [ "$rebuilt" != "$expected" ]; then
+            echo "::error::patches/discovery-core-providers-gate.patch does not reproduce $FORK_REF."
+            echo "Applying it to $UPSTREAM_REV gives tree $rebuilt; the fork branch has tree $expected."
+            echo "Re-export it with: git format-patch --stdout $UPSTREAM_REV..$FORK_REF"
+            exit 1
+          fi
+          echo "checked-in patch reproduces the fork tree exactly"

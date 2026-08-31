@@ -1,0 +1,290 @@
+# STRK20 mainnet lifecycle
+
+Scripts that take a brand-new Starknet account through the full STRK20 privacy-pool
+lifecycle on **mainnet** — register, shield, transfer privately, withdraw — and then let
+this project's own client rediscover the resulting notes from a published feed using
+nothing but a viewing key.
+
+You sign and pay for everything. Nothing here custodies funds, and no step submits a
+transaction without first estimating it and showing you the bill.
+
+```
+01-create-account.mjs   generate a keypair + viewing key, locally      free
+02-deploy-account.mjs   put the account on chain                       ~0.18 STRK
+03-shield.mjs           register + deposit, one transaction            deposit + 6 + ~3 STRK
+04-transfer.mjs         private note-to-note spend                     6 + ~3 STRK
+05-withdraw.mjs         move shielded value back out                   6 + ~3 STRK, deposit returns
+06-discover.sh          strk20-sync finds those notes from the feed    free
+```
+
+---
+
+## Why this route instead of signing from a wallet
+
+The point of these scripts is not to move money. It is to end up holding **the viewing key
+for notes that exist on mainnet**, so the keyless-discovery claim can be demonstrated on
+real data rather than a fixture.
+
+A browser wallet will happily do the same four transactions, but the viewing key it derives
+stays inside the wallet. `strk20-sync` needs that key on disk to do its job:
+
+```
+strk20-sync sync --address 0x… --key-file ~/.strk20/mainnet-keystore/viewing-key.hex --feed …
+```
+
+So `01-create-account.mjs` derives the viewing key itself, the same way the upstream wallet
+does — sign `starknetKeccak("<chainId>:<poolAddress>")` with the account key, Poseidon-fold
+`(r, s)`, reduce mod the curve order, canonicalise into the lower half — and writes it to
+`$STRK20_KEYSTORE/viewing-key.hex` (default `~/.strk20/mainnet-keystore/`). The derivation is deterministic, so the key is reproducible from
+the account key alone, and a wallet loading the same private key would compute the same
+viewing key and see the same notes.
+
+**The viewing key is bound to the chain id and the pool address.** Change either and it is a
+different key that sees nothing. The scripts refuse to run if the keystore was created for a
+different pool than `STRK20_POOL`.
+
+---
+
+## Setup
+
+Requires **Node ≥ 24** (the SDK's OHTTP dependency needs modern WebCrypto) and `git`.
+
+```sh
+cd examples/mainnet
+./setup.sh                       # vendors + builds the SDK, installs deps
+cp .env.example .env
+$EDITOR .env
+set -a; . ./.env; set +a         # the scripts read env vars, never .env itself
+```
+
+`setup.sh` builds `@starkware-libs/starknet-privacy-sdk` **from source**. The package is
+published on GitHub Packages, which demands a token with `read:packages` even for public
+packages; the upstream repository is public (Apache-2.0) and its `sdk/` workspace builds
+standalone, so no token is needed.
+
+### Which SDK version, and why
+
+Pinned: **`PRIVACY-0.14.3-RC.5`** (`@starkware-libs/starknet-privacy-sdk` 0.14.3-rc.5).
+
+Chosen by diffing the SDK's generated ABI (`sdk/src/internal/abi.ts`) at every tag against
+the ABI of the class actually deployed at the mainnet pool,
+`0x67dddd89d80fedadc06b6f160798f94800a4a70164e5a24301cd0d6076b554d`, comparing all 117
+addressable entries (functions, structs, enums, events):
+
+| SDK tag | version | mismatches vs the mainnet class |
+|---|---|---|
+| `PRIVACY-0.14.2-RC.1` … `0.14.3-RC.0` | 0.14.2–0.14.3-rc.0 | 82–85 |
+| `PRIVACY-0.14.3-RC.1`, `RC.2` | 0.14.3-rc.1/2 | 5 — missing the `ComputeAndInvoke` variant in `ClientAction` **and** `ServerAction` |
+| `CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08` | 0.14.3-rc.2 | **0** |
+| `PRIVACY-0.14.3-RC.3` / `RC.4` / **`RC.5`** | 0.14.3-rc.3/4/5 | **0** |
+| `PRIVACY-0.14.3-RC.6` | 0.14.3-rc.6 | 8 — replaces the open-note depositor block list with a screening policy |
+
+RC.5 is the newest exact match. `CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08` — the tag named
+for this very deployment — also matches, which corroborates the band.
+
+A mismatch here is not a clean error at runtime: `ClientAction`/`ServerAction` are the wire
+format for `apply_actions`, so a wrong version mis-serializes actions. Re-run the diff after
+any pool upgrade. Override with `STRK20_SDK_TAG=… ./setup.sh` if you need a different one.
+
+> Worth knowing: the mainnet class `0x67dddd89…` and the current Sepolia class
+> `0x56ab118a…` have **byte-identical ABIs** despite different class hashes, so the same SDK
+> version serves both. Do not infer that from version numbers alone — verify with the diff.
+
+---
+
+## Cost
+
+All figures below are **STRK**. Two independent sources, both marked:
+
+- **live** — read from the chain at the moment the scripts run (the pool fee is never
+  hardcoded; `get_fee_amount` is read every time).
+- **observed** — measured from other people's real mainnet pool transactions in the last
+  40,000 blocks (60 `Deposit` transactions and 43 `NoteUsed` transactions sampled), and from
+  this project's own Sepolia runs where noted. These are estimates for your run, not
+  promises.
+
+| step | pool fee (live) | gas observed on mainnet | resource-bounds ceiling observed |
+|---|---|---|---|
+| 02 deploy account | — | 0.18 (live estimate for a fresh account) | same |
+| 03 shield | **6.00** | 2.94 – 6.88 | 7.53 – 17.08 |
+| 04 transfer | **6.00** | 2.91 – 3.89 | 6.65 – 10.08 |
+| 05 withdraw | **6.00** | 2.91 – 3.89 | 6.65 – 10.08 |
+
+For calibration, this project's own Sepolia transactions paid 3.03 (shield) and 2.72
+(transfer) in gas, against estimate ceilings of 6.80 and 6.10 — the ceiling ran ~2.2× the
+actual bill both times.
+
+### Two numbers that trip people up
+
+**The 6 STRK pool fee comes out of your public balance, not the note.** The pool's
+`collect_fee` does `transferFrom(caller → fee_collector)` *before* applying actions, on
+**every** `apply_actions` — deposit or not. Consequences:
+
+- your shielded note is worth the **full** deposit;
+- the ERC-20 approve must cover **deposit + fee** for a shield, and **fee** alone for a
+  transfer or withdraw. The scripts compute this and batch the approve into the same
+  transaction;
+- a transfer and a withdraw each cost 6 STRK too, even though no value becomes public.
+
+**The resource-bounds ceiling, not the fee, is what your balance must clear.** Starknet
+checks `balance ≥ max_fee` at validation. A shield can want up to ~17 STRK of headroom while
+actually billing ~3. The scripts check this before submitting and refuse with an exact
+shortfall rather than letting the transaction fail.
+
+### How much to send
+
+`01-create-account.mjs` computes this live from the current pool fee and prints it. With the
+default 2 STRK deposit it currently asks for:
+
+- **32.1 STRK** to run the whole lifecycle (steps 02–05)
+- **17.1 STRK** to get as far as the shield (steps 02–03)
+
+The figure walks the lifecycle backwards: each step must leave enough behind for the next
+one to clear *its* ceiling. The withdraw returns your deposit, but only after its own ceiling
+has been covered.
+
+**Expected net cost: about 30 STRK** — three pool fees (18) plus gas (~10) plus deployment.
+The deposit comes back at step 05, so raising or lowering it changes how much you must
+*hold*, not what the exercise *costs*.
+
+> If 30 STRK is more than you want to spend, the cheapest useful subset is steps 02–03 only:
+> ~17 STRK held, ~9 STRK spent, and you still get a real mainnet `EncNoteCreated` for
+> `06-discover.sh` to find. You can also skip step 04 and go straight to 05.
+>
+> Batching the transfer and the withdraw into a single `apply_actions` would save one 6 STRK
+> fee. These scripts keep them separate because the goal is one clean transaction per event
+> type; the SDK builder supports combining them if you want to edit `05-withdraw.mjs`.
+
+Fund with **STRK only** (`0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`).
+ETH cannot pay for any of this: the whole flow is v3 transactions with STRK-denominated fees.
+
+---
+
+## Running it
+
+Always dry-run first. `DRY_RUN=1` does everything except submit — it builds the actions,
+calls the proving service, estimates the fee and prints the full breakdown, then stops.
+
+```sh
+# 1. generate the account (free, offline; only reads from the chain)
+node 01-create-account.mjs
+#    -> prints the address to fund and the exact amount
+
+# 2. send STRK to that address from your wallet or exchange, then:
+DRY_RUN=1 node 02-deploy-account.mjs
+DRY_RUN=0 node 02-deploy-account.mjs
+
+# 3. shield: register + deposit in one transaction
+DRY_RUN=1 node 03-shield.mjs
+DRY_RUN=0 node 03-shield.mjs
+#    -> ViewingKeySet + Deposit + EncNoteCreated
+
+# 4. wait ~10 blocks, then spend the note privately
+DRY_RUN=1 node 04-transfer.mjs
+DRY_RUN=0 node 04-transfer.mjs
+#    -> NoteUsed (with the nullifier) + EncNoteCreated
+
+# 5. withdraw back to your public balance
+DRY_RUN=1 node 05-withdraw.mjs
+DRY_RUN=0 node 05-withdraw.mjs
+#    -> NoteUsed + Withdrawal
+
+# 6. close the loop: our own client finds those notes from our own feed
+export STRK20_FEED=http://127.0.0.1:8080/feed     # or a local mirror directory
+./06-discover.sh
+./06-discover.sh --json                            # machine-readable report
+```
+
+Every step records what it did in `$STRK20_KEYSTORE/state.json` and **refuses to repeat a completed
+step** unless you set `FORCE=1`. Re-running after a failure is safe: nothing is recorded
+unless the transaction succeeded.
+
+### Step 06 needs a feed
+
+`06-discover.sh` runs `strk20-sync` against a feed this project produced. Build one first:
+
+```sh
+cd ../..
+cargo build --release
+./target/release/strk20 backfill --db ./mainnet.db --feed-dir ./mainnet-feed
+export STRK20_FEED=$PWD/mainnet-feed        # local directory works directly
+# or serve it:  ./target/release/strk20 run --db ./mainnet.db --feed-dir ./mainnet-feed
+```
+
+A full mainnet backfill takes roughly an hour and produces a ~16 MB feed. The script passes
+`--network mainnet`, so a feed stamped with a different chain id is refused rather than
+silently returning an empty (and misleading) result.
+
+---
+
+## When a step fails
+
+The scripts are built so that **a failure before submission costs nothing**. Fee estimation
+happens first; if it fails or the balance is short, nothing is sent.
+
+| symptom | cause | fix |
+|---|---|---|
+| `REFUSING: chain id … is not SN_MAIN` | `STRK20_RPC` points at a testnet | these scripts are mainnet-only by construction |
+| `serves JSON-RPC spec 0.8.x` | RPC too old for v3 proof-carrying transactions | use a node on spec ≥ 0.10 — `https://starknet.publicnode.com` serves 0.10.2. `https://rpc.starknet.lava.build` serves **0.8.1** and will not work |
+| `this account has no STRK` | not funded yet | send STRK to the address from step 01 |
+| `INSUFFICIENT BALANCE … short by N` | balance below the resource-bounds ceiling | send N more STRK and re-run; nothing was spent |
+| `Insufficient ERC20 balance` from the pool | balance cannot cover the 6 STRK fee | top up |
+| `Insufficient ERC20 allowance` | approve too small | the scripts batch the right approve automatically; if you see this, an earlier partial approve is in the way — re-run, it recomputes |
+| `Invalid proof facts: block N is too recent` | proved too close to the head | shouldn't happen (the scripts prove at head−9); just re-run |
+| proving service rejected / timed out | prover down or slow | re-run. Proving normally takes 3–6 s. A proof is valid for 450 blocks, so a stale one simply fails estimation |
+| `the pool enforces deposit screening but the prover returned no attestation` | screening declined the depositor address | fail-closed by design, no override. A different funding source is the only remedy |
+| `you have no unspent STRK notes` | shield hasn't landed, or the note is too fresh | wait ~10 blocks after step 03 and retry |
+| `the transaction REVERTED on chain` | gas was still charged | read the dump; state.json is not updated, so re-running is safe |
+| step exits saying "already completed" | idempotency guard | intended. `FORCE=1` to override — that spends real STRK again |
+
+If a transfer to **someone else** fails while building, the recipient is probably not
+registered in the pool. Registration is per-address; a recipient who has never used the pool
+has no channel to receive into.
+
+---
+
+## Files
+
+| file | role |
+|---|---|
+| `setup.sh` | vendors and builds the pinned SDK from source; installs deps |
+| `lib.mjs` | shared: env config, chain guard, live pool reads, viewing-key derivation, proving, fee checks, error decoding |
+| `01`–`05` | the lifecycle steps |
+| `06-discover.sh` | runs `strk20-sync` with the generated viewing key |
+| `.env.example` | placeholders only — never contains a real key |
+| `$STRK20_KEYSTORE` | **secrets**, mode 0700. `account.json` (0600), `viewing-key.hex` (0600), `state.json`. Defaults to `~/.strk20/mainnet-keystore`, **outside this repository** |
+
+The keystore lives outside the repository by default, so no real key is ever inside a
+tracked tree — that is deliberate, and stronger than relying on a `.gitignore`. `vendor/`,
+`node_modules/`, `.env` and any stray `keystore/` are gitignored as well. Nothing in
+`examples/` reads the repository's `data/` directory, and no key is ever printed — the
+scripts show only masked prefixes.
+
+**Back up your keystore directory.** The viewing key is derivable from the account private key, but
+without either one the notes are unrecoverable — no one, including the pool operator, can
+recover them for you.
+
+---
+
+## What these scripts assume, and where to check
+
+Everything network-specific is read live rather than trusted:
+
+- the **pool fee**, fee collector, version, screening key, proof-validity window and paused
+  flag come from the pool's own views on every run;
+- the **pool class hash** is read and recorded with each transaction, so a mid-run upgrade
+  is visible afterwards;
+- the **account class** is checked to be declared before step 01 writes anything.
+
+Verified live on 2026-08-31 against `https://starknet.publicnode.com` (spec 0.10.2, chain
+`0x534e5f4d41494e`): pool `0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a`
+running class `0x67dddd89…6b554d`, version `"2.0"`, fee `0x53444835ec580000` (6 STRK),
+screening enforced, proof validity 450 blocks, not paused; prover
+`transaction-prover.alpha-mainnet.sw-dev.io` answering `starknet_specVersion` →
+`0.10.3-rc.2`; discovery service healthy with ~5 s lag; OpenZeppelin account class
+`0x05b4b537…43564` declared.
+
+The `alpha-mainnet` prover and discovery endpoints are StarkWare infrastructure that answers
+unauthenticated but has never been publicly sanctioned for third-party use. They work today;
+they could be gated at any time. There is no fallback for the **shield** step in
+particular — the screening attestation can only come from their prover.
