@@ -38,6 +38,83 @@ has ever run — and exists for the recovery path after an upgrade the profile
 does not know about yet, where the choice is between adding the class and
 letting the decoder go degraded.
 
+## RPC endpoints, and what anchoring needs
+
+The two RPC URLs per network are not interchangeable, because they are asked
+two different kinds of question. Blocks and events are served by every
+endpoint. `starknet_getStorageProof` is a per-endpoint *capability*, and most
+public providers do not implement it at all — anchors, `verify-root`, and every
+published snapshot depend on that one method.
+
+Two rules follow, both already enforced in code (§12 B1/B4, LIVE-6):
+
+- A proof refusal is **retried on the same endpoint**, not failed over. On a
+  load-balanced pool only some backends carry archive tries, so a single
+  refusal means "this backend cannot", not "this block cannot".
+- A proof refusal **never moves the active endpoint**. Failing a proof over
+  onto a proof-less provider would turn a capability gap into a false mirror
+  mismatch.
+
+So a proof-less *fallback* is harmless — it still serves blocks and events.
+What is not harmless is having no proof-capable endpoint in the pair at all.
+
+### What an operator without a proof-capable endpoint sees
+
+This is a supported state, not a crash. The indexer stays quiet about what it
+could not check rather than pretending it checked:
+
+| symptom | why |
+|---|---|
+| `feed/anchors.ndjson` stays empty | no proof was ever obtained, so no anchor was captured |
+| nothing appears under `feed/snapshots/` | the §11.3 publication gate needs an anchor to ground a snapshot |
+| `verify-root` prints `UNAVAILABLE`, exit status 0 | "we could not check" is not "the mirror is wrong" |
+| `verify_root_failed` stays false, health stays healthy | a capability gap must never latch a failure (LIVE-4/6) |
+| epochs are still cut, served and hash-chained | the feed itself does not depend on proofs |
+
+Such an instance is still useful — it publishes a correct, hash-chained feed —
+but its consumers cannot reach the anchored trust grade, because nothing binds
+the mirror to a state root the chain signed. If that grade matters to you,
+treat a proof-capable endpoint as part of the deployment, not an optimisation.
+
+### Checking an endpoint before you deploy
+
+Never judge a pool on one call: a single refusal from a load-balanced endpoint
+tells you nothing. Retry, then confirm the proof is for the block you asked
+for.
+
+```sh
+RPC=https://rpc.starknet.lava.build
+BLOCK=14158970
+POOL=0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a
+
+for i in $(seq 1 10); do
+  curl -s -X POST "$RPC" -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"starknet_getStorageProof\",
+         \"params\":{\"block_id\":{\"block_number\":$BLOCK},
+                     \"contract_addresses\":[\"$POOL\"]}}" \
+  | grep -q '"result"' && echo hit || echo miss
+done
+```
+
+A usable endpoint does not need a high hit rate, it needs a non-zero one.
+Measured against the mainnet default `rpc.starknet.lava.build` on 2026-09-01,
+twelve attempts per block, head at 14,168,818:
+
+| block | behind head | hits |
+|---|---|---|
+| 14,158,970 (epoch boundary) | ~9.8k | 5 / 12 |
+| 11,263,135 | ~2.9M | 3 / 12 |
+| 9,000,000 | ~5.2M | 5 / 12 |
+
+Roughly one attempt in two to one in four, at every depth including deep
+history, with `global_roots.block_hash` equal to the real header hash every
+time. `PROOF_RETRIES` (16 per endpoint) is sized for exactly this, which is why
+"the epoch boundary is thousands of blocks behind head" is not an obstacle.
+
+Per-endpoint capability and the measurement method are in
+`docs/research/live/proof-window.md`; the per-network defaults, and why each was
+chosen, are commented at the constants in `crates/indexerd/src/config.rs`.
+
 ## Volumes
 
 One volume per network, mounted at `/data`, holding both halves of an
