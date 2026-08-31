@@ -166,23 +166,7 @@ pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
         .ok_or_else(|| anyhow!("mirror has no pool metadata; sync first"))?;
     let pool = Felt::from_hex(&pool_hex).map_err(|_| anyhow!("bad pool metadata"))?;
 
-    let mut candidates: Vec<u64> = Vec::new();
-    if head >= basis {
-        candidates.push(head);
-    }
-    if let Some(bytes) = transport.fetch_anchors().await? {
-        let mut blocks: Vec<u64> = strk20_feed::anchors::parse_anchors(&bytes)?
-            .iter()
-            .filter(|a| a.block >= basis && a.block <= head)
-            .map(|a| a.block)
-            .collect();
-        blocks.sort_unstable_by(|a, b| b.cmp(a));
-        candidates.extend(blocks);
-    }
-    candidates.dedup();
-    // Bound the RPC calls: the newest handful is all the window can serve
-    // anyway, and an unbounded list would let a feed dictate our request count.
-    candidates.truncate(MAX_GROUNDING_CANDIDATES);
+    let candidates = grounding_candidates(transport, basis, head).await?;
     if candidates.is_empty() {
         return Ok(Grounding::Unavailable(format!(
             "no block at or above the snapshot basis {basis} is available to ground \
@@ -253,6 +237,39 @@ pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
     )
 }
 
+/// The blocks ring 6 will ask the user's endpoint about, in the order it will
+/// ask — head first, then published anchors newest-first.
+///
+/// Split out of [`ground_mirror_against_rpc`] so a host that cannot make the
+/// call itself (the browser, where the proof is *pushed in* rather than
+/// fetched) can be told which blocks a proof has to cover. Two copies of this
+/// list would drift, and a drifted list degrades silently: the host stages a
+/// proof for a block ring 6 never asks about.
+pub async fn grounding_candidates(
+    transport: &dyn FeedTransport,
+    basis: u64,
+    head: u64,
+) -> Result<Vec<u64>> {
+    let mut candidates: Vec<u64> = Vec::new();
+    if head >= basis {
+        candidates.push(head);
+    }
+    if let Some(bytes) = transport.fetch_anchors().await? {
+        let mut blocks: Vec<u64> = strk20_feed::anchors::parse_anchors(&bytes)?
+            .iter()
+            .filter(|a| a.block >= basis && a.block <= head)
+            .map(|a| a.block)
+            .collect();
+        blocks.sort_unstable_by(|a, b| b.cmp(a));
+        candidates.extend(blocks);
+    }
+    candidates.dedup();
+    // Bound the RPC calls: the newest handful is all the window can serve
+    // anyway, and an unbounded list would let a feed dictate our request count.
+    candidates.truncate(MAX_GROUNDING_CANDIDATES);
+    Ok(candidates)
+}
+
 /// How many blocks ring 6 will ask the user's RPC about before giving up.
 const MAX_GROUNDING_CANDIDATES: usize = 4;
 
@@ -263,7 +280,13 @@ pub fn is_proof_unavailable(e: &anyhow::Error) -> bool {
     // window (pathfinder/juno code 42), method not implemented (publicnode,
     // drpc -32601), and an endpoint simply lagging behind the block we asked
     // about (code 24). All three are facts about the ENDPOINT.
-    msg.contains("too far in the past")
+    // A host that is PUSHED its proofs (the browser: TypeScript fetches, the
+    // module computes) has no proof for a candidate block it was never given
+    // one for. That is a gap in what the HOST offered, exactly like a window
+    // that has moved — never evidence about the mirror. The wrapper still has
+    // to notice a staged proof that nothing consumed; it does, loudly.
+    msg.contains("PROOF_NOT_STAGED")
+        || msg.contains("too far in the past")
         || msg.contains("\"code\":42")
         || msg.contains("\"code\": 42")
         || msg.contains("-32601")

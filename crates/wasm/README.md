@@ -92,6 +92,21 @@ engine.stage_head(payload: Uint8Array, etag: string): void
 compressed file in Rust, rings 2–5 parse the inflated one. Epochs are raw-only —
 Block B checks no `.zst` hash for them anywhere.
 
+### Staging a storage proof — §1.5 ring 6, the `"anchored"` grade
+
+```ts
+engine.proof_candidates(): string
+// {"pool","basis","head","blocks":number[],"staged":number[],"reason":string|null}
+
+engine.stage_storage_proof(block: bigint, proofJson: string, blockHashHex: string): void
+engine.clear_storage_proofs(): void
+```
+
+`blocks` is the list of blocks ring 6 will ask about, **in the order it will
+ask** — computed by Block B (`grounding_candidates`), not by this wrapper, so
+the two cannot drift. Stage a proof for one of them; see
+[What TypeScript must do](#what-typescript-must-do) for the two RPC calls.
+
 ### Folding
 
 ```ts
@@ -148,10 +163,31 @@ Returns the canonical `SyncReport` JSON, field-identical to
 `incoming_senders`, `outgoing_recipients`, completion flags, `history_from`,
 `snapshot_basis`, `verified`.
 
-`verified` in a browser is `"replayed"` (epoch replay from genesis) or
-`"server-asserted"` (snapshot grounded by reachability). It is never
-`"anchored"`: that grade requires ring 6, a storage proof from the *user's own*
-RPC, which is a network call — and the module does not do network.
+`verified` is the integrity grade, and the three values are three different
+claims:
+
+| grade | what the client checked | who it trusts |
+|---|---|---|
+| `"replayed"` | every epoch folded, hash chain intact | the feed, to be internally consistent |
+| `"server-asserted"` | snapshot start, reached an anchor in `anchors.ndjson` | a number the **server** published |
+| `"anchored"` | that mirror's own recomputed storage root equals one in a `starknet_getStorageProof` from a node the **user** chose | the chain |
+
+Only `"anchored"` puts the indexer outside the trust path. Without it a hostile
+indexer can publish an internally consistent **lie** — snapshot, anchors and
+hashes all agreeing with each other and with nothing on Starknet.
+
+All three are reachable in a browser. `"anchored"` needs a storage proof, which
+is a network call, so — exactly as with the feed itself — **TypeScript fetches
+and the module computes**: stage the proof with `stage_storage_proof` before
+calling `discover`.
+
+**A staged proof never degrades quietly.** If it disagrees with the mirror,
+`discover` throws `ANCHOR_NOT_ON_CHAIN` (and Block B resets the mirror, so the
+refuted slot set cannot be built on); if it is mispaired or malformed,
+`stage_storage_proof` throws before anything is folded; if nothing consumed it,
+`discover` throws `PROOF_UNUSED` rather than returning `"server-asserted"`. A
+grade that cannot fail would be unfalsifiable, which is worse than not having
+it.
 
 ## Key handling
 
@@ -190,9 +226,66 @@ caller's problem.
 5. **Persist** `export_state()` in IndexedDB after any `apply` reporting
    `state_changed`; restore with `Engine.load`, then stage a fresh head and
    `apply`.
-6. **Poll or subscribe**: on a new head, `apply_head(bytes, etag)` then
-   `discover` again.
-7. **Never** put the viewing key in a string, a URL, a log, or IndexedDB.
+6. **Ground the mirror in the chain** (ring 6) — see below. Skipping this step
+   is what leaves the grade at `"server-asserted"`.
+7. **Poll or subscribe**: on a new head, `apply_head(bytes, etag)` then
+   `discover` again. A new head moves the candidate blocks, so
+   `clear_storage_proofs()` and re-stage.
+8. **Never** put the viewing key in a string, a URL, a log, or IndexedDB.
+
+### Ring 6: the two RPC calls, and the binding between them
+
+Against **the user's own Starknet RPC endpoint**, never the feed's:
+
+```ts
+const { blocks, pool } = JSON.parse(engine.proof_candidates());
+const block = blocks[0];                       // ring 6 asks head-first
+if (block === undefined) { /* replayed mirror, or nothing groundable yet */ }
+
+// 1. the proof. `[]` (not null) for the list params — some backends reject null.
+const proof = await rpc("starknet_getStorageProof", [
+    { block_number: block },   // block_id
+    [],                        // class_hashes
+    [pool],                    // contract_addresses  <- exactly the pool
+    [],                        // contracts_storage_keys
+]);
+
+// 2. the block header, for the binding below.
+const header = await rpc("starknet_getBlockWithTxHashes", { block_number: block });
+
+engine.stage_storage_proof(BigInt(block), JSON.stringify(proof), header.block_hash);
+const report = JSON.parse(engine.discover(owner, key));   // -> verified: "anchored"
+```
+
+Both calls are **address-blind**: they name a public pool and a public block, so
+the request is byte-identical for every user. Nothing about the viewing key, the
+owner address, or the notes leaves the page.
+
+**Why the second call exists.** A public storage-proof endpoint is an anonymous
+load-balanced pool — measured earlier in this project, not assumed. Two requests
+can land on two nodes, and the second may answer for a lagging replica or a fork
+the network dropped. So the proof's `global_roots.block_hash` **must equal**
+`starknet_getBlockWithTxHashes(block).block_hash` before its root is believed.
+
+**That rule is enforced inside the module**, not left to the wrapper: both
+values pass through `stage_storage_proof`, so it compares them and throws
+`PROOF_BLOCK_MISMATCH` on disagreement. Passing a header hash you did not
+actually fetch defeats it, and is the one part of ring 6 that TypeScript can
+still get wrong.
+
+**What `"anchored"` rests on, precisely.** The user's chosen node reporting
+honestly about its own state, and its two answers agreeing about which block
+they describe. The module does **not** walk the proof's own Merkle path up to
+`global_roots.contracts_tree_root` — deliberate parity with the native client:
+the endpoint is the trust anchor by construction, so that walk would only defend
+against a lying anchor, which this ring cannot improve on. The load-bearing
+check against a *load-balanced* endpoint is the block-hash binding, and that one
+is enforced.
+
+**A proof for the wrong block is not silently ignored.** Ring 6 tries several
+candidate blocks and treats "nothing staged for this one" as a statement about
+the host, not the data — but if the run ends without any staged proof being
+consumed, `discover` throws `PROOF_UNUSED` and names both lists.
 
 ## Errors
 
@@ -204,6 +297,11 @@ caller's problem.
 onto codes and `details` structurally. `strk20-consumer` has no error enum, so
 its errors are matched on the code token at the head of the message and carry
 empty `details`. Only `FEED_ADVANCED_MIDSYNC` is `retryable`.
+
+Ring 6's codes: `ANCHOR_NOT_ON_CHAIN` (Block B's verdict — the user's own
+endpoint refutes this mirror at every block it could answer for),
+`PROOF_BLOCK_MISMATCH`, `PROOF_MALFORMED`, `PROOF_UNUSED`. Every one of them is
+a **refusal to report a grade**, never a downgraded one.
 
 ## Size
 

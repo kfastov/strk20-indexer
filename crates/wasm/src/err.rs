@@ -60,6 +60,15 @@ const CODES: &[&str] = &[
     // this crate's own: the caller pushed nothing for an artifact Block B asked
     // for, which is a wrapper bug, not a feed problem
     "NOT_STAGED",
+    // §1.5 ring 6. `ANCHOR_NOT_ON_CHAIN` is Block B's verdict — the user's own
+    // endpoint refutes this mirror; the `PROOF_*` codes are this crate's, and
+    // every one of them is a REFUSAL to report a grade rather than a downgrade
+    // of one.
+    "ANCHOR_NOT_ON_CHAIN",
+    "PROOF_MALFORMED",
+    "PROOF_BLOCK_MISMATCH",
+    "PROOF_NOT_STAGED",
+    "PROOF_UNUSED",
 ];
 
 /// Retryable per §3.7. Only the manifest/head race heals on its own.

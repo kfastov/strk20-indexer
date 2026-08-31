@@ -11,8 +11,9 @@
 //! # The contract
 //!
 //! **No network, no storage, no async crosses this boundary.** TypeScript owns
-//! `fetch`, IndexedDB, zstd inflation and SSE; it pushes bytes in and takes
-//! JSON out. Consequences, all deliberate:
+//! `fetch`, IndexedDB, zstd inflation, SSE — and the one JSON-RPC round trip
+//! §1.5 ring 6 needs against the *user's own* node; it pushes bytes in and
+//! takes JSON out. Consequences, all deliberate:
 //!
 //! * no `tokio`, no `reqwest`, no `rusqlite`, no `web-sys`, no `getrandom`;
 //! * no `zstd` — `zstd-sys` compiles C and has no wasm32 backend, so the module
@@ -53,6 +54,7 @@
 
 pub mod blob;
 pub mod drive;
+pub mod proofs;
 pub mod staged;
 
 mod err;
@@ -70,11 +72,14 @@ mod engine {
     use crate::blob::{self, StateHeader, BLOB_VERSION, ENGINE_VERSION};
     use crate::drive::drive;
     use crate::err::{to_js, ErrJson};
+    use crate::proofs::StagedProofs;
     use crate::staged::StagedFeed;
-    use anyhow::{anyhow, Result};
+    use anyhow::{anyhow, bail, Result};
     use discovery_core::privacy_pool::types::SecretFelt;
     use serde_json::json;
     use starknet_types_core::felt::Felt;
+    use std::sync::Arc;
+    use strk20_consumer::anchors::{grounding_candidates, ProofSource};
     use strk20_consumer::mem::MemStore;
     use strk20_consumer::store::{ColdStart, ConsumerStore};
     use strk20_consumer::sync::{sync_once, SyncOptions};
@@ -89,6 +94,7 @@ mod engine {
     pub struct Engine {
         store: MemStore,
         feed: StagedFeed,
+        proofs: Arc<StagedProofs>,
         genesis: Genesis,
     }
 
@@ -127,6 +133,7 @@ mod engine {
             Ok(Engine {
                 store: MemStore::new(),
                 feed,
+                proofs: Arc::new(StagedProofs::new()),
                 genesis,
             })
         }
@@ -180,6 +187,86 @@ mod engine {
         /// native client's conditional GET does.
         pub fn stage_head(&self, payload: &[u8], etag: &str) {
             self.feed.put_head(payload.to_vec(), etag.to_owned());
+        }
+
+        /// §1.5 ring 6, staged: one `starknet_getStorageProof` answer for
+        /// `block`, from the endpoint the USER chose, paired with the
+        /// `block_hash` that endpoint's `starknet_getBlockWithTxHashes(block)`
+        /// returned.
+        ///
+        /// This is the one input that takes the feed server out of the trust
+        /// path, and it is what lifts `discover`'s `verified` from
+        /// `"server-asserted"` to `"anchored"`. Call [`Engine::proof_candidates`]
+        /// first: it names the blocks ring 6 will actually ask about, and a
+        /// proof for any other block is refused rather than ignored.
+        ///
+        /// Both halves are required because the proof alone cannot be trusted
+        /// to be about the block you asked for — a public proof endpoint is an
+        /// anonymous load-balanced pool. The module makes the comparison
+        /// itself, here, before anything is folded; see [`crate::proofs`].
+        ///
+        /// `proof_json` may be the whole JSON-RPC envelope or just its
+        /// `result` object.
+        pub fn stage_storage_proof(
+            &self,
+            block: u64,
+            proof_json: &str,
+            block_hash_hex: &str,
+        ) -> Result<(), JsError> {
+            to_js(self.proofs.put(block, proof_json, block_hash_hex))
+        }
+
+        /// Drop every staged proof. A new head moves the candidate blocks, so
+        /// a live client re-stages instead of accumulating.
+        pub fn clear_storage_proofs(&self) {
+            self.proofs.clear();
+        }
+
+        /// The blocks ring 6 will ask about, in the order it will ask —
+        /// computed by Block B, not by this wrapper, so the two cannot drift.
+        ///
+        /// Returns `{"pool","basis","head","blocks","staged","reason"}`.
+        /// `blocks` is empty with a `reason` when grounding cannot run at all:
+        /// an epoch-replayed mirror has no snapshot basis, so its grade is
+        /// `"replayed"` and no proof is consulted.
+        pub fn proof_candidates(&self) -> Result<String, JsError> {
+            to_js(self.proof_candidates_inner())
+        }
+
+        fn proof_candidates_inner(&self) -> Result<String> {
+            let head = meta_u64(&self.store, "head_number").unwrap_or(0);
+            let basis = meta_u64(&self.store, "snapshot_basis");
+            let (blocks, reason) = match basis {
+                Some(basis) => {
+                    let blocks = drive(grounding_candidates(&self.feed, basis, head))?;
+                    let reason = if blocks.is_empty() {
+                        Some(format!(
+                            "no block at or above the snapshot basis {basis} is available to \
+                             ground against (mirror head {head})"
+                        ))
+                    } else {
+                        None
+                    };
+                    (blocks, reason)
+                }
+                None => (
+                    Vec::new(),
+                    Some(
+                        "this mirror was replayed from the epoch chain, not cold-started from \
+                         a snapshot, so ring 6 does not run and the grade is \"replayed\""
+                            .to_owned(),
+                    ),
+                ),
+            };
+            Ok(json!({
+                "pool": self.genesis.pool,
+                "basis": basis,
+                "head": head,
+                "blocks": blocks,
+                "staged": self.proofs.staged_blocks(),
+                "reason": reason,
+            })
+            .to_string())
         }
 
         // ------------------------------------------------------------ folding
@@ -382,6 +469,13 @@ mod engine {
         /// Returns the canonical `SyncReport` JSON — field-identical to
         /// `strk20-sync sync --json`: notes, balances, spent-state, senders,
         /// recipients, completion flags, `history_from`, `verified`.
+        ///
+        /// `verified` is `"replayed"` when the epoch chain was folded from
+        /// genesis, `"anchored"` when a staged storage proof grounded the
+        /// mirror in the chain (§1.5 ring 6 — see [`Engine::stage_storage_proof`]),
+        /// and `"server-asserted"` when a snapshot start was grounded only by
+        /// an anchor the FEED published. A staged proof that fails to verify
+        /// throws; it never degrades the grade silently.
         pub fn discover(&self, owner_hex: &str, key: &mut [u8]) -> Result<String, JsError> {
             // Zeroize on EVERY path, including the error ones, before the
             // result can be inspected.
@@ -402,20 +496,46 @@ mod engine {
             raw.copy_from_slice(key);
             let secret = SecretFelt::new(Felt::from_bytes_be(&raw));
             raw.zeroize();
-            let report = drive(sync_once(
-                &self.store,
-                &self.feed,
-                owner,
-                &secret,
-                // No `anchor_proofs`: ring 6 asks the USER's own RPC for a
-                // storage proof, which is a network call. TypeScript owns the
-                // network, so a browser's grade tops out at "server-asserted"
-                // for a snapshot start and is "replayed" for an epoch replay.
-                &SyncOptions::default(),
-            ));
+
+            // Ring 6 runs iff the caller staged a proof. The network call is
+            // TypeScript's — see `stage_storage_proof` — but the decision made
+            // from the answer is Block B's, unchanged and shared with the
+            // native client.
+            let staged = self.proofs.staged_blocks();
+            let opts = SyncOptions {
+                cold_start: ColdStart::Auto,
+                anchor_proofs: (!staged.is_empty())
+                    .then(|| Arc::clone(&self.proofs) as Arc<dyn ProofSource>),
+            };
+            self.proofs.begin();
+            let report = drive(sync_once(&self.store, &self.feed, owner, &secret, &opts))?;
             // `secret` drops here and zeroes itself; the report has never held
             // key material.
-            Ok(serde_json::to_string(&report?)?)
+
+            // A staged proof that nothing consumed must NOT come back as a
+            // quietly weaker grade. "server-asserted" would then be
+            // indistinguishable from "anchored, and the check passed", which
+            // makes the strong grade unfalsifiable — the one failure mode this
+            // ring exists to rule out. A refuted proof already fails inside
+            // Block B (ANCHOR_NOT_ON_CHAIN); this covers the other way it can
+            // go unused.
+            if !staged.is_empty() && report.verified != "anchored" {
+                let asked = self.proofs.asked();
+                let asked_for = if asked.is_empty() {
+                    "ring 6 asked about no block at all".to_owned()
+                } else {
+                    format!("ring 6 asked about {asked:?}")
+                };
+                bail!(
+                    "PROOF_UNUSED: a storage proof is staged for block(s) {staged:?}, but \
+                     nothing consumed it — the grade came back {:?}, not \"anchored\". \
+                     {asked_for}. Call proof_candidates() and stage a proof for a block it \
+                     names, or clear_storage_proofs() to accept the weaker grade \
+                     deliberately.",
+                    report.verified
+                );
+            }
+            Ok(serde_json::to_string(&report)?)
         }
 
         /// Drop every cursor and registry row for `owner`. The mirror is kept

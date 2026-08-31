@@ -156,5 +156,70 @@ for (const mode of ["auto", "epochs"]) {
     engine.free();
 }
 
+// ------------------- 8. ring 6: the "anchored" grade, reachable in a browser
+//
+// The three grades are three different claims. "server-asserted" trusts a
+// number the SERVER published; "anchored" trusts a storage proof from a node
+// the USER chose, which puts the indexer outside the trust path entirely. The
+// module cannot make that RPC call — so TypeScript makes it and pushes the
+// answer in, exactly as it does for the feed itself.
+//
+// The fixture's anchors log is written by the native fold, so it is an
+// INDEPENDENT source for the root here: building the "valid" proof out of the
+// module's own recomputed root would prove nothing.
+{
+    const anchor = text("anchors.ndjson").trim().split("\n").map(JSON.parse).at(-1);
+
+    // What `starknet_getStorageProof(block, [], [pool], [])` answers with.
+    const proofFor = (storage_root) =>
+        JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+                global_roots: {
+                    block_hash: anchor.block_hash,
+                    contracts_tree_root: "0x0",
+                    classes_tree_root: "0x0",
+                },
+                contracts_proof: {
+                    nodes: [],
+                    contract_leaves_data: [
+                        { nonce: "0x0", class_hash: "0x0", storage_root },
+                    ],
+                },
+                contracts_storage_proofs: [],
+            },
+        });
+
+    const engine = staged();
+    engine.apply("auto");
+    const cands = JSON.parse(engine.proof_candidates());
+    ok(
+        cands.blocks.includes(anchor.block),
+        `proof_candidates() names block ${anchor.block} (${JSON.stringify(cands.blocks)})`,
+    );
+
+    // (a) the chain agrees with the mirror -> the strong grade.
+    engine.stage_storage_proof(BigInt(anchor.block), proofFor(anchor.storage_root), anchor.block_hash);
+    const report = JSON.parse(engine.discover(owners[0].owner, hexToBytes(owners[0].key)));
+    ok(report.verified === "anchored", `a staged valid proof yields "anchored" (got "${report.verified}")`);
+
+    // (b) the chain disagrees -> a named refusal, never a quiet downgrade to
+    //     "server-asserted". A grade that cannot fail is not a grade.
+    const bad = staged();
+    bad.apply("auto");
+    const wrongRoot = anchor.storage_root.replace(/.$/, (d) => (d === "0" ? "1" : "0"));
+    bad.stage_storage_proof(BigInt(anchor.block), proofFor(wrongRoot), anchor.block_hash);
+    try {
+        const downgraded = JSON.parse(bad.discover(owners[0].owner, hexToBytes(owners[0].key)));
+        ok(false, `a disagreeing proof must throw, but returned verified="${downgraded.verified}"`);
+    } catch (e) {
+        const err = JSON.parse(e.message);
+        ok(err.code === "ANCHOR_NOT_ON_CHAIN", `a disagreeing proof is rejected by name (${err.code})`);
+    }
+    engine.free();
+    bad.free();
+}
+
 console.log(`\n${failures === 0 ? "PASS" : `FAIL (${failures})`}`);
 process.exit(failures === 0 ? 0 : 1);
