@@ -15,12 +15,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { memoryStorage } from '../src/storage.ts';
+import { MemoryStorage } from '../src/storage.ts';
 
 const row = (n: number) => ({ hash: `${n}`.repeat(8), zbytes: Uint8Array.of(n) });
 
 test('one artifact row can be evicted without clearing the cache', async () => {
-  const s = memoryStorage();
+  const s = new MemoryStorage();
   await s.open();
   await s.artifactPut('epoch:1', row(1));
   await s.artifactPut('epoch:2', row(2));
@@ -32,7 +32,7 @@ test('one artifact row can be evicted without clearing the cache', async () => {
 });
 
 test('evicting a row that is not there is not an error', async () => {
-  const s = memoryStorage();
+  const s = new MemoryStorage();
   await s.open();
   await assert.doesNotReject(() => s.artifactDelete('epoch:404'));
 });
@@ -42,7 +42,7 @@ test('a persisted row carries the hash it was admitted under', async () => {
   // where it used to write `hash: ''` — including for prefetch bytes nothing
   // had checked. A row whose recorded hash is empty or wrong is rejected as a
   // cache miss on the next read, which is what makes the cache self-healing.
-  const s = memoryStorage();
+  const s = new MemoryStorage();
   await s.open();
   await s.artifactPut('epoch:7', { hash: 'abc', zbytes: Uint8Array.of(7) });
   assert.equal((await s.artifactGet('epoch:7'))?.hash, 'abc');

@@ -66,7 +66,6 @@ const CODES: &[&str] = &[
     // of one.
     "ANCHOR_NOT_ON_CHAIN",
     "PROOF_MALFORMED",
-    "PROOF_BLOCK_MISMATCH",
     "PROOF_NOT_STAGED",
     "PROOF_UNUSED",
 ];

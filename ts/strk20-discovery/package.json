@@ -20,6 +20,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "node -e \"const n=require('node:fs').readdirSync('test',{recursive:true}).filter(f=>String(f).endsWith('.test.ts')).length;if(!n){console.error('no test files under test/ \u2014 an empty suite must not report green');process.exit(1)}\"",
     "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
     "scan:chokepoint": "node scripts/scan-chokepoint.mjs"
   },

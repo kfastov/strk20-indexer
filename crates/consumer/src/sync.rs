@@ -369,10 +369,11 @@ pub async fn sync_once<S: ConsumerStore>(
                     tracing::warn!(
                         rpc = %proofs.label(),
                         reason = %why,
-                        "ring 6 could not run: this endpoint cannot serve a storage proof \
-                         for any block we can ask about. That is a statement about the \
-                         ENDPOINT, not about the mirror, so the sync stands and the grade \
-                         stays server-asserted."
+                        "ring 6 established no grounding: no candidate block could be \
+                         proved AND pinned to a block hash this mirror holds. That is a \
+                         statement about the ENDPOINT and the proof it offered, not about \
+                         the mirror's data, so the sync stands and the grade degrades to \
+                         server-asserted. It is NOT \"anchored, and the check passed\"."
                     );
                     false
                 }

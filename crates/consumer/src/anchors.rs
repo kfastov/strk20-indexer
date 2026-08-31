@@ -130,10 +130,49 @@ pub async fn verify_anchors<S: ConsumerStore>(
 /// a capability gap presented as mirror corruption.
 #[derive(Debug)]
 pub enum Grounding {
-    /// The MIRROR's own recomputed root equalled the chain's at this block.
+    /// The MIRROR's own recomputed root equalled the chain's at this block,
+    /// and the proof was pinned to a block hash the mirror itself holds.
     Anchored(u64),
-    /// No candidate block was provable. The mirror is not implicated.
+    /// No candidate block was provable — the endpoint could not answer, or its
+    /// answer could not be pinned to a block this mirror knows. The mirror is
+    /// not implicated either way.
     Unavailable(String),
+}
+
+/// The hash the MIRROR itself holds for `block`, or `None` when it holds none.
+///
+/// Two sources, in this order:
+///
+/// * a tail row, when the head file covered `block` with a block line;
+/// * the `head_hash` meta value `apply_feed` writes from the head header,
+///   which is the only source for the case a tail row cannot cover — a head
+///   file whose `tail_from` is above `head` carries **no** block lines at all.
+///   That is the shape of a snapshot cold start with a quiet tail, i.e. exactly
+///   the configuration ring 6 exists for, and the reason a
+///   `store.block_hash(head)`-only lookup degrades to a no-op precisely where
+///   it is needed.
+///
+/// Both sources are the FEED's assertion about the block, not the chain's.
+/// That is the point: pinning the user's own proof to them is a cross-source
+/// agreement between the feed and the user's node, which is what ring 6 claims.
+/// Pinning it to a hash the caller passed in alongside the proof is not a
+/// binding at all — it is the caller agreeing with itself.
+pub fn mirror_block_hash<S: ConsumerStore>(store: &S, block: u64) -> Result<Option<Felt>> {
+    if let Some(h) = store.block_hash(block)? {
+        return Ok(Some(h));
+    }
+    let head: Option<u64> = store
+        .meta_get("head_number")?
+        .and_then(|s| s.parse::<u64>().ok());
+    if head != Some(block) {
+        return Ok(None);
+    }
+    match store.meta_get("head_hash")? {
+        Some(hex) => Ok(Some(Felt::from_hex(&hex).map_err(|_| {
+            anyhow!("mirror meta head_hash {hex:?} is not a felt")
+        })?)),
+        None => Ok(None),
+    }
 }
 
 /// §1.5 ring 6 — chain grounding through the USER'S OWN RPC.
@@ -154,6 +193,24 @@ pub enum Grounding {
 /// is a sound choice — pool slots are write-once, so a root match at B attests
 /// every write at or below B, the snapshot included — so letting the server
 /// name a recent block costs nothing.
+///
+/// ## What `anchored` requires, and why both halves are here
+///
+/// Two comparisons, both against values this mirror already holds:
+///
+/// 1. the client's recomputed storage root at `block` equals the root in the
+///    proof — the evidence about the DATA. A disagreement here is evidence
+///    against the mirror and fails the sync by name;
+/// 2. the proof's `global_roots.block_hash` equals [`mirror_block_hash`] for
+///    `block` — the evidence about the SUBJECT. Without it, (1) is a claim
+///    about whichever block the endpoint felt like answering for.
+///
+/// (2) used to be an `if let (Some, Some)` over `store.block_hash`, which has
+/// no row for the basis block on a snapshot cold start with a quiet tail — so
+/// it degraded to a no-op in exactly the configuration this ring exists for,
+/// and `anchored` came down to the caller's own say-so. It is now unconditional
+/// in the sense that matters: a block whose hash the mirror cannot supply
+/// **cannot earn `anchored`** and is reported as unavailable.
 pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
     store: &S,
     transport: &dyn FeedTransport,
@@ -201,17 +258,52 @@ pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
             ));
             continue;
         }
-        if let (Some(chain_hash), Some(stored)) = (
-            result["global_roots"]["block_hash"]
-                .as_str()
-                .and_then(|s| Felt::from_hex(s).ok()),
-            store.block_hash(block)?,
-        ) {
-            if chain_hash != stored {
-                mismatches.push(format!(
-                    "block {block}: mirror block hash {} != chain {}",
-                    strk20_feed::felt_hex(&stored),
-                    strk20_feed::felt_hex(&chain_hash)
+        // The root agrees — but a root is only evidence about `block` if the
+        // proof is actually ABOUT `block`. A public proof endpoint is an
+        // anonymous load-balanced pool, so the answer can be a lagging or
+        // forked replica's, and a pushed-in answer (the browser) is whatever
+        // the host handed over. So pin it to a hash this MIRROR holds. Not to
+        // one supplied alongside the proof: two values from the same source
+        // agreeing with each other is not a binding.
+        //
+        // A failure to pin is NOT evidence against the mirror — the root just
+        // matched — so it goes to `unavailable` and the grade degrades to
+        // server-asserted rather than nuking the mirror on a lagging replica.
+        //
+        // This is deliberately NOT the indexer's §12 B2 stance (e2e T19), and
+        // the difference is what the hash is compared against. There, both
+        // halves come from the same endpoint, so a disagreement means that
+        // endpoint lied and a hard error is right. Here the partner is the
+        // FEED's claim about block N, which can differ honestly — a tail reorg
+        // between the feed publishing head and the user's node answering. A
+        // hard error there would turn a routine reorg into `reset_mirror()`.
+        let Some(own_hash) = mirror_block_hash(store, block)? else {
+            unavailable.push(format!(
+                "{block}: this mirror holds no block hash of its own for that block, so a \
+                 storage proof about it cannot be pinned to the chain and cannot earn \
+                 \"anchored\""
+            ));
+            continue;
+        };
+        match result["global_roots"]["block_hash"]
+            .as_str()
+            .and_then(|s| Felt::from_hex(s).ok())
+        {
+            Some(chain_hash) if chain_hash == own_hash => {}
+            Some(chain_hash) => {
+                unavailable.push(format!(
+                    "{block}: the proof is about block hash {}, but this mirror's block \
+                     {block} is {} — the proof describes a different block (a lagging or \
+                     forked replica), so it attests nothing about this one",
+                    strk20_feed::felt_hex(&chain_hash),
+                    strk20_feed::felt_hex(&own_hash)
+                ));
+                continue;
+            }
+            None => {
+                unavailable.push(format!(
+                    "{block}: the proof carries no usable global_roots.block_hash, so it \
+                     cannot be pinned to a block and must not be believed"
                 ));
                 continue;
             }

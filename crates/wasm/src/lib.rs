@@ -96,6 +96,17 @@ mod engine {
         feed: StagedFeed,
         proofs: Arc<StagedProofs>,
         genesis: Genesis,
+        /// The grade ring 6 last ESTABLISHED, if any.
+        ///
+        /// `info()` has to be able to answer "what has this mirror earned?"
+        /// before a caller runs `discover`, and the floor — `replayed` vs
+        /// `server-asserted` — follows from `snapshot_basis` alone. `anchored`
+        /// does not: it is only known once ring 6 has run, which happens
+        /// inside `discover`. Without this field `info().verified` would have
+        /// an unreachable arm, which is precisely the defect this replaces on
+        /// the TypeScript side. Cleared by every `apply`, because a new head
+        /// moves the candidate blocks and an old verdict does not survive it.
+        grade: std::sync::Mutex<Option<String>>,
     }
 
     fn felt(hex: &str, what: &str) -> Result<Felt> {
@@ -135,7 +146,25 @@ mod engine {
                 feed,
                 proofs: Arc::new(StagedProofs::new()),
                 genesis,
+                grade: std::sync::Mutex::new(None),
             })
+        }
+
+        fn set_grade(&self, grade: Option<String>) {
+            *self.grade.lock().expect("grade poisoned") = grade;
+        }
+
+        /// The grade this mirror has earned, by the module's own rule. The
+        /// floor follows from `snapshot_basis`; `anchored` is remembered from
+        /// the last `discover` that ring 6 grounded.
+        fn grade_now(&self) -> &'static str {
+            if meta_u64(&self.store, "snapshot_basis").is_none() {
+                return "replayed";
+            }
+            match self.grade.lock().expect("grade poisoned").as_deref() {
+                Some("anchored") => "anchored",
+                _ => "server-asserted",
+            }
         }
 
         /// Engine semver — the `engine` field of a state blob's stamp.
@@ -190,9 +219,7 @@ mod engine {
         }
 
         /// §1.5 ring 6, staged: one `starknet_getStorageProof` answer for
-        /// `block`, from the endpoint the USER chose, paired with the
-        /// `block_hash` that endpoint's `starknet_getBlockWithTxHashes(block)`
-        /// returned.
+        /// `block`, from the endpoint the USER chose.
         ///
         /// This is the one input that takes the feed server out of the trust
         /// path, and it is what lifts `discover`'s `verified` from
@@ -200,20 +227,18 @@ mod engine {
         /// first: it names the blocks ring 6 will actually ask about, and a
         /// proof for any other block is refused rather than ignored.
         ///
-        /// Both halves are required because the proof alone cannot be trusted
-        /// to be about the block you asked for — a public proof endpoint is an
-        /// anonymous load-balanced pool. The module makes the comparison
-        /// itself, here, before anything is folded; see [`crate::proofs`].
+        /// **One argument, deliberately.** An earlier signature also took the
+        /// `block_hash` the caller's `starknet_getBlockWithTxHashes(block)`
+        /// returned, and compared the two — but both came from the caller in
+        /// the same call, so the comparison proved only that the caller agreed
+        /// with itself. The pin is now made against a hash the MODULE holds
+        /// (`mirror_block_hash`), inside ring 6, and no second RPC round trip
+        /// is needed. See [`crate::proofs`].
         ///
         /// `proof_json` may be the whole JSON-RPC envelope or just its
         /// `result` object.
-        pub fn stage_storage_proof(
-            &self,
-            block: u64,
-            proof_json: &str,
-            block_hash_hex: &str,
-        ) -> Result<(), JsError> {
-            to_js(self.proofs.put(block, proof_json, block_hash_hex))
+        pub fn stage_storage_proof(&self, block: u64, proof_json: &str) -> Result<(), JsError> {
+            to_js(self.proofs.put(block, proof_json))
         }
 
         /// Drop every staged proof. A new head moves the candidate blocks, so
@@ -287,6 +312,9 @@ mod engine {
 
         fn apply_inner(&self, cold_start: &str) -> Result<String> {
             let mode = cold_start_of(cold_start)?;
+            // A fold moves the mirror; a grade established against the old one
+            // does not carry over.
+            self.set_grade(None);
             let before = (
                 meta_u64(&self.store, "last_epoch_applied"),
                 meta_u64(&self.store, "snapshot_basis"),
@@ -321,6 +349,7 @@ mod engine {
         /// Returns `{"head","l1_accepted","tail_rewound"}`.
         pub fn apply_head(&self, payload: &[u8], etag: &str) -> Result<String, JsError> {
             to_js((|| {
+                self.set_grade(None);
                 self.feed.put_head(payload.to_vec(), etag.to_owned());
                 let out = drive(strk20_consumer::apply::apply_feed(
                     &self.store,
@@ -340,7 +369,11 @@ mod engine {
 
         /// `{"chain_id","pool","genesis_block","epoch_size","last_epoch",
         /// "last_epoch_hash","last_epoch_to","history_floor","snapshot_basis",
-        /// "head","l1_accepted","slots","tail_generation","engine_version"}`.
+        /// "head","l1_accepted","slots","tail_generation","verified",
+        /// "engine_version"}`.
+        ///
+        /// `verified` is the trust grade, decided by the module. Read it; do
+        /// not re-derive it from `snapshot_basis` in the wrapper.
         pub fn info(&self) -> Result<String, JsError> {
             to_js(self.info_inner())
         }
@@ -362,6 +395,11 @@ mod engine {
                 "l1_accepted": meta_u64(&self.store, "l1_accepted").unwrap_or(0),
                 "slots": slots,
                 "tail_generation": self.store.tail_generation()?,
+                // The trust grade, decided HERE and not re-derived by the
+                // wrapper. A wrapper that recomputes it has to encode the rule
+                // a second time, and the second copy in this project's
+                // TypeScript could not express `anchored` at all.
+                "verified": self.grade_now(),
                 "engine_version": ENGINE_VERSION,
             })
             .to_string())
@@ -519,7 +557,13 @@ mod engine {
             // ring exists to rule out. A refuted proof already fails inside
             // Block B (ANCHOR_NOT_ON_CHAIN); this covers the other way it can
             // go unused.
-            if !staged.is_empty() && report.verified != "anchored" {
+            //
+            // "replayed" is NOT that case. A mirror folded from genesis has the
+            // strongest provenance in the system and ring 6 correctly does not
+            // run on it (there is no snapshot to ground). A defensive caller
+            // that always stages a proof must not be punished for landing on
+            // the one mirror that needed none.
+            if !staged.is_empty() && !matches!(report.verified.as_str(), "anchored" | "replayed") {
                 let asked = self.proofs.asked();
                 let asked_for = if asked.is_empty() {
                     "ring 6 asked about no block at all".to_owned()
@@ -529,12 +573,17 @@ mod engine {
                 bail!(
                     "PROOF_UNUSED: a storage proof is staged for block(s) {staged:?}, but \
                      nothing consumed it — the grade came back {:?}, not \"anchored\". \
-                     {asked_for}. Call proof_candidates() and stage a proof for a block it \
-                     names, or clear_storage_proofs() to accept the weaker grade \
-                     deliberately.",
+                     {asked_for}. Either the proof was for a block ring 6 does not ask \
+                     about, or it could not be pinned to a block hash this mirror holds. \
+                     Call proof_candidates() and stage a proof for a block it names, or \
+                     clear_storage_proofs() to accept {:?} deliberately.",
+                    report.verified,
                     report.verified
                 );
             }
+            // `info().verified` answers with what ring 6 actually established,
+            // so the wrapper never has to re-derive it.
+            self.set_grade(Some(report.verified.clone()));
             Ok(serde_json::to_string(&report)?)
         }
 

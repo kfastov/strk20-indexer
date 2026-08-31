@@ -15,7 +15,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "pretest": "node scripts/parse-reference-numbers.mjs",
-    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\""
+    "test": "tsc --noEmit"
   },
   "dependencies": {
     "strk20-discovery": "*"

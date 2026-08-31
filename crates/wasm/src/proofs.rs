@@ -17,30 +17,47 @@
 //! candidate-block choice and the LIVE-6 capability/corruption distinction all
 //! still run inside `strk20-consumer` over these bytes.
 //!
-//! ## The binding this type enforces, and why it is here
+//! ## The binding, and where it is NOT
 //!
 //! A public `starknet_getStorageProof` endpoint is an **anonymous
 //! load-balanced pool**: two requests can land on two nodes, and the second may
 //! answer for a different block than the one you believe you asked about — a
 //! lagging replica, or a fork the rest of the network dropped. Measured
 //! earlier in this project, not assumed. A root read out of such an answer is
-//! worthless until it is pinned to the block the user's node calls canonical.
+//! worthless until it is pinned to a block.
 //!
-//! The pin is one felt comparison: the proof's `global_roots.block_hash` must
-//! equal the `block_hash` of `starknet_getBlockWithTxHashes(block)`. Both
-//! values pass through this module, so the module makes the comparison —
-//! leaving it to TypeScript would make the strongest grade in the system
-//! depend on a wrapper remembering to do something. It is checked at STAGING
-//! time, before anything is folded, so a mispaired proof fails immediately and
-//! by name rather than surfacing later as a root mismatch.
+//! This type used to take that pin as a second argument: the caller passed the
+//! proof AND the `block_hash` it said `starknet_getBlockWithTxHashes(block)`
+//! returned, and `put` compared the two. That comparison was self-referential —
+//! both values came from the caller, in the same call, and a wrapper that read
+//! `block_hash` out of the proof itself (the obvious way to write it, and
+//! forbidden nowhere) passed it every time. It bought a check on the caller's
+//! internal consistency and nothing else, while wearing the name of a chain
+//! binding.
+//!
+//! So the argument is gone, and the pin lives in **one** place:
+//! [`strk20_consumer::anchors::ground_mirror_against_rpc`] compares the proof's
+//! `global_roots.block_hash` against [`strk20_consumer::anchors::mirror_block_hash`]
+//! — a value the MIRROR holds, from the feed bytes it already folded and
+//! hash-checked. A proof that cannot be pinned to one cannot earn `anchored`;
+//! it degrades to `server-asserted`, and this module then throws `PROOF_UNUSED`
+//! rather than returning the weaker grade quietly.
+//!
+//! What is left here is structural: parse the envelope, refuse an RPC error
+//! wearing a proof's clothes, and refuse a proof with no `storage_root` or no
+//! `global_roots.block_hash` — one that could never be pinned to anything.
 //!
 //! ## What "anchored" does and does not rest on
 //!
 //! It rests on: the user's chosen node reporting honestly about its own state,
-//! and the two answers (proof, block header) agreeing about which block they
-//! describe. It does not rest on the feed server for anything — not even the
-//! choice of block, which ring 6 re-derives and whose root it recomputes from
-//! the client's own slot set.
+//! the host relaying that answer without editing it, and that answer agreeing
+//! with the feed about which block hash block N carries. It does not rest on
+//! the feed server for the ROOT — which ring 6 recomputes from the client's own
+//! slot set — nor for the choice of block, which ring 6 re-derives.
+//!
+//! The honest limit: a host that lies about what its RPC said is not defended
+//! against here, and cannot be — in a browser that host also holds the viewing
+//! key. What IS defended against is a host that never had a binding to offer.
 //!
 //! What is NOT walked here is the proof's own Merkle path up to
 //! `global_roots.contracts_tree_root` (`strk20_feed::mpt::verify_storage_proof`
@@ -64,22 +81,13 @@ fn felt(hex: &str, what: &str) -> Result<Felt> {
         .map_err(|e| anyhow!("PROOF_MALFORMED: {what} {hex:?} is not a felt: {e}"))
 }
 
-/// One staged `starknet_getStorageProof` answer, already bound to the block
-/// hash the user's own node reports for that block.
-struct Proof {
-    /// The `result` object, exactly as ring 6 will read it.
-    result: Value,
-    /// `global_roots.block_hash`, which equalled the staged header hash.
-    block_hash: Felt,
-    /// The leaf's `storage_root` — kept only so a staged proof can be
-    /// described in an error without re-walking the JSON.
-    storage_root: Felt,
-}
-
 #[derive(Default)]
 struct Inner {
-    /// block -> the proof TypeScript fetched for it
-    proofs: BTreeMap<u64, Proof>,
+    /// block -> the `result` object TypeScript fetched for it, exactly as ring
+    /// 6 will read it. Nothing derived from it is cached here: the felts this
+    /// used to keep alongside were read back by one `describe()` accessor that
+    /// no caller ever had.
+    proofs: BTreeMap<u64, Value>,
     /// blocks ring 6 asked about during the last `discover`
     asked: Vec<u64>,
 }
@@ -99,14 +107,14 @@ impl StagedProofs {
         self.inner.lock().expect("staged proofs poisoned")
     }
 
-    /// Accept one `starknet_getStorageProof` answer for `block`, paired with
-    /// the `block_hash` field of `starknet_getBlockWithTxHashes(block)`.
+    /// Accept one `starknet_getStorageProof` answer for `block`.
     ///
-    /// Everything structural is checked here, so `discover` cannot later fail
-    /// for a reason that was already visible: the envelope must not be an RPC
-    /// error, the leaf must carry a storage root, and the proof must be about
-    /// the block the user's node named.
-    pub fn put(&self, block: u64, proof_json: &str, block_hash_hex: &str) -> Result<()> {
+    /// Everything **structural** is checked here, so `discover` cannot later
+    /// fail for a reason that was already visible: the envelope must not be an
+    /// RPC error, the leaf must carry a storage root, and the proof must carry
+    /// a `global_roots.block_hash` at all. What that hash is worth is not
+    /// decided here — see the module docs.
+    pub fn put(&self, block: u64, proof_json: &str) -> Result<()> {
         let v: Value = serde_json::from_str(proof_json)
             .map_err(|e| anyhow!("PROOF_MALFORMED: storage proof for block {block} is not JSON: {e}"))?;
 
@@ -126,7 +134,7 @@ impl StagedProofs {
         };
 
         let leaf = &result["contracts_proof"]["contract_leaves_data"][0];
-        let storage_root = felt(
+        felt(
             leaf["storage_root"].as_str().ok_or_else(|| {
                 anyhow!(
                     "PROOF_MALFORMED: storage proof for block {block} has no \
@@ -137,38 +145,18 @@ impl StagedProofs {
             "storage_root",
         )?;
 
-        let proof_hash = felt(
+        felt(
             result["global_roots"]["block_hash"].as_str().ok_or_else(|| {
                 anyhow!(
                     "PROOF_MALFORMED: storage proof for block {block} has no \
-                     global_roots.block_hash, so it cannot be bound to a block and must \
-                     not be believed."
+                     global_roots.block_hash, so it can never be pinned to a block and \
+                     must not be believed."
                 )
             })?,
             "global_roots.block_hash",
         )?;
-        let header_hash = felt(block_hash_hex, "block hash")?;
-        if proof_hash != header_hash {
-            bail!(
-                "PROOF_BLOCK_MISMATCH: the storage proof for block {block} is about block \
-                 hash {}, but starknet_getBlockWithTxHashes({block}) says {}. A public \
-                 proof endpoint is an anonymous load-balanced pool, so this means the \
-                 proof came from a node on a different (lagging or forked) view of the \
-                 chain. It proves nothing about the canonical block {block} and is \
-                 refused.",
-                strk20_feed::felt_hex(&proof_hash),
-                strk20_feed::felt_hex(&header_hash)
-            );
-        }
 
-        self.lock().proofs.insert(
-            block,
-            Proof {
-                result,
-                block_hash: header_hash,
-                storage_root,
-            },
-        );
+        self.lock().proofs.insert(block, result);
         Ok(())
     }
 
@@ -180,16 +168,6 @@ impl StagedProofs {
 
     pub fn staged_blocks(&self) -> Vec<u64> {
         self.lock().proofs.keys().copied().collect()
-    }
-
-    /// What is on file for `block`, for reporting.
-    pub fn describe(&self, block: u64) -> Option<(String, String)> {
-        self.lock().proofs.get(&block).map(|p| {
-            (
-                strk20_feed::felt_hex(&p.block_hash),
-                strk20_feed::felt_hex(&p.storage_root),
-            )
-        })
     }
 
     /// Start recording which blocks ring 6 asks about. Called once per
@@ -213,7 +191,7 @@ impl ProofSource for StagedProofs {
     async fn storage_proof(&self, pool: &Felt, block: u64) -> Result<Value> {
         let mut g = self.lock();
         g.asked.push(block);
-        let Some(proof) = g.proofs.get(&block) else {
+        let Some(result) = g.proofs.get(&block) else {
             // Ring 6 tries several blocks; a gap in what the host staged is a
             // statement about the HOST, so it must not fail the sync here.
             // `is_proof_unavailable` knows this token, the loop moves to the
@@ -225,7 +203,7 @@ impl ProofSource for StagedProofs {
         // address, but an endpoint that adds one must not be describing some
         // other contract.
         for key in ["address", "contract_address"] {
-            let named = proof.result["contracts_proof"]["contract_leaves_data"][0][key].as_str();
+            let named = result["contracts_proof"]["contract_leaves_data"][0][key].as_str();
             if let Some(addr) = named.and_then(|s| strk20_feed::felt_from_hex(s).ok()) {
                 if addr != *pool {
                     bail!(
@@ -237,6 +215,6 @@ impl ProofSource for StagedProofs {
                 }
             }
         }
-        Ok(proof.result.clone())
+        Ok(result.clone())
     }
 }

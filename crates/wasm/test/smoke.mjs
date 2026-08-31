@@ -171,13 +171,14 @@ for (const mode of ["auto", "epochs"]) {
     const anchor = text("anchors.ndjson").trim().split("\n").map(JSON.parse).at(-1);
 
     // What `starknet_getStorageProof(block, [], [pool], [])` answers with.
-    const proofFor = (storage_root) =>
+    // `block_hash` defaults to the real one; case (c) below fabricates it.
+    const proofFor = (storage_root, block_hash = anchor.block_hash) =>
         JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
             result: {
                 global_roots: {
-                    block_hash: anchor.block_hash,
+                    block_hash,
                     contracts_tree_root: "0x0",
                     classes_tree_root: "0x0",
                 },
@@ -200,16 +201,26 @@ for (const mode of ["auto", "epochs"]) {
     );
 
     // (a) the chain agrees with the mirror -> the strong grade.
-    engine.stage_storage_proof(BigInt(anchor.block), proofFor(anchor.storage_root), anchor.block_hash);
+    ok(
+        JSON.parse(engine.info()).verified === "server-asserted",
+        "before ring 6 runs, info() reports the floor it has actually earned",
+    );
+    engine.stage_storage_proof(BigInt(anchor.block), proofFor(anchor.storage_root));
     const report = JSON.parse(engine.discover(owners[0].owner, hexToBytes(owners[0].key)));
     ok(report.verified === "anchored", `a staged valid proof yields "anchored" (got "${report.verified}")`);
+    // The grade a wrapper displays must come from the module, not be
+    // recomputed — a recomputed one cannot express "anchored" at all.
+    ok(
+        JSON.parse(engine.info()).verified === "anchored",
+        "and info() then reports it too, so a wrapper never re-derives the grade",
+    );
 
     // (b) the chain disagrees -> a named refusal, never a quiet downgrade to
     //     "server-asserted". A grade that cannot fail is not a grade.
     const bad = staged();
     bad.apply("auto");
     const wrongRoot = anchor.storage_root.replace(/.$/, (d) => (d === "0" ? "1" : "0"));
-    bad.stage_storage_proof(BigInt(anchor.block), proofFor(wrongRoot), anchor.block_hash);
+    bad.stage_storage_proof(BigInt(anchor.block), proofFor(wrongRoot));
     try {
         const downgraded = JSON.parse(bad.discover(owners[0].owner, hexToBytes(owners[0].key)));
         ok(false, `a disagreeing proof must throw, but returned verified="${downgraded.verified}"`);
@@ -217,8 +228,43 @@ for (const mode of ["auto", "epochs"]) {
         const err = JSON.parse(e.message);
         ok(err.code === "ANCHOR_NOT_ON_CHAIN", `a disagreeing proof is rejected by name (${err.code})`);
     }
+
+    // (c) THE REGRESSION. A proof carrying the mirror's own storage root but a
+    //     fabricated `global_roots.block_hash` used to earn "anchored", because
+    //     the only comparison made was between two values the caller supplied
+    //     in the same call. The mirror's own hash for block 99 (0xb10c0063)
+    //     sat unread in meta. It is now the thing the proof is pinned to, so a
+    //     forged hash can no longer be pinned and the grade must not be granted.
+    const forged = staged();
+    forged.apply("auto");
+    forged.stage_storage_proof(BigInt(anchor.block), proofFor(anchor.storage_root, "0x0badc0de"));
+    try {
+        const got = JSON.parse(forged.discover(owners[0].owner, hexToBytes(owners[0].key)));
+        ok(false, `a forged block hash must not yield a grade, but returned verified="${got.verified}"`);
+    } catch (e) {
+        const err = JSON.parse(e.message);
+        ok(
+            err.code === "PROOF_UNUSED",
+            `a forged global_roots.block_hash cannot earn "anchored" (${err.code})`,
+        );
+        ok(
+            /0x0badc0de|pinned/i.test(err.message ?? "") || err.code === "PROOF_UNUSED",
+            "and says so rather than downgrading silently",
+        );
+    }
+
+    // (d) a replayed mirror has the strongest provenance in the system and
+    //     needs no proof. Staging one anyway must not be an error (finding 8).
+    const replayed = staged();
+    replayed.apply("epochs");
+    replayed.stage_storage_proof(BigInt(anchor.block), proofFor(anchor.storage_root));
+    const rep = JSON.parse(replayed.discover(owners[0].owner, hexToBytes(owners[0].key)));
+    ok(rep.verified === "replayed", `a staged proof on a replayed mirror is not an error (got "${rep.verified}")`);
+
     engine.free();
     bad.free();
+    forged.free();
+    replayed.free();
 }
 
 console.log(`\n${failures === 0 ? "PASS" : `FAIL (${failures})`}`);
