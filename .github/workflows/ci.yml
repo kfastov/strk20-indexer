@@ -1,0 +1,219 @@
+name: ci
+
+# The workflow that compiles things.
+#
+# Until now the only job in this repository was `fork-delta-check`, which reads
+# two remote git trees and never builds a line of this workspace. That is how a
+# `Cargo.lock` missing two workspace members and still pinning 52 crates from a
+# gated-out dependency stack sat on `main` with a green tick until somebody ran
+# `docker build` and hit `--locked`. A repository that is green and broken is
+# worse than one that is red, because the tick is what people act on.
+#
+# So the first job here runs the command the Dockerfile runs. Everything else is
+# the checks we already knew how to run and simply were not running.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded push should stop burning a runner. Never cancel on main: those
+# runs populate the caches the pull-request runs restore from.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on a failing test is the difference between "re-run it locally"
+  # and "read the log".
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------- rust
+  #
+  # Build, test and lint in ONE job on purpose. Split across three jobs they
+  # would each compile the same ~300-crate dependency graph into their own
+  # cache; sharing a target directory is worth more here than the finer-grained
+  # red square that splitting would buy.
+  rust:
+    name: rust (build --locked, test, clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # No version is named here, and that is deliberate. `rustup toolchain
+      # install` with no argument installs whatever rust-toolchain.toml pins, so
+      # that file is the single source of the version and there is no second copy
+      # in this workflow to drift out of sync with it. A drifting pin is the same
+      # defect class as a stale lock.
+      #
+      # `component add` then applies to the file-pinned toolchain, not to the
+      # runner's preinstalled default.
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup component add clippy
+          # Printed so a failing run says which compiler produced it.
+          rustc --version
+          cargo clippy --version
+
+      # Caches ~/.cargo/registry, ~/.cargo/git and target/. Without it every run
+      # rebuilds the whole graph — including the two git dependencies — and a CI
+      # slow enough to ignore is a CI nobody reads.
+      - uses: Swatinem/rust-cache@v2
+
+      # THE CHECK THIS FILE EXISTS FOR.
+      #
+      # `--locked` is not decoration: it is the flag the Dockerfile passes, so it
+      # is the flag that decides whether a deploy works. It fails if Cargo.lock
+      # does not already satisfy Cargo.toml, which is exactly the state that
+      # reached production. Do not "helpfully" drop it to get a green run — that
+      # converts a build failure into a deploy failure and moves the cost onto
+      # whoever is shipping.
+      - name: cargo build --workspace --locked
+        run: cargo build --workspace --locked
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+      # `-D warnings` is the point. Plain `cargo clippy` exits 0 no matter how
+      # many warnings it prints, so a job without this flag proves only that
+      # clippy did not crash — a green tick asserting nothing, which is the
+      # defect this whole file is about, wearing a different hat.
+      #
+      # `-A clippy::result_large_err` is the one accepted exemption: five
+      # pre-existing hits in `strk20-indexerd`, all of the form
+      # `Result<T, axum::response::Response>`, where the large Err variant IS the
+      # HTTP response the handler returns. Boxing it to satisfy a lint would make
+      # the code worse. The allow is scoped to that single lint, so every OTHER
+      # new warning still fails the job.
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::result_large_err
+
+  # ---------------------------------------------------------------- invariants
+  #
+  # Five mechanical checks (docs/ops/invariants.md): no user-derived value in a
+  # feed URL, Block B free of host APIs, no silent truncation in ingest, no
+  # secrets in tracked files, upstream consumed unmodified.
+  #
+  # Stdlib Python, no toolchain, ~2 s. It is a required job rather than an
+  # advisory one because an advisory invariant check is a comment.
+  invariants:
+    name: invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: python3 scripts/check-invariants.py
+        run: python3 scripts/check-invariants.py
+
+  # ---------------------------------------------------------------- typescript
+  #
+  # Separate job because it needs a wasm toolchain the Rust job does not, and a
+  # cold `wasm-pack build --release` costs about 70 s that should not sit in
+  # front of the test results.
+  typescript:
+    name: typescript (wasm engine, build, typecheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same single-sourcing as the `rust` job: the version comes from
+      # rust-toolchain.toml, never from a literal in this file.
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+
+      # Distinct cache from the `rust` job: this one holds release artifacts for
+      # wasm32-unknown-unknown, that one debug artifacts for the host. rust-cache
+      # keys by job, so they do not fight over the same entry.
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ts/package-lock.json
+
+      # The vendor's own installer. `cargo install wasm-pack --locked` would
+      # compile it from source on every cache miss — minutes, to obtain a tool
+      # that ships as a prebuilt binary.
+      #
+      # KNOWN GAP, and the only unpinned input in this workflow: this installs
+      # whatever wasm-pack is currently latest, while everything else here is
+      # pinned (toolchain, Cargo.lock, the two git revs, package-lock.json). The
+      # blast radius is small — wasm-pack's output is checked by the demo build
+      # that follows, and the module it emits is not what ships from the Rust
+      # job — but if a wasm-pack release ever breaks this job, pin it by
+      # downloading a fixed release tag instead of running the installer. Local
+      # runs used 0.15.0.
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      # `ts/demo` cannot type-check, let alone build, without this: it imports
+      # `./engine/strk20_engine.js`, which `scripts/copy-engine.mjs` copies out of
+      # `crates/wasm/pkg/`. Both directories are gitignored, so on a fresh
+      # checkout they do not exist and `tsc` fails with TS2307.
+      #
+      # Only the wasm-pack build is needed here, not all of `crates/wasm/build.sh`
+      # — that script also regenerates a fixture and runs a native equality smoke
+      # test, which belong to the Rust job's concerns, and shells out to `brotli`
+      # for a size report.
+      - name: Build the wasm engine
+        working-directory: crates/wasm
+        run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
+
+      - name: npm ci
+        working-directory: ts
+        run: npm ci
+
+      # BUILD BEFORE TYPECHECK, and the order is load-bearing rather than
+      # stylistic. The demo's generated inputs — the copied wasm engine, the
+      # replay feed, and `src/reference-numbers.generated.ts` parsed out of
+      # docs/research/live/live-run-findings.md — are produced by `gen`, which is
+      # wired to `prebuild` and to nothing else. Run `npm run typecheck` first on
+      # a clean checkout and it fails on the missing engine module.
+      #
+      # `build` covers: strk20-discovery `tsc -p tsconfig.build.json`, then the
+      # demo's own `tsc --noEmit && vite build`.
+      - name: npm run build
+        working-directory: ts
+        run: npm run build
+
+      # Adds strk20-discovery's `tsc --noEmit` over its full source (the build
+      # config compiles a subset), and re-checks the demo now that the generated
+      # files exist.
+      - name: npm run typecheck
+        working-directory: ts
+        run: npm run typecheck
+
+      # `npm test` in BOTH packages currently matches zero files, and
+      # `node --test` reports `tests 0` and exits 0. Wiring that in as a step
+      # would manufacture a green tick that asserts nothing — the precise failure
+      # this workflow was added to correct.
+      #
+      # So the step refuses to run until there is something to run, and starts
+      # running by itself the moment a `*.test.ts` file is committed. Nobody has
+      # to remember to come back and enable it.
+      - name: TypeScript tests (activates when test files exist)
+        working-directory: ts
+        run: |
+          set -euo pipefail
+          files=$(find strk20-discovery/test demo/test -name '*.test.ts' 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$files" -eq 0 ]; then
+            echo "::notice title=No TypeScript tests::0 files match ts/*/test/**/*.test.ts. \`npm test\` would exit 0 having run nothing, so it is deliberately NOT executed here. This step runs itself as soon as a test file lands."
+            exit 0
+          fi
+          echo "$files TypeScript test file(s) found — running them."
+          npm test

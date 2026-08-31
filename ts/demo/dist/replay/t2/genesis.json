@@ -1,8 +1,0 @@
-{
-  "format": "strk20-feed",
-  "v": 1,
-  "chain_id": "SN_SEPOLIA",
-  "pool": "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
-  "genesis_block": 8271125,
-  "epoch_size": 10000
-}

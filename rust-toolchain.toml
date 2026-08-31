@@ -1,0 +1,24 @@
+[toolchain]
+# The toolchain is part of the build's identity, the same argument the Dockerfile
+# already makes for `rust:1.95-slim-bookworm`. Pinning it here makes that identity
+# apply to every consumer of this tree — CI, a laptop, the container — instead of
+# only the container.
+#
+# It also protects the clippy gate. `.github/workflows/ci.yml` runs clippy with
+# `-D warnings`; clippy adds and changes lints every release, so on a floating
+# `stable` a toolchain bump lands as a red CI run on an unrelated pull request,
+# and the usual fix for that is to weaken the gate. A pin turns "the toolchain
+# moved" into a one-line commit somebody reviews.
+#
+# Exact patch version, not `1.95`: a partial channel makes the resolved compiler
+# depend on when the dist server was last read.
+#
+# Keep in sync with the Dockerfile's builder image (`rust:1.95-slim-bookworm`).
+channel = "1.95.0"
+
+# `minimal` deliberately, and no `components` key. The Docker builder installs
+# the toolchain with the minimal profile, so naming a component here would make
+# `docker build` fetch it from the network mid-build — new failure surface on the
+# exact path that already broke once. CI installs clippy explicitly instead, in
+# the job that needs it.
+profile = "minimal"
