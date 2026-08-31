@@ -9,6 +9,7 @@ pub mod config;
 pub mod cutter;
 pub mod db;
 pub mod ingest;
+pub mod live;
 pub mod rpc;
 pub mod server;
 pub mod stats;

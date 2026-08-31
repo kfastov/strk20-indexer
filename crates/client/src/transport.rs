@@ -15,7 +15,12 @@ pub trait FeedTransport: Send + Sync {
     async fn fetch_manifest(&self) -> Result<Manifest>;
     /// Compressed epoch bytes.
     async fn fetch_epoch(&self, idx: u64) -> Result<Vec<u8>>;
+    /// Compressed snapshot bytes for epoch `e`. `e` comes from the manifest —
+    /// feed progress, never anything derived from a user.
+    async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>>;
     async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>>;
+    /// The append-only anchor log; `None` when the feed publishes none.
+    async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>>;
     /// `None` = unchanged (ETag matched). Returns (payload, new_etag).
     async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>>;
 }
@@ -50,6 +55,37 @@ impl HttpTransport {
         }
         Ok(resp.bytes().await?.to_vec())
     }
+
+    /// Fetch an OPTIONAL artifact. Only a 404 means "the feed does not publish
+    /// this"; every other outcome (5xx, connection refused, a truncated body)
+    /// is an error the caller must see. Collapsing them into `None` is how a
+    /// verification command comes back green against a feed it never reached.
+    async fn get_optional(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}/{}", self.base, path);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            bail!("GET {url}: HTTP {}", resp.status());
+        }
+        Ok(Some(resp.bytes().await?.to_vec()))
+    }
+}
+
+/// Same rule for a local mirror directory: absent is `None`, unreadable is an
+/// error.
+async fn read_optional(path: std::path::PathBuf) -> Result<Option<Vec<u8>>> {
+    match tokio::fs::read(&path).await {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("read {}", path.display()))),
+    }
 }
 
 #[async_trait]
@@ -68,11 +104,17 @@ impl FeedTransport for HttpTransport {
         self.get_bytes(&format!("epochs/{idx:08}.strk20e.zst")).await
     }
 
+    async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>> {
+        self.get_bytes(&format!("snapshots/{e:08}.strk20s.zst")).await
+    }
+
     async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>> {
-        match self.get_bytes(&format!("epochs/{idx:08}.anchor.json")).await {
-            Ok(b) => Ok(Some(b)),
-            Err(_) => Ok(None),
-        }
+        self.get_optional(&format!("epochs/{idx:08}.anchor.json"))
+            .await
+    }
+
+    async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {
+        self.get_optional("anchors.ndjson").await
     }
 
     async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>> {
@@ -141,15 +183,21 @@ impl FeedTransport for DirTransport {
         .await?)
     }
 
-    async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>> {
-        match tokio::fs::read(
-            self.dir.join("epochs").join(format!("{idx:08}.anchor.json")),
+    async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>> {
+        Ok(tokio::fs::read(
+            self.dir
+                .join("snapshots")
+                .join(format!("{e:08}.strk20s.zst")),
         )
-        .await
-        {
-            Ok(b) => Ok(Some(b)),
-            Err(_) => Ok(None),
-        }
+        .await?)
+    }
+
+    async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>> {
+        read_optional(self.dir.join("epochs").join(format!("{idx:08}.anchor.json"))).await
+    }
+
+    async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {
+        read_optional(self.dir.join("anchors.ndjson")).await
     }
 
     async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>> {

@@ -1,7 +1,7 @@
 //! Manifest and genesis documents (spec §4.2, §4.4). Not content-addressed;
 //! plain serde. The manifest is the poll target that binds the epoch chain.
 
-use crate::{FeedError, payload_sha256};
+use crate::{FeedError, Felt, payload_sha256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +44,28 @@ pub struct ManifestEpoch {
     pub anchor: Option<EpochAnchor>,
 }
 
+/// Snapshot entry (consumer-path.md §1.8, as amended by §11.1).
+///
+/// There is deliberately NO `anchor` object: a storage proof at a snapshot's
+/// basis block cannot be obtained from any public provider (the window is
+/// ~1024 blocks, a basis block is thousands of blocks old at cut time), so a
+/// schema that required one would publish no snapshots at all. Grounding is
+/// the §11.3 reachability check against `anchors.ndjson` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSnapshot {
+    pub e: u64,
     pub block: u64,
-    pub sha256: String,
+    /// Content hash of the basis epoch — the pin onto the one hash chain.
+    pub epoch_hash: String,
+    /// Feed-relative path, `snapshots/{e:08}.strk20s.zst`.
+    pub file: String,
+    /// 64-hex sha256 of the UNCOMPRESSED payload (content identity).
+    pub hash: String,
+    /// 64-hex sha256 of the `.zst` file (transport checksum only).
+    pub zst: String,
     pub bytes: u64,
+    pub slots: u64,
+    pub storage_root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +123,35 @@ pub fn verify_epoch_against_manifest(
         });
     }
     Ok(epoch)
+}
+
+/// Bind a verified epoch to the chain and pool it claims to be about.
+///
+/// The hash chain proves an epoch is the one the manifest names; it says
+/// nothing about WHICH chain that manifest describes. Without this, a feed
+/// carrying the same pool address on a fork or test chain folds cleanly into a
+/// mirror built from the real one (review finding F8: chain id was stamped
+/// everywhere and compared nowhere).
+pub fn verify_epoch_binding(
+    epoch: &crate::codec::Epoch,
+    chain_id: &str,
+    pool: &Felt,
+) -> Result<(), FeedError> {
+    if epoch.header.chain_id != chain_id {
+        return Err(FeedError::Malformed(format!(
+            "epoch {} is stamped chain {} but the feed declares {chain_id}",
+            epoch.header.epoch, epoch.header.chain_id
+        )));
+    }
+    if epoch.header.pool != *pool {
+        return Err(FeedError::Malformed(format!(
+            "epoch {} is stamped pool {} but the feed declares {}",
+            epoch.header.epoch,
+            crate::felt_hex(&epoch.header.pool),
+            crate::felt_hex(pool)
+        )));
+    }
+    Ok(())
 }
 
 /// Verify a full ordered set of (entry, payload) pairs as one chain.

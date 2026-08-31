@@ -4,7 +4,7 @@
 //! On a tail reorg the live cursor is discarded and the client resumes from
 //! the checkpoint — never from scratch (spec §7.5).
 
-use crate::store::{ApplyOutcome, FeedStore, NoteRow};
+use crate::store::{ApplyOutcome, ColdStart, FeedStore, NoteRow};
 use crate::transport::FeedTransport;
 use anyhow::{bail, Result};
 use discovery_core::discovery::{CursorLimits, DiscoveryCursor};
@@ -45,6 +45,30 @@ pub struct SyncReport {
     pub notes: Vec<ReportNote>,
     pub balances: std::collections::BTreeMap<String, String>,
     pub newly_spent: Vec<String>,
+    /// Lowest block for which this mirror holds EVENTS. 0 for a fully
+    /// epoch-replayed mirror; `snapshot.block + 1` for a snapshot-started one,
+    /// whose transaction history below the floor does not exist locally and
+    /// must never be answered with zeros (§1.1).
+    pub history_from: u64,
+    pub snapshot_basis: Option<u64>,
+    /// A snapshot was offered and refused; `auto` fell back to epoch replay.
+    pub snapshot_rejected: bool,
+    /// §1.5.1 — the integrity grade, surfaced rather than implied:
+    /// `"replayed"` (epoch chain from genesis), `"anchored"` (snapshot plus a
+    /// ring-6 check against the user's own RPC), `"server-asserted"` (snapshot
+    /// grounded only by reachability against an anchor the SERVER published).
+    pub verified: String,
+}
+
+/// Everything the caller may choose about how a sync is performed. Nothing
+/// here is derived from a user: cold-start mode is a local preference and the
+/// anchor RPC is the user's own endpoint, never the feed's.
+#[derive(Debug, Clone, Default)]
+pub struct SyncOptions {
+    pub cold_start: ColdStart,
+    /// §1.5 ring 6. When set it RUNS and MUST PASS — there is no
+    /// `verify: 'background'` equivalent.
+    pub verify_anchor_rpc: Option<String>,
 }
 
 struct CursorKeys {
@@ -102,7 +126,7 @@ async fn run_incoming(
     mut cursor: DiscoveryCursor,
 ) -> Result<(DiscoveryCursor, Vec<discovery_core::discovery::notes::DecryptedNote>)> {
     reopen_cursor(&mut cursor);
-    let view = store.view(bound);
+    let view = store.view(bound)?;
     let mut notes = Vec::new();
     for _ in 0..MAX_PASSES {
         let budget = IoBudget::new(PASS_BUDGET);
@@ -133,7 +157,7 @@ async fn run_outgoing(
     mut cursor: DiscoveryCursor,
 ) -> Result<DiscoveryCursor> {
     reopen_cursor(&mut cursor);
-    let view = store.view(bound);
+    let view = store.view(bound)?;
     for _ in 0..MAX_PASSES {
         let budget = IoBudget::new(PASS_BUDGET);
         let out = sync_outgoing_state(
@@ -183,6 +207,20 @@ fn register_notes(
     Ok(())
 }
 
+/// Refuse a feed built for a different chain BEFORE a single epoch is applied.
+/// The chain id is stamped in both genesis.json and the manifest; either
+/// disagreeing with what the client was told it is on is fatal.
+pub async fn check_chain_id(transport: &dyn FeedTransport, expected: &str) -> Result<()> {
+    let genesis = transport.fetch_genesis().await?;
+    let manifest = transport.fetch_manifest().await?;
+    for (source, found) in [("genesis", &genesis.chain_id), ("manifest", &manifest.chain_id)] {
+        if found != expected {
+            bail!("feed {source} chain id {found} is not the expected chain {expected}");
+        }
+    }
+    Ok(())
+}
+
 /// Drop every cursor and registry row for `owner` (recovery path; the
 /// mirror itself is kept and stays verified).
 pub fn full_resync(store: &FeedStore, owner: &Felt) -> Result<()> {
@@ -203,8 +241,74 @@ pub async fn sync_once(
     transport: &dyn FeedTransport,
     owner: Felt,
     key: &SecretFelt,
+    opts: &SyncOptions,
 ) -> Result<SyncReport> {
-    let outcome: ApplyOutcome = store.apply_feed(transport).await?;
+    let outcome: ApplyOutcome = store.apply_feed(transport, opts.cold_start).await?;
+
+    // §1.5 ring 6 — the ONLY ring that grounds this mirror in the chain itself.
+    // Address-blind by construction: the request names a public pool and a
+    // public block, so it is identical for every user and the feed server stays
+    // outside the proof path.
+    //
+    // "Configured means mandatory" applies to the one outcome that is evidence
+    // about the data: a MISMATCH fails the sync. A capability gap is not that
+    // (§11.4/§11.5) — an endpoint that does not implement getStorageProof, or
+    // whose window has moved past every block we can ask about, has said
+    // nothing, and failing the sync for it is LIVE-6.
+    let grounded = match (&opts.verify_anchor_rpc, outcome.snapshot_basis) {
+        (Some(rpc), Some(basis)) => {
+            let outcome6 = crate::anchors::ground_mirror_against_rpc(
+                store,
+                transport,
+                rpc,
+                basis,
+                outcome.head,
+            )
+            .await;
+            let outcome6 = match outcome6 {
+                Ok(o) => o,
+                Err(e) => {
+                    // The user's own RPC has PROVEN this mirror is not the
+                    // chain's. Leaving the rows on disk is how one rejection
+                    // becomes a permanently poisoned db: the next sync sees a
+                    // non-empty mirror, never re-enters the snapshot branch,
+                    // and happily builds on the slot set that was just refuted.
+                    store.reset_mirror()?;
+                    return Err(e);
+                }
+            };
+            match outcome6 {
+                crate::anchors::Grounding::Anchored(block) => {
+                    tracing::info!(block, "mirror grounded against your own RPC (ring 6)");
+                    true
+                }
+                crate::anchors::Grounding::Unavailable(why) => {
+                    tracing::warn!(
+                        rpc = %rpc,
+                        reason = %why,
+                        "ring 6 could not run: this endpoint cannot serve a storage proof \
+                         for any block we can ask about. That is a statement about the \
+                         ENDPOINT, not about the mirror, so the sync stands and the grade \
+                         stays server-asserted."
+                    );
+                    false
+                }
+            }
+        }
+        _ => false,
+    };
+    let verified = match (outcome.snapshot_basis, grounded) {
+        (None, _) => "replayed",
+        (Some(_), true) => "anchored",
+        (Some(_), false) => "server-asserted",
+    };
+    if verified == "server-asserted" {
+        tracing::warn!(
+            "integrity grade is server-asserted: the snapshot's slot set is attested only \
+             by an anchor the feed itself published. Configure --verify-anchor <rpc> for \
+             \"anchored\", or --cold-start epochs for \"replayed\"."
+        );
+    }
     let in_keys = keys("in", &owner);
     let out_keys = keys("out", &owner);
 
@@ -318,5 +422,9 @@ pub async fn sync_once(
             .map(|(k, v)| (k, v.to_string()))
             .collect(),
         newly_spent: newly_spent.iter().map(strk20_feed::felt_hex).collect(),
+        history_from: outcome.history_floor,
+        snapshot_basis: outcome.snapshot_basis,
+        snapshot_rejected: outcome.snapshot_rejected,
+        verified: verified.to_owned(),
     })
 }

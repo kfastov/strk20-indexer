@@ -43,6 +43,9 @@ pub struct FixtureChain {
     /// blocks >= fork_from get their hashes salted with fork_salt
     pub fork_from: u64,
     pub fork_salt: u64,
+    /// O(1) block hashing. The default hash folds over every ancestor, which
+    /// is unusable for fixtures pinned at real mainnet/Sepolia heights.
+    pub flat_hash: bool,
 }
 
 impl FixtureChain {
@@ -100,6 +103,21 @@ impl FixtureChain {
             active,
             fork_from: u64::MAX,
             fork_salt: 0,
+            flat_hash: false,
+        }
+    }
+
+    /// An empty chain at an arbitrary (possibly real-network) height; the
+    /// caller populates `active` directly.
+    pub fn synthetic(pool: Felt, head: u64, l1_accepted: u64) -> Self {
+        Self {
+            pool,
+            head,
+            l1_accepted,
+            active: BTreeMap::new(),
+            fork_from: u64::MAX,
+            fork_salt: 0,
+            flat_hash: true,
         }
     }
 
@@ -114,6 +132,12 @@ impl FixtureChain {
     /// Deterministic header hashes with parent linkage; forking changes every
     /// hash at and above `fork_from`.
     pub fn block_hash(&self, number: u64) -> Felt {
+        if self.flat_hash {
+            return pedersen_hash(
+                &Felt::from(number + self.number_salt(number) * 1_000_003),
+                &Felt::from(0x100u64),
+            );
+        }
         let mut h = Felt::from(0x100u64); // "hash" of block 0
         for n in 1..=number {
             h = pedersen_hash(&Felt::from(n + self.number_salt(n) * 1_000_003), &h);

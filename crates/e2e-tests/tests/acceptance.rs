@@ -133,6 +133,17 @@ impl Ctx {
     }
 
     fn sync_client(&self, tag: &str, address: &Felt, key_hex: &str, db_name: &str) -> (Value, bool) {
+        self.sync_client_with(tag, address, key_hex, db_name, &[])
+    }
+
+    fn sync_client_with(
+        &self,
+        tag: &str,
+        address: &Felt,
+        key_hex: &str,
+        db_name: &str,
+        extra: &[&str],
+    ) -> (Value, bool) {
         let key_path = self.dir.path().join(format!("{tag}.key"));
         std::fs::write(&key_path, key_hex).unwrap();
         let mut cmd = Command::new(bin("strk20-sync"));
@@ -141,6 +152,7 @@ impl Ctx {
             .args(["--address", &strk20_feed::felt_hex(address)])
             .args(["--key-file", &key_path.display().to_string()])
             .args(["--db", &self.dir.path().join(db_name).display().to_string()])
+            .args(extra)
             .arg("--json");
         let (stdout, stderr, success) = run_capture(cmd, false);
         let report = if success {
@@ -363,11 +375,18 @@ async fn acceptance() {
                 "keyless URL must carry no query: {}",
                 req.uri
             );
-            let allowed = req.uri == "/feed/genesis.json"
-                || req.uri == "/feed/manifest.json"
-                || req.uri == "/feed/head.ndjson"
-                || (req.uri.starts_with("/feed/epochs/") && req.uri.ends_with(".strk20e.zst"));
-            assert!(allowed, "unexpected keyless request path: {}", req.uri);
+            // §2.8.1: the allowlist is CLOSED and matched WHOLE-PATH, never by
+            // prefix and never by a startsWith('/feed/') test — that is how the
+            // property erodes the first time a new artifact turns this red.
+            assert!(
+                e2e_tests::feed_urls::is_allowed(&req.uri),
+                "keyless request path {} is outside the closed allowlist {:?}",
+                req.uri,
+                e2e_tests::feed_urls::PATTERNS
+            );
+            // The Rust sync path is polling-only: /feed/live is in the closed
+            // set for the npm client, and must not appear here (§2.5).
+            assert_ne!(req.uri, "/feed/live", "the sync path must not subscribe");
             urls.push(req.uri.clone());
             haystack.extend_from_slice(&req.all_bytes());
         }
@@ -388,7 +407,13 @@ async fn acceptance() {
     let mid = tampered.len() / 2;
     tampered[mid] ^= 0xff;
     std::fs::write(&epoch0, &tampered).unwrap();
-    let (tamper_report, ok) = ctx.sync_client("tamper", &bob, "0xb0b", "tamper.db");
+    // Explicitly the EPOCH path. Since A1 the default `auto` cold start folds
+    // the published snapshot and never reads an epoch at or below its basis,
+    // so a tampered epoch 0 is simply not on that client's fetch list — this
+    // leg is about epoch integrity, and the snapshot path has its own tamper
+    // leg (snapshots.rs S4, including the case only reachability catches).
+    let (tamper_report, ok) =
+        ctx.sync_client_with("tamper", &bob, "0xb0b", "tamper.db", &["--cold-start", "epochs"]);
     assert!(!ok, "client must reject a tampered epoch");
     let err = tamper_report["error"].as_str().unwrap_or_default();
     assert!(

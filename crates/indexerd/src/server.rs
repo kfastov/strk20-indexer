@@ -5,7 +5,7 @@
 
 use crate::config::ChainConfig;
 use crate::db::Db;
-use axum::extract::{Path as AxPath, Query, State};
+use axum::extract::{Path as AxPath, Query, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ pub struct AppState {
     pub feed_dir: PathBuf,
     pub db: Arc<Mutex<Db>>,
     pub cfg: ChainConfig,
+    pub live: Arc<crate::live::LiveHub>,
 }
 
 pub fn build_router(
@@ -35,6 +36,8 @@ pub fn build_router(
         .route("/feed/genesis.json", get(feed_genesis))
         .route("/feed/manifest.json", get(feed_manifest))
         .route("/feed/head.ndjson", get(feed_head))
+        .route("/feed/anchors.ndjson", get(feed_anchors))
+        .route("/feed/live", get(feed_live))
         .route("/feed/epochs/{name}", get(feed_epoch_file))
         .route("/feed/snapshots/{name}", get(feed_snapshot_file))
         .route("/health", get(health))
@@ -99,8 +102,22 @@ async fn feed_manifest(State(s): State<AppState>) -> Response {
     serve_file(s.feed_dir.join("manifest.json"), "public, max-age=30", None).await
 }
 
+/// The append-only anchor log. Append-only means the tail grows, so it is
+/// revalidated like the head rather than cached immutably — and, like the head,
+/// it gets a conditional-GET path: a grounded client refetches it on EVERY
+/// sync, and without an ETag every one of those is a full transfer of a file
+/// that only ever gains a line.
+async fn feed_anchors(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    revalidated_ndjson(s.feed_dir.join("anchors.ndjson"), headers).await
+}
+
 async fn feed_head(State(s): State<AppState>, headers: HeaderMap) -> Response {
-    let path = s.feed_dir.join("head.ndjson");
+    revalidated_ndjson(s.feed_dir.join("head.ndjson"), headers).await
+}
+
+/// A mutable NDJSON artifact served `no-cache` with a sha256 ETag and a 304
+/// path.
+async fn revalidated_ndjson(path: std::path::PathBuf, headers: HeaderMap) -> Response {
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -167,6 +184,50 @@ async fn feed_snapshot_file(State(s): State<AppState>, AxPath(name): AxPath<Stri
         None,
     )
     .await
+}
+
+/// `GET /feed/live` (§2.1) — always on, no flag.
+///
+/// Any query string is 400 `INVALID_QUERY` rather than ignored: that turns the
+/// address-blindness property into a SERVER-enforced guarantee instead of a
+/// client-side convention. Query-appending `EventSource` polyfills are
+/// documented as unsupported.
+async fn feed_live(State(s): State<AppState>, RawQuery(query): RawQuery) -> Response {
+    if query.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "INVALID_QUERY: /feed/live takes no parameters",
+        )
+            .into_response();
+    }
+    let hello = json!({
+        "v": strk20_feed::codec::FORMAT_VERSION,
+        "chain_id": s.cfg.chain_id,
+        "pool": strk20_feed::felt_hex(&s.cfg.pool),
+        "module": concat!("strk20/", env!("CARGO_PKG_VERSION")),
+    })
+    .to_string();
+
+    // Read the published files now, so the connect burst is the present and
+    // not the last tick's past (§2.2: connect always replays CURRENT state).
+    s.live.refresh();
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(32);
+    let hub = s.live.clone();
+    tokio::spawn(async move { crate::live::stream_to(hub, hello, tx).await });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // Proxies must not buffer the stream; without this a poke can sit in a
+    // reverse proxy until enough bytes accumulate.
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    (headers, axum::body::Body::from_stream(stream)).into_response()
 }
 
 async fn health(State(s): State<AppState>) -> Response {
@@ -238,8 +299,10 @@ async fn metrics(State(s): State<AppState>) -> Response {
             "# TYPE strk20_head_block gauge\nstrk20_head_block {head}\n\
              # TYPE strk20_l1_accepted_block gauge\nstrk20_l1_accepted_block {l1}\n\
              # TYPE strk20_epochs_cut gauge\nstrk20_epochs_cut {epochs}\n\
-             # TYPE strk20_decode_degraded gauge\nstrk20_decode_degraded {}\n",
-            degraded as u8
+             # TYPE strk20_decode_degraded gauge\nstrk20_decode_degraded {}\n\
+             # TYPE strk20_sse_connections gauge\nstrk20_sse_connections {}\n",
+            degraded as u8,
+            s.live.connections()
         ))
     });
     match result {

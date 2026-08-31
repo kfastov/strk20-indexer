@@ -6,7 +6,7 @@ use starknet_types_core::felt::Felt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use strk20_indexerd::config::{self, ChainConfig};
-use strk20_indexerd::cutter::Cutter;
+use strk20_indexerd::cutter::{Cutter, VerifyOutcome};
 use strk20_indexerd::db::Db;
 use strk20_indexerd::ingest::{init_checks, Ingestor};
 use strk20_indexerd::rpc::RpcClient;
@@ -26,12 +26,16 @@ struct CommonOpts {
     /// Feed output directory (the canonical product)
     #[arg(long, default_value = "feed", env = "STRK20_FEED_DIR")]
     feed_dir: PathBuf,
+    /// Chain profile: pool address, genesis block, chain id, decoder map and
+    /// default RPC endpoints. Every flag below still overrides the profile.
+    #[arg(long, value_enum, default_value_t = config::Network::Mainnet, env = "STRK20_NETWORK")]
+    network: config::Network,
     /// Primary Starknet JSON-RPC URL
-    #[arg(long, default_value = config::MAINNET_RPC_PRIMARY, env = "STRK20_RPC_URL")]
-    rpc_url: String,
+    #[arg(long, env = "STRK20_RPC_URL")]
+    rpc_url: Option<String>,
     /// Fallback RPC URL
-    #[arg(long, default_value = config::MAINNET_RPC_FALLBACK, env = "STRK20_RPC_FALLBACK")]
-    rpc_fallback: String,
+    #[arg(long, env = "STRK20_RPC_FALLBACK")]
+    rpc_fallback: Option<String>,
     /// Pool contract address (defaults to the mainnet STRK20 pool)
     #[arg(long, env = "STRK20_POOL")]
     pool: Option<String>,
@@ -47,6 +51,9 @@ struct CommonOpts {
     /// getEvents page size
     #[arg(long, default_value_t = 1000)]
     chunk_size: u64,
+    /// Seconds between scan progress lines; 0 reports every page
+    #[arg(long, default_value_t = 15, env = "STRK20_PROGRESS_SECS")]
+    progress_secs: u64,
     /// Additional known pool class hash(es) for the decoder map (recovery
     /// path after an upgrade; spec §5.7)
     #[arg(long = "allow-class")]
@@ -55,7 +62,7 @@ struct CommonOpts {
 
 impl CommonOpts {
     fn chain_config(&self) -> ChainConfig {
-        let mut cfg = ChainConfig::mainnet();
+        let mut cfg = self.network.profile();
         if let Some(p) = &self.pool {
             cfg.pool = Felt::from_hex(p).expect("bad --pool");
         }
@@ -78,7 +85,16 @@ impl CommonOpts {
     }
 
     fn rpc(&self) -> RpcClient {
-        RpcClient::new(self.rpc_url.clone(), Some(self.rpc_fallback.clone()))
+        RpcClient::new(
+            self.rpc_url
+                .clone()
+                .unwrap_or_else(|| self.network.rpc_primary().to_owned()),
+            Some(
+                self.rpc_fallback
+                    .clone()
+                    .unwrap_or_else(|| self.network.rpc_fallback().to_owned()),
+            ),
+        )
     }
 }
 
@@ -135,11 +151,17 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs on stderr, results on stdout: `verify-root`/`status` output is
+    // parsed by operators and tests, and must not be interleaved with tracing.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
+        .with_writer(std::io::stderr)
+        // Colour only for a human terminal: piped logs are parsed by ops
+        // tooling and must not carry escape sequences inside field values.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let cli = Cli::parse();
     match cli.command {
@@ -180,10 +202,16 @@ async fn run(
 
     // HTTP server on a shared read connection
     let server_db = Arc::new(Mutex::new(db.reopen()?));
+    let live = Arc::new(strk20_indexerd::live::LiveHub::new(
+        common.feed_dir.clone(),
+        server_db.clone(),
+    ));
+    tokio::spawn(strk20_indexerd::live::run_watcher(live.clone()));
     let state = strk20_indexerd::server::AppState {
         feed_dir: common.feed_dir.clone(),
         db: server_db.clone(),
         cfg: cfg.clone(),
+        live,
     };
     let compat_state = enable_compat.then(|| strk20_indexerd::compat::CompatState {
         backend: strk20_indexerd::bridge::DbBackend::new(common.db.clone(), cfg.pool),
@@ -210,19 +238,43 @@ async fn run(
                 rpc: rpc_ref,
                 cfg: &cfg,
                 chunk_size: common.chunk_size,
+                progress_secs: common.progress_secs,
             };
             ingestor.run_cycle().await
         };
         match outcome {
             Ok(o) => {
-                cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, o.l1_accepted).await;
-                let cutter = Cutter {
-                    db: &db,
-                    rpc: rpc_ref,
-                    cfg: &cfg,
-                    feed_dir: common.feed_dir.clone(),
-                };
-                if o.head_changed || o.blocks_ingested > 0 {
+                // Publish the tail BEFORE cutting. `/health` already reports the
+                // new head at this point, and the cut path can take a while
+                // (verify-root, the anchor probe, or a §5.6 rescan) — a consumer
+                // that polls /health and then fetches head.ndjson must not get a
+                // tail from before the block it was just told about.
+                {
+                    let cutter = Cutter {
+                        db: &db,
+                        rpc: rpc_ref,
+                        cfg: &cfg,
+                        feed_dir: common.feed_dir.clone(),
+                    };
+                    if o.head_changed || o.blocks_ingested > 0 {
+                        cutter.regen_head()?;
+                    }
+                    if o.reorged {
+                        // The rollback dropped anchors above the ancestor;
+                        // republish so the feed stops serving them.
+                        cutter.write_anchors()?;
+                    }
+                }
+                let cut =
+                    cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, o.l1_accepted).await;
+                if cut > 0 {
+                    // The epoch floor moved: the tail starts higher now.
+                    let cutter = Cutter {
+                        db: &db,
+                        rpc: rpc_ref,
+                        cfg: &cfg,
+                        feed_dir: common.feed_dir.clone(),
+                    };
                     cutter.regen_head()?;
                 }
             }
@@ -242,7 +294,7 @@ async fn cut_epochs_with_recovery(
     cfg: &ChainConfig,
     common: &CommonOpts,
     l1_accepted: u64,
-) {
+) -> u64 {
     for attempt in 0..2 {
         let frontier = db.ingest_cursor().ok().flatten().map(|(f, _)| f).unwrap_or(0);
         let cutter = Cutter {
@@ -252,7 +304,7 @@ async fn cut_epochs_with_recovery(
             feed_dir: common.feed_dir.clone(),
         };
         match cutter.cut_ready_epochs(l1_accepted, frontier).await {
-            Ok(_) => return,
+            Ok(n) => return n,
             Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") && attempt == 0 => {
                 let from = db
                     .last_epoch()
@@ -260,28 +312,36 @@ async fn cut_epochs_with_recovery(
                     .flatten()
                     .map(|(_, _, to)| to + 1)
                     .unwrap_or(cfg.genesis_block);
-                let to = l1_accepted.min(frontier);
+                // Up to the FRONTIER, not to l1_accepted: verify-root now
+                // checks at min(frontier, rpc_head) (LIVE-4), and l1_accepted
+                // lags head by ~5000 blocks on mainnet, so a rescan capped at
+                // l1_accepted would not contain the block that mismatched —
+                // every retry would reproduce it and epoch cutting would stop
+                // forever with /health latched DEGRADED.
+                let to = frontier;
                 tracing::error!(error = %e, from, to, "verify-root mismatch: rescanning range");
                 let mut ingestor = Ingestor {
                     db,
                     rpc,
                     cfg,
                     chunk_size: common.chunk_size,
+                    progress_secs: common.progress_secs,
                 };
                 match ingestor.rescan_range(from, to).await {
                     Ok(n) => tracing::warn!(recovered_blocks = n, "rescan complete; retrying cut"),
                     Err(re) => {
                         tracing::error!(error = %re, "rescan failed");
-                        return;
+                        return 0;
                     }
                 }
             }
             Err(e) => {
                 tracing::error!(error = %e, "epoch cutting halted");
-                return;
+                return 0;
             }
         }
     }
+    0
 }
 
 async fn backfill(common: CommonOpts) -> Result<()> {
@@ -297,10 +357,11 @@ async fn backfill(common: CommonOpts) -> Result<()> {
                 rpc: &rpc,
                 cfg: &cfg,
                 chunk_size: common.chunk_size,
+                progress_secs: common.progress_secs,
             };
             ingestor.run_cycle().await?
         };
-        cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, outcome.l1_accepted).await;
+        let _ = cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, outcome.l1_accepted).await;
         let frontier = db.ingest_cursor()?.map(|(f, _)| f).unwrap_or(0);
         let cutter = Cutter {
             db: &db,
@@ -381,26 +442,36 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
     let cfg = common.chain_config();
     let rpc = common.rpc();
     let db = Db::open(&common.db)?;
-    let target = match block {
-        Some(b) => b,
-        None => db
-            .meta_get("l1_accepted_number")?
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("no l1_accepted in db; run ingest first"))?,
-    };
     let cutter = Cutter {
         db: &db,
         rpc: &rpc,
         cfg: &cfg,
         feed_dir: common.feed_dir.clone(),
     };
-    let anchor = cutter.verify_root(target).await?;
-    println!(
-        "verify-root OK at block {}: storage_root {} class {}",
-        anchor.block,
-        strk20_feed::felt_hex(&anchor.storage_root),
-        strk20_feed::felt_hex(&anchor.class_hash)
-    );
+    let outcome = match block {
+        Some(b) => VerifyOutcome::Verified(cutter.verify_root(b).await?),
+        None => {
+            let frontier = db
+                .ingest_cursor()?
+                .map(|(f, _)| f)
+                .ok_or_else(|| anyhow::anyhow!("no ingest cursor in db; run ingest first"))?;
+            cutter.verify_root_in_window(frontier).await?
+        }
+    };
+    match outcome {
+        VerifyOutcome::Verified(anchor) => println!(
+            "verify-root OK at block {}: storage_root {} class {}",
+            anchor.block,
+            strk20_feed::felt_hex(&anchor.storage_root),
+            strk20_feed::felt_hex(&anchor.class_hash)
+        ),
+        // "We could not check" is not "the mirror is wrong": a capability gap
+        // is reported, and the exit status stays zero.
+        VerifyOutcome::Unavailable(why) => println!(
+            "verify-root UNAVAILABLE: no block inside the live storage-proof window is \
+             covered by this mirror ({why}). This says nothing about mirror correctness."
+        ),
+    }
     Ok(())
 }
 
@@ -419,6 +490,13 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
     let dir = common.feed_dir.join("epochs");
     std::fs::create_dir_all(&dir)?;
     let cfg = common.chain_config();
+    if manifest.chain_id != cfg.chain_id {
+        anyhow::bail!(
+            "mirror feed is for chain {} but this instance is configured for {}",
+            manifest.chain_id,
+            cfg.chain_id
+        );
+    }
     let mut db = Db::open(&common.db)?;
     let mut prev: Option<[u8; 32]> = None;
     let mut last_to = 0u64;
@@ -434,6 +512,14 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
         let payload = strk20_feed::decompress(&bytes)?;
         let epoch =
             strk20_feed::manifest::verify_epoch_against_manifest(&payload, entry, prev)?;
+        // The hash chain proves the epoch is the one the manifest names; it
+        // does not say which chain the manifest is about. Refuse a feed whose
+        // epochs are stamped for another chain or pool before ingesting it.
+        strk20_feed::manifest::verify_epoch_binding(
+            &epoch,
+            &manifest.chain_id,
+            &strk20_feed::felt_from_hex(&manifest.pool)?,
+        )?;
         // Ingest the verified payload into the DB: a later `strk20 run`
         // continues from the feed head instead of clobbering the manifest
         // (review finding: mirror_pull never populated the DB).
@@ -494,7 +580,14 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
         db.meta_set("schema_version", &strk20_indexerd::db::SCHEMA_VERSION.to_string())?;
         db.meta_set("decode_state", "ok")?;
     }
-    // store the manifest and genesis as-is for onward serving
+    // Store the manifest and genesis for onward serving, MINUS the origin's
+    // snapshot: mirror-pull ingests epochs only (§1.9 — a server needs events
+    // to cut future epochs and can never bootstrap from a slots-only file), so
+    // advertising a snapshot file this mirror does not hold would 404 every
+    // client that believed the manifest. This mirror publishes its own after
+    // its first cut batch, byte-identical to the origin's.
+    let mut manifest = manifest;
+    manifest.snapshot = None;
     let genesis = http
         .get(format!("{base}/genesis.json"))
         .send()

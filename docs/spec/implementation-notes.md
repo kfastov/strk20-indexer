@@ -195,3 +195,113 @@ recording rather than rediscovering:
   `parse_anchors` validates structure but deliberately accepts non-canonical
   spellings — a reader cannot detect a non-canonical publisher and must not be
   written as if it could.
+
+## Snapshots + SSE repair pass (A1/A2), post-review
+
+A test-vacuity review and an adversarial review of the A1/A2 work found one
+vacuous convergence assertion, two ways `"anchored"` could be reported for a
+mirror nothing had checked, and several rungs of the §1.5 ladder that no test
+could falsify. What changed, and what is deliberately left undone:
+
+- **A refused snapshot's rows do not survive the refusal.** `apply_snapshot`
+  commits the slot set long before §11.3 reachability can run — the epochs above
+  the basis and the head tail have to land first, because reachability validates
+  them too. Anything ending the process inside that window (a rejection the
+  operator re-runs past, Ctrl-C, an OOM kill) left a populated mirror, and a
+  populated mirror is never empty again: the next sync skipped the snapshot
+  branch and therefore the grounding, leaving the client permanently on a slot
+  set it had explicitly refused. A `snapshot_pending_grounding` meta row is now
+  written in the same transaction as the slot rows and cleared only by a
+  grounding that passed; any failure of the snapshot path resets the mirror
+  regardless of cold-start mode; and a ring-6 mismatch does the same.
+- **Ring 6 grounds the MIRROR, never a re-downloaded anchor.** It used to fetch
+  `anchors.ndjson` a second time and compare that record against the chain,
+  while reachability had compared the mirror against a record from its own
+  fetch. Those compose into "the mirror is the chain's" only if both fetches
+  returned the same record, which nothing enforced — a hostile feed can answer
+  two byte-identical GETs differently, and an honest one breaks it by appending
+  an anchor in between. Ring 6 now recomputes the storage root from the client's
+  own folded slot set and compares that with the user's RPC; the log is used
+  only to CHOOSE a recent block, which is sound for any block at or above the
+  basis because pool slots are write-once. Leg S7's two-faced server pins it.
+- **Ring 6 is three-valued, like `verify-root` (§11.4/§11.5).** A MISMATCH fails
+  the sync; a provider that does not implement `starknet_getStorageProof`, or
+  whose window has moved past every block we can ask about, yields
+  `Unavailable`, a loud WARN naming the endpoint, and the unchanged
+  `server-asserted` grade. "Configured means mandatory" binds the one outcome
+  that is evidence about the data. The old two-valued form turned LIVE-6 into a
+  hard sync failure against a capability-poor endpoint.
+- **Reachability tries every anchor at or above the basis, newest first.**
+  Anchors are captured at head, so they sit on reorgable blocks, and the client
+  fetches `head.ndjson` and `anchors.ndjson` in separate requests: a server
+  reorg between them made the newest anchor disagree with a tail folded from the
+  pre-reorg file, which was reported as tampering and, under `auto`, paid for
+  with the full history replay §11 says snapshots exist to avoid. Reaching any
+  anchor at or above the basis attests the snapshot, so a lower anchor is a
+  sound fallback while a forged slot set still fails all of them.
+- **Decompression is capped at 256 MiB (`DECOMPRESS_LIMIT`), per §1.5 ring 1.**
+  The manifest that names a file's sha256 is written by the same server as the
+  file, so a passing transport hash says nothing about how far the frame
+  expands. Uncapped, a ~100 KB `.zst` allocates until the process dies — a tab
+  crash on the browser target A1 exists to serve.
+- **`history_floor` is enforced, not merely reported.** `ClientView::get_events`
+  returns `HISTORY_UNAVAILABLE {"floor"}` for any range reaching below it, and
+  `FeedStore::view` refuses a bound below the basis with
+  `BOUND_BELOW_SNAPSHOT {bound, basis}`. Previously the floor was written to
+  meta and surfaced as `history_from` and read by no enforcement anywhere: a
+  pre-basis range returned the above-floor events with a success status, which
+  is indistinguishable from "nothing happened down there" — the masked
+  incompleteness R-L exists to forbid.
+- **`--cold-start snapshot` refuses instead of degrading.** A feed with
+  `manifest.snapshot == null` used to fall through to a full epoch replay
+  silently, reported as `verified: "replayed"` — the run the operator explicitly
+  asked not to do. It is now `SNAPSHOT_UNAVAILABLE`; `auto` still falls back.
+- **`anchors.ndjson` is bounded and revalidated.** Capture is roughly once per
+  ingested block, the whole file is re-encoded on every capture, and every
+  grounded client downloaded all of it on every sync. Retention keeps the newest
+  `ANCHOR_KEEP` records, the route serves a sha256 ETag with a 304 path exactly
+  as `head.ndjson` does, and `parse_anchors` caps its input.
+- **SSE reconnect jitter is drawn fresh, not from the pid.** `process::id()` is
+  constant for the process, so every reconnect landed at the same sub-second
+  offset — ~9 bits of stable, server-observable identity surviving reconnects,
+  IP changes and OHTTP, which is exactly the linkability §2.6's residual
+  paragraph assumed nothing would introduce.
+- **The SSE client buffers bytes, not lossy text.** Chunk boundaries fall
+  anywhere; decoding each TCP chunk on its own turned a multi-byte character
+  split across two of them into U+FFFD plus a stray continuation byte. Every
+  payload emitted today is ASCII, but the framing layer must not depend on it.
+- **`entry.e` arithmetic is checked.** The epoch index comes from the fetched
+  manifest; unchecked, a large value wrapped in release and could be made to
+  equal `header.block`, letting a snapshot claim an arbitrary epoch index that
+  was then written into `last_epoch_applied`.
+
+### `header.class` is informational under §11 — recorded, not silently dropped
+
+§1.5 ring 5 introduced the `header.class` check specifically because nothing
+read the field, and pinned it to the anchor sidecar's
+`contract_leaves_data[0].class_hash`. §11.1 deleted the sidecar (a proof at a
+basis block is unobtainable), and with it the only value the check could compare
+against: a snapshot-started client never fetches the basis epoch, whose footer
+carries the class, and the anchors log records the class at a HEAD block, which
+may legitimately differ from the class at the basis after an upgrade. So
+`header.class` is written and read by no ring. It stays in the format because it
+is inside the content hash and is useful to an auditor, and **spec leg m(vi) is
+not implementable as written** — it needs the sidecar §11 removed. An operator
+running an archive node (§11.6) can restore both.
+
+### Coverage debt recorded rather than papered over
+
+- Leg **l(v)**'s history API (`complete`, `complete_from`,
+  `registration_available`, the positive above-floor comparison) belongs to A5
+  `serve`, which this branch does not build. The access-layer half —
+  `HISTORY_UNAVAILABLE` below the floor — is implemented and unit-tested here.
+- Leg **n**'s other halves (`strk20-sync snapshot audit`, the mirror-pull
+  regeneration compare, `strk20 epoch verify --all` extended to snapshot hashes,
+  a `--snapshot-keep` flag) are not implemented; `SNAPSHOT_KEEP` is a constant.
+  Determinism itself is pinned by S1 across two backfills.
+- Leg **o(iii)**'s poke-driven client across the leg-g reorg is not exercised;
+  E1 pins the poke path and leg g pins the reorg, but not together.
+- S1's "two independent operators" is two runs of the same binary against the
+  same fixture RPC — real byte-determinism, not operator independence — and the
+  harness's independent encoder borrows the product's `felt_hex`, with the hex
+  spelling pinned separately by `feed/tests/snapshot.rs::golden_snapshot_bytes`.

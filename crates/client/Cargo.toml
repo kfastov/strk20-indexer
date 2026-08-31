@@ -20,7 +20,7 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 rusqlite = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

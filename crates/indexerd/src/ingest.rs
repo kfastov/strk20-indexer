@@ -17,6 +17,10 @@ pub struct Ingestor<'a> {
     pub cfg: &'a ChainConfig,
     /// getEvents page size; production 1000, tests force small values.
     pub chunk_size: u64,
+    /// Minimum seconds between scan progress lines; 0 = every page. A deep
+    /// backfill spends hours inside one scan, and used to log nothing at all
+    /// between start and the final summary (LIVE-2).
+    pub progress_secs: u64,
 }
 
 #[derive(Debug, Default)]
@@ -138,6 +142,10 @@ impl<'a> Ingestor<'a> {
         let mut by_block: BTreeMap<u64, Vec<crate::rpc::RpcEvent>> = BTreeMap::new();
         let mut continuation: Option<String> = None;
         let mut endpoint_epoch = self.rpc.endpoint_epoch();
+        let interval = std::time::Duration::from_secs(self.progress_secs);
+        let mut last_report = std::time::Instant::now();
+        let mut events_seen = 0u64;
+        let mut cursor = from;
         loop {
             let page = self
                 .rpc
@@ -164,7 +172,20 @@ impl<'a> Ingestor<'a> {
                 if bn < from || bn > to {
                     continue;
                 }
+                cursor = cursor.max(bn);
+                events_seen += 1;
                 by_block.entry(bn).or_default().push(ev);
+            }
+            if last_report.elapsed() >= interval {
+                tracing::info!(
+                    cursor,
+                    scan_to = to,
+                    blocks_ingested = by_block.len(),
+                    events = events_seen,
+                    endpoint = %self.rpc.active_endpoint(),
+                    "scan progress"
+                );
+                last_report = std::time::Instant::now();
             }
             match page.continuation_token {
                 Some(token) => continuation = Some(token),

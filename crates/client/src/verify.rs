@@ -80,7 +80,7 @@ pub async fn verify_owner(store: &FeedStore, rpc: &str, owner: &Felt) -> Result<
         .meta_get("head_number")?
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let view = store.view(head);
+    let view = store.view(head)?;
     for n in &notes {
         let note_slot = discovery_core::privacy_pool::storage_slots::notes(n.note_id);
         let nullifier_slot =

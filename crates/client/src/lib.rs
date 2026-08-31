@@ -24,6 +24,8 @@
 //! }
 //! ```
 
+pub mod anchors;
+pub mod events;
 pub mod store;
 pub mod sync;
 pub mod transport;

@@ -19,3 +19,9 @@ thiserror = { workspace = true }
 starknet-types-core = { workspace = true }
 zstd = { workspace = true, optional = true }
 starknet-crypto = { workspace = true, optional = true }
+
+# Self dev-dependency so this crate's OWN tests can exercise the feature-gated
+# verification ladder (`verify_snapshot` needs compress + mpt). Without it the
+# rings below ring 3 are reachable from no test in this crate.
+[dev-dependencies]
+strk20-feed = { path = ".", features = ["compress", "mpt"] }

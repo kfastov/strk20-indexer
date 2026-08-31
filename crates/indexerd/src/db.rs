@@ -66,6 +66,32 @@ CREATE TABLE IF NOT EXISTS epochs (
   cut_at        INTEGER NOT NULL
 );
 
+-- Opportunistically captured chain anchors (spec §4.5). Published as the
+-- append-only feed/anchors.ndjson; keyed by block so a re-capture is idempotent
+-- and the published log is a pure function of what was ever provable.
+CREATE TABLE IF NOT EXISTS anchors (
+  block        INTEGER PRIMARY KEY,
+  block_hash   BLOB NOT NULL,
+  storage_root BLOB NOT NULL,
+  class_hash   BLOB NOT NULL
+);
+
+-- Published snapshots (consumer-path.md §1.8). Derived artifacts: rows are
+-- deleted by retention and the files with them, so nothing here is in the hash
+-- chain. Keyed by epoch so republication of an already-published epoch is
+-- impossible and a retained file is never rewritten.
+CREATE TABLE IF NOT EXISTS snapshots (
+  e            INTEGER PRIMARY KEY,
+  block        INTEGER NOT NULL,
+  epoch_hash   TEXT NOT NULL,
+  file         TEXT NOT NULL,
+  hash         TEXT NOT NULL,
+  zst          TEXT NOT NULL,
+  bytes        INTEGER NOT NULL,
+  slots        INTEGER NOT NULL,
+  storage_root TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ingest_cursor (
   id                  INTEGER PRIMARY KEY CHECK (id = 1),
   scan_frontier       INTEGER NOT NULL,
@@ -304,10 +330,21 @@ impl Db {
             [ancestor as i64],
         )?;
         let n = tx.execute("DELETE FROM blocks WHERE number > ?1", [ancestor as i64])?;
+        // Anchors are captured at the newest PROVABLE block, which is far above
+        // l1_accepted and therefore reorgable. One left behind here would carry
+        // the orphaned chain's block hash and storage root, be republished in
+        // anchors.ndjson forever, and make every client's `verify-anchors`
+        // report a permanent divergence that nothing can clear.
+        tx.execute("DELETE FROM anchors WHERE block > ?1", [ancestor as i64])?;
         tx.execute(
             "UPDATE ingest_cursor SET scan_frontier = MIN(scan_frontier, ?1),
              events_continuation = NULL WHERE id = 1",
             [ancestor as i64],
+        )?;
+        // The next probe must re-run at the rewound frontier.
+        tx.execute(
+            "DELETE FROM meta WHERE key = 'anchor_probe_frontier'",
+            [],
         )?;
         tx.commit()?;
         Ok(n)
@@ -375,11 +412,18 @@ impl Db {
                 params![block.number as i64, felt_blob(class).as_slice()],
             )?;
         }
+        // The frontier only ever advances here: the §5.6 recovery rescan
+        // re-ingests blocks BELOW it, and letting that pull the cursor
+        // backwards makes a backfill that hit a mismatch loop forever
+        // (rescan rewinds, the next cycle re-advances, repeat). A reorg is
+        // the only thing that moves the frontier down, and `rollback_above`
+        // does that explicitly.
         tx.execute(
             "INSERT INTO ingest_cursor(id, scan_frontier, events_continuation)
              VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET scan_frontier = excluded.scan_frontier,
-                                           events_continuation = excluded.events_continuation",
+             ON CONFLICT(id) DO UPDATE SET
+               scan_frontier = MAX(scan_frontier, excluded.scan_frontier),
+               events_continuation = excluded.events_continuation",
             params![new_frontier as i64, continuation],
         )?;
         tx.commit()?;
@@ -526,6 +570,146 @@ impl Db {
                 |r| Ok(blob_felt(&r.get::<_, Vec<u8>>(0)?)),
             )
             .optional()?)
+    }
+
+    // ----------------------------------------------------------- anchors
+
+    /// Record one captured anchor. Idempotent by block: capturing the same
+    /// block twice must not change the published log.
+    pub fn insert_anchor(&self, a: &crate::cutter::Anchor) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO anchors(block, block_hash, storage_root, class_hash)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                a.block as i64,
+                felt_blob(&a.block_hash).as_slice(),
+                felt_blob(&a.storage_root).as_slice(),
+                felt_blob(&a.class_hash).as_slice()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Bound on the published anchor log. Capture is once per ingested block
+    /// in steady state (~2 900 records/day on mainnet at ~220 bytes each), the
+    /// whole file is re-encoded on every capture, and every grounded client
+    /// downloads all of it on every sync — so an unbounded log is an O(n) disk
+    /// write per block and an ever-growing transfer for a file whose only
+    /// useful part is the recent end. Reachability and ring 6 both want the
+    /// newest record at or above a basis, and a basis is at most one retention
+    /// window old.
+    pub const ANCHOR_KEEP: usize = 4096;
+
+    /// Drop all but the newest `ANCHOR_KEEP` anchors.
+    pub fn prune_anchors(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM anchors WHERE block NOT IN
+               (SELECT block FROM anchors ORDER BY block DESC LIMIT ?1)",
+            [Self::ANCHOR_KEEP as i64],
+        )?)
+    }
+
+    /// Newest captured anchor block, if any — the left side of the §11.3
+    /// publication gate.
+    pub fn newest_anchor_block(&self) -> Result<Option<u64>> {
+        Ok(self
+            .conn
+            .query_row("SELECT MAX(block) FROM anchors", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })?
+            .map(|v| v as u64))
+    }
+
+    pub fn anchors(&self) -> Result<Vec<strk20_feed::anchors::AnchorRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT block, block_hash, storage_root, class_hash FROM anchors ORDER BY block",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(strk20_feed::anchors::AnchorRecord {
+                    block: r.get::<_, i64>(0)? as u64,
+                    block_hash: blob_felt(&r.get::<_, Vec<u8>>(1)?),
+                    storage_root: blob_felt(&r.get::<_, Vec<u8>>(2)?),
+                    class: blob_felt(&r.get::<_, Vec<u8>>(3)?),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // --------------------------------------------------------- snapshots
+
+    pub fn insert_snapshot(&self, s: &strk20_feed::manifest::ManifestSnapshot) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO snapshots(e, block, epoch_hash, file, hash, zst, bytes,
+                slots, storage_root)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                s.e as i64,
+                s.block as i64,
+                s.epoch_hash,
+                s.file,
+                s.hash,
+                s.zst,
+                s.bytes as i64,
+                s.slots as i64,
+                s.storage_root
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Published snapshots, ascending by epoch.
+    pub fn snapshot_rows(&self) -> Result<Vec<strk20_feed::manifest::ManifestSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e, block, epoch_hash, file, hash, zst, bytes, slots, storage_root
+             FROM snapshots ORDER BY e",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(strk20_feed::manifest::ManifestSnapshot {
+                    e: r.get::<_, i64>(0)? as u64,
+                    block: r.get::<_, i64>(1)? as u64,
+                    epoch_hash: r.get(2)?,
+                    file: r.get(3)?,
+                    hash: r.get(4)?,
+                    zst: r.get(5)?,
+                    bytes: r.get::<_, i64>(6)? as u64,
+                    slots: r.get::<_, i64>(7)? as u64,
+                    storage_root: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_snapshot(&self, e: u64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM snapshots WHERE e = ?1", [e as i64])?;
+        Ok(())
+    }
+
+    /// Complete slot set as of `block` with each slot's last write block —
+    /// the snapshot payload's whole input (§1.2).
+    pub fn full_slot_set_with_blocks_as_of(&self, block: u64) -> Result<Vec<(Felt, Felt, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT slot, value, block FROM storage_log s
+             WHERE block = (SELECT MAX(block) FROM storage_log
+                            WHERE slot = s.slot AND block <= ?1)",
+        )?;
+        let rows = stmt
+            .query_map([block as i64], |r| {
+                Ok((
+                    blob_felt(&r.get::<_, Vec<u8>>(0)?),
+                    blob_felt(&r.get::<_, Vec<u8>>(1)?),
+                    r.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out: Vec<(Felt, Felt, u64)> =
+            rows.into_iter().filter(|(_, v, _)| *v != Felt::ZERO).collect();
+        out.sort_by_key(|(k, _, _)| k.to_bytes_be());
+        Ok(out)
     }
 
     // ------------------------------------------------------------ epochs
