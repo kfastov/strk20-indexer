@@ -156,9 +156,7 @@ export class MockEngine implements Strk20Engine {
   async open(identity: Identity): Promise<OpenResult> {
     const rec = new PhaseRecorder(undefined);
     if (!this.booted) {
-      await rec.run('boot', this.lat.draw({ centre: 180, spread: 0.3 }), {
-        detail: 'module instantiated (231 KB gzip, per the WASM spike)',
-      });
+      await rec.run('boot', this.lat.draw({ centre: 180, spread: 0.3 }));
       this.booted = true;
     }
     await rec.run('open', this.lat.draw({ centre: 14, spread: 0.6 }));
@@ -195,16 +193,14 @@ export class MockEngine implements Strk20Engine {
     } else if (mode === 'cold') {
       await this.coldSnapshotLane(rec, signal, onPhase);
     } else {
-      await this.warmLane(rec, signal, onPhase);
+      await this.warmLane(rec, signal);
     }
 
     this.observe();
-    const discovered = await this.runDiscovery(rec, identity, signal, onPhase);
+    const discovered = await this.runDiscovery(rec, identity, signal);
 
     if (mode === 'cold') {
-      await rec.run('export', this.lat.draw({ centre: 110, spread: 0.4 }), {
-        detail: 'sealed state blob written',
-      });
+      await rec.run('export', this.lat.draw({ centre: 110, spread: 0.4 }));
     }
 
     local.folded = true;
@@ -225,7 +221,6 @@ export class MockEngine implements Strk20Engine {
   ): Promise<void> {
     await rec.run('plan', this.lat.draw({ centre: 38, spread: 0.5 }), {
       signal,
-      detail: `behind: ${EPOCH_COUNT} epochs, ${(this.totalFeedBytes() / 1e6).toFixed(1)} MB`,
     });
 
     this.push('/feed/genesis.json', GENESIS_BYTES, 200, 'network');
@@ -245,9 +240,6 @@ export class MockEngine implements Strk20Engine {
     await rec.run('fetch', fetchMs, {
       signal,
       progress: true,
-      detail: cached
-        ? `${EPOCH_COUNT} epochs (browser http cache served them)`
-        : `${EPOCH_COUNT} epoch files + head`,
       onTick: (f) => {
         const want = Math.floor(f * EPOCH_COUNT);
         while (pushed < want) {
@@ -275,19 +267,17 @@ export class MockEngine implements Strk20Engine {
     await rec.run('inflate', this.lat.draw({ centre: 880, spread: 0.25 }), {
       signal,
       progress: true,
-      detail: 'zstd, 16.0 MB -> 19.0 MB raw',
-      onTick: (f) => onPhase?.({ phase: 'inflate', fraction: f, detail: 'decompressing epochs' }),
+      onTick: (f) => onPhase?.({ phase: 'inflate', fraction: f, detail: '' }),
     });
 
     await rec.run('verify+fold', this.lat.draw({ centre: 2_280, spread: 0.2 }), {
       signal,
       progress: true,
-      detail: `${EPOCH_COUNT} epochs, hash chain verified`,
       onTick: (f) =>
         onPhase?.({
           phase: 'verify+fold',
           fraction: f,
-          detail: `folded ${Math.floor(f * EPOCH_COUNT)} / ${EPOCH_COUNT} epochs`,
+          detail: `${Math.floor(f * EPOCH_COUNT)} / ${EPOCH_COUNT}`,
         }),
     });
   }
@@ -299,7 +289,6 @@ export class MockEngine implements Strk20Engine {
   ): Promise<void> {
     await rec.run('plan', this.lat.draw({ centre: 30, spread: 0.5 }), {
       signal,
-      detail: `snapshot at epoch ${SNAPSHOT_EPOCH}`,
     });
 
     this.push('/feed/genesis.json', GENESIS_BYTES, 200, 'network');
@@ -307,9 +296,8 @@ export class MockEngine implements Strk20Engine {
 
     await rec.run('fetch', this.lat.draw({ centre: 420, spread: 0.3, tailChance: 0.2 }), {
       signal,
-      detail: 'snapshot + anchor + head',
       progress: true,
-      onTick: (f) => onPhase?.({ phase: 'fetch', fraction: f, detail: 'snapshot + anchor' }),
+      onTick: (f) => onPhase?.({ phase: 'fetch', fraction: f, detail: '' }),
     });
     // Byte counts here are unknown: no snapshot has ever been cut. Recorded as
     // zero and rendered as "?" so nobody reads an invented size as a size.
@@ -319,31 +307,23 @@ export class MockEngine implements Strk20Engine {
 
     await rec.run('snapshot', this.lat.draw({ centre: 260, spread: 0.3 }), {
       signal,
-      detail: 'applied, storage root recomputed, verified=server-asserted',
     });
   }
 
-  private async warmLane(
-    rec: PhaseRecorder,
-    signal: AbortSignal | undefined,
-    onPhase: SyncRequest['onPhase'],
-  ): Promise<void> {
+  private async warmLane(rec: PhaseRecorder, signal: AbortSignal | undefined): Promise<void> {
     await rec.run('plan', this.lat.draw({ centre: 4, spread: 0.6 }), {
       signal,
-      detail: 'conditional GET head.ndjson',
     });
     this.push('/feed/head.ndjson', 0, 304, 'network');
 
-    rec.skip('fetch', this.totalFeedBytes(), 'not downloaded');
-    rec.skip('inflate', 0, 'nothing to inflate');
-    rec.skip('verify+fold', 0, 'mirror already folded');
+    rec.skip('fetch', this.totalFeedBytes(), 'skipped');
+    rec.skip('inflate', 0, 'skipped');
+    rec.skip('verify+fold', 0, 'skipped');
 
     await rec.run('load', this.lat.draw({ centre: 9, spread: 0.5 }), {
       signal,
-      detail: 'folded mirror read from local store',
     });
-    onPhase?.({ phase: 'load', detail: 'folded cache hit' });
-    await rec.run('apply', this.lat.draw({ centre: 3, spread: 0.6 }), { signal, detail: 'tail applied' });
+    await rec.run('apply', this.lat.draw({ centre: 3, spread: 0.6 }), { signal });
   }
 
   // -------------------------------------------------------------------------
@@ -357,14 +337,13 @@ export class MockEngine implements Strk20Engine {
     // re-runs the pass; that ongoing request cost is visible in the panel.
     this.push('/feed/head.ndjson', this.lat.between(180, 900), 200, 'network');
     await rec.run('apply', this.lat.draw({ centre: 6, spread: 0.6 }), { signal });
-    return this.runDiscovery(rec, identity, signal, undefined, true);
+    return this.runDiscovery(rec, identity, signal, true);
   }
 
   private async runDiscovery(
     rec: PhaseRecorder,
     identity: Identity,
     signal: AbortSignal | undefined,
-    onPhase: SyncRequest['onPhase'],
     incremental = false,
   ): Promise<DiscoverOut> {
     const ms = incremental
@@ -372,9 +351,7 @@ export class MockEngine implements Strk20Engine {
       : this.lat.draw({ centre: 330, spread: 0.3 });
     await rec.run('discover', ms, {
       signal,
-      detail: 'unmodified discovery-core traversal',
     });
-    onPhase?.({ phase: 'discover', detail: 'traversing channels' });
 
     const notes = this.chain.notesFor(identity);
     const local = this.local[identity.id];

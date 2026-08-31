@@ -1,0 +1,28 @@
+{
+  "name": "strk20-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The demo that exists to be criticised: cold vs warm side by side, every URL the page fetched, and a second identity producing the same list.",
+  "scripts": {
+    "gen": "node scripts/copy-engine.mjs && node scripts/gen-replay-feed.mjs && node scripts/parse-reference-numbers.mjs",
+    "gen:small": "node scripts/copy-engine.mjs && node scripts/gen-replay-feed.mjs --small && node scripts/parse-reference-numbers.mjs",
+    "gen:engine": "node scripts/copy-engine.mjs",
+    "predev": "npm run gen",
+    "dev": "vite",
+    "prebuild": "npm run gen",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/parse-reference-numbers.mjs",
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "strk20-discovery": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.2",
+    "vite": "^7.1.5"
+  }
+}

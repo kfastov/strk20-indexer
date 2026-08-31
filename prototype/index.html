@@ -11,30 +11,23 @@
   <body>
     <!--
       ALL markup lives in this file. src/ only queries these ids/data-attrs and
-      updates text, classes and data-state. Restructure the layout here without
-      opening a .ts file; the only contract is that the ids survive.
+      updates text, classes and data-state.
+
+      Copy rule: the log says WHAT HAPPENED. Panels show numbers. Nothing on the
+      page explains, justifies or argues. If you are about to add a sentence,
+      add a column instead.
     -->
 
-    <!-- ================= honesty banner (not dismissible) ================= -->
-    <header class="banner" role="alert">
-      <span class="banner-tag">PROTOTYPE</span>
-      <p class="banner-text">
-        <strong>Every number on this page is invented by a mock engine.</strong>
-        Nothing here measures the real client. This is a UX sketch to argue with,
-        not a benchmark.
-      </p>
-      <span class="banner-engine">
-        engine: <b id="engine-name">—</b>
-        <span class="chip chip-sim" id="engine-sim">SIMULATED</span>
-      </span>
-    </header>
+    <!-- the only honesty text on the page -->
+    <span class="chip chip-sim" id="engine-chip">
+      SIMULATED <b id="engine-name">—</b>
+    </span>
 
     <main class="app">
       <!-- ================= left: the log ================= -->
       <section class="log-pane" aria-labelledby="log-title">
         <div class="pane-head">
           <h1 id="log-title" class="pane-title">wallet log</h1>
-          <span class="pane-meta" id="log-meta">newest at the bottom</span>
         </div>
 
         <!-- committed lines are appended here; the pending line is always the
@@ -46,46 +39,34 @@
       </section>
 
       <!-- ================= right: the panels ================= -->
-      <aside class="panels" aria-label="measurements and evidence">
+      <aside class="panels" aria-label="measurements">
 
         <!-- ---- cold vs warm ---- -->
         <section class="panel" id="panel-coldwarm">
-          <div class="panel-head">
-            <h2>cold vs warm</h2>
-            <span class="chip chip-sim">SIMULATED</span>
-          </div>
+          <div class="panel-head"><h2>cold vs warm</h2></div>
 
           <div class="coldwarm">
             <div class="cw-col" data-col="cold">
-              <div class="cw-head">COLD <span class="cw-sub">first ever open</span></div>
-              <div class="cw-total" data-role="total">not measured<br /><span class="cw-total-sub">in this session</span></div>
+              <div class="cw-head">COLD</div>
+              <div class="cw-total" data-role="total">—</div>
               <dl class="cw-phases" data-role="phases"></dl>
-              <button class="btn btn-wide" id="btn-run-cold" type="button">
-                clear local state, reload cold
-              </button>
+              <button class="btn btn-wide" id="btn-run-cold" type="button">run cold</button>
             </div>
 
             <div class="cw-col" data-col="warm">
-              <div class="cw-head">WARM <span class="cw-sub">returning user</span></div>
-              <div class="cw-total" data-role="total">not measured<br /><span class="cw-total-sub">in this session</span></div>
+              <div class="cw-head">WARM</div>
+              <div class="cw-total" data-role="total">—</div>
               <dl class="cw-phases" data-role="phases"></dl>
-              <button class="btn btn-wide" id="btn-run-warm" type="button">re-sync warm</button>
+              <button class="btn btn-wide" id="btn-run-warm" type="button">run warm</button>
             </div>
           </div>
 
-          <p class="panel-note" id="coldwarm-provenance">
-            shape taken from a <b>native Rust CLI</b> run (mainnet, 2026-08-31):
-            cold 5.97&nbsp;s / warm 0.03&nbsp;s. Fold time <em>inside a browser</em>
-            has never been measured — roadmap item 3/4 is unbuilt.
-          </p>
+          <p class="caveat" id="coldwarm-caveat" hidden></p>
         </section>
 
         <!-- ---- feed / subscription ---- -->
         <section class="panel" id="panel-feed">
-          <div class="panel-head">
-            <h2>feed</h2>
-            <span class="chip chip-sim">SIMULATED</span>
-          </div>
+          <div class="panel-head"><h2>feed</h2></div>
           <dl class="kv" id="feed-kv"></dl>
 
           <div class="toggle-row">
@@ -96,15 +77,11 @@
             </label>
             <span class="pill" id="sub-state">on</span>
           </div>
-          <p class="panel-note" id="sub-note"></p>
         </section>
 
         <!-- ---- requests this session ---- -->
         <section class="panel" id="panel-requests">
-          <div class="panel-head">
-            <h2>requests</h2>
-            <span class="chip chip-sim">SIMULATED</span>
-          </div>
+          <div class="panel-head"><h2>requests</h2></div>
 
           <div class="lane-switch" role="radiogroup" aria-label="cold-start lane">
             <button class="lane" type="button" id="lane-epochs" role="radio" aria-checked="true" data-lane="epochs">
@@ -118,16 +95,13 @@
           <div class="req-figures">
             <div class="req-fig">
               <span class="req-num" id="req-count">0</span>
-              <span class="req-lbl">requests this session</span>
+              <span class="req-lbl">requests</span>
             </div>
             <div class="req-fig">
               <span class="req-num" id="req-bytes">0 B</span>
-              <span class="req-lbl">bytes this session</span>
+              <span class="req-lbl">bytes</span>
             </div>
           </div>
-
-          <p class="req-delta" id="req-delta"></p>
-          <p class="panel-note" id="req-note"></p>
         </section>
 
         <!-- ---- network ---- -->
@@ -136,30 +110,21 @@
             <h2>network</h2>
             <span class="chip chip-priv" id="net-verdict">—</span>
           </div>
-          <p class="panel-note">
-            every URL this page "fetched", verbatim. Read them: no key, no
-            address, no query string anywhere.
-          </p>
 
           <div class="net-scroll">
             <ul class="net-list" id="net-list"></ul>
           </div>
 
           <div class="net-actions">
-            <button class="btn btn-sm" id="btn-expand-net" type="button">expand all rows</button>
-            <button class="btn btn-sm" id="btn-scanner-selftest" type="button">
-              prove the scanner isn't vacuous
-            </button>
+            <button class="btn btn-sm" id="btn-expand-net" type="button">expand</button>
+            <button class="btn btn-sm" id="btn-scanner-selftest" type="button">plant key</button>
           </div>
           <p class="scanner" id="scanner-line">—</p>
         </section>
 
         <!-- ---- identity ---- -->
         <section class="panel" id="panel-identity">
-          <div class="panel-head">
-            <h2>identity</h2>
-            <span class="chip chip-sim">SIMULATED</span>
-          </div>
+          <div class="panel-head"><h2>identity</h2></div>
 
           <div class="ident-switch" role="radiogroup" aria-label="simulated wallet">
             <button class="ident" type="button" role="radio" aria-checked="true" data-identity="A">wallet A</button>
@@ -170,18 +135,8 @@
           <div class="notes" id="notes-list"></div>
 
           <div class="verdict" id="ident-verdict" data-state="pending">
-            <div class="verdict-head" id="ident-verdict-head">run both wallets to compare</div>
-            <p class="verdict-body" id="ident-verdict-body">
-              sync wallet A, then switch to wallet B. The request list is
-              captured for each and compared URL by URL, in order.
-            </p>
+            <div class="verdict-head" id="ident-verdict-head">—</div>
           </div>
-        </section>
-
-        <!-- ---- what is real ---- -->
-        <section class="panel panel-about" id="panel-about">
-          <div class="panel-head"><h2>what is actually shipped</h2></div>
-          <ul class="about-list" id="about-list"></ul>
         </section>
       </aside>
     </main>
@@ -191,12 +146,12 @@
       <div class="action" data-action="deposit" data-state="locked">
         <div class="action-head">
           <span class="action-name">Deposit</span>
-          <span class="action-sub">shield 100.00 STRK</span>
+          <span class="action-sub">100.00 STRK</span>
         </div>
         <ol class="steps">
           <li class="step" data-step="0">
             <button class="btn step-btn" type="button" data-action="deposit" data-step="0">
-              <span class="step-idx">1</span><span class="step-label">approve STRK</span>
+              <span class="step-idx">1</span><span class="step-label">approve</span>
             </button>
           </li>
           <li class="step-arrow" aria-hidden="true">›</li>
@@ -212,18 +167,18 @@
       <div class="action" data-action="send" data-state="locked">
         <div class="action-head">
           <span class="action-name">Send</span>
-          <span class="action-sub">25.00 STRK, private</span>
+          <span class="action-sub">25.00 STRK</span>
         </div>
         <ol class="steps">
           <li class="step" data-step="0">
             <button class="btn step-btn" type="button" data-action="send" data-step="0">
-              <span class="step-idx">1</span><span class="step-label">select note</span>
+              <span class="step-idx">1</span><span class="step-label">select</span>
             </button>
           </li>
           <li class="step-arrow" aria-hidden="true">›</li>
           <li class="step" data-step="1">
             <button class="btn step-btn" type="button" data-action="send" data-step="1">
-              <span class="step-idx">2</span><span class="step-label">prove &amp; send</span>
+              <span class="step-idx">2</span><span class="step-label">prove</span>
             </button>
           </li>
         </ol>
@@ -233,12 +188,12 @@
       <div class="action" data-action="withdraw" data-state="locked">
         <div class="action-head">
           <span class="action-name">Withdraw</span>
-          <span class="action-sub">unshield 10.00 STRK</span>
+          <span class="action-sub">10.00 STRK</span>
         </div>
         <ol class="steps">
           <li class="step" data-step="0">
             <button class="btn step-btn" type="button" data-action="withdraw" data-step="0">
-              <span class="step-idx">1</span><span class="step-label">select note</span>
+              <span class="step-idx">1</span><span class="step-label">select</span>
             </button>
           </li>
           <li class="step-arrow" aria-hidden="true">›</li>
@@ -254,11 +209,11 @@
       <div class="action action-aux">
         <div class="action-head">
           <span class="action-name">Discovery</span>
-          <span class="action-sub" id="aux-sub">automatic — feed pokes drive it</span>
+          <span class="action-sub" id="aux-sub">auto</span>
         </div>
         <div class="aux-buttons">
           <button class="btn btn-accent" type="button" id="btn-check-now" hidden>check now</button>
-          <button class="btn" type="button" id="btn-cancel-wait" hidden>cancel wait</button>
+          <button class="btn" type="button" id="btn-cancel-wait" hidden>cancel</button>
         </div>
         <p class="action-gate" id="aux-gate"></p>
       </div>

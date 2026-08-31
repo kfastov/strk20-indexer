@@ -89,17 +89,17 @@ function phaseDriver() {
   return {
     on(p: PhaseProgress): void {
       if (p.phase !== current) {
-        handle?.resolve({ detail: detail || 'done' });
+        handle?.resolve({ detail });
         current = p.phase;
         detail = p.detail;
-        handle = log.pending(p.phase, p.detail || 'working');
+        handle = log.pending(p.phase, p.detail);
       } else if (p.detail && p.detail !== detail) {
         detail = p.detail;
         handle?.update(p.detail);
       }
     },
     finish(): void {
-      handle?.resolve({ detail: detail || 'done' });
+      handle?.resolve({ detail });
       handle = null;
       current = null;
     },
@@ -109,17 +109,13 @@ function phaseDriver() {
 async function runSync(mode: 'cold' | 'warm'): Promise<void> {
   if (syncInFlight) return;
   syncInFlight = true;
-  cancelWait('sync started — baseline dropped');
+  cancelWait();
 
   const id = identity();
   store.set({ stage: { s: 'syncing', mode, startedAt: performance.now() } });
 
   if (mode === 'cold') {
-    log.append({
-      event: 'reset',
-      detail: 'local mirror and sealed state blob dropped for this key',
-      kind: 'warn',
-    });
+    log.append({ event: 'reset', detail: 'mirror cleared', kind: 'warn' });
   }
 
   netMark = engine.network().length;
@@ -132,45 +128,24 @@ async function runSync(mode: 'cold' | 'warm'): Promise<void> {
 
     const clamped = visibility.wasHiddenDuring(t0, performance.now());
     if (clamped) {
-      log.append({
-        event: 'unreliable',
-        detail:
-          'the tab was in the background for part of this run — browser timer clamping (~1 Hz) inflated every phase above. Re-run with the tab in front.',
-        kind: 'error',
-      });
-    }
-
-    for (const p of res.timing.phases) {
-      if (!p.skipped) continue;
-      log.append({
-        event: p.name,
-        detail: `${p.detail ?? 'not run'}${p.skippedBytes ? ` (−${f.bytes(p.skippedBytes)})` : ''}`,
-        kind: 'info',
-        aside: true,
-      });
+      log.append({ event: 'tab hidden', detail: 'timings clamped', kind: 'warn' });
     }
 
     const bal = balance(res.notes);
-    const applied =
-      mode === 'warm'
-        ? 'mirror reused'
-        : res.lane === 'snapshot'
-          ? `snapshot at epoch ${res.feed.latestEpoch}`
-          : `${res.feed.epochCount} epochs folded`;
     log.append({
       event: mode === 'cold' ? 'cold sync' : 'warm sync',
-      detail: `${res.notes.length} notes · ${f.strk(bal)} · ${applied} · verified=${res.feed.verified}`,
+      detail: `${res.notes.length} notes · ${f.strk(bal)} · ${res.feed.verified}`,
       kind: 'ok',
       durationMs: res.timing.totalMs,
     });
 
     const caveat = clamped
-      ? 'tab was backgrounded — these numbers are inflated by browser timer clamping, not by work.'
+      ? 'tab hidden — timings clamped'
       : mode === 'cold' && engine.network().slice(netMark).some((r) => r.source === 'http-cache')
-        ? 'the browser http cache served the epoch files on this run — a page cannot clear it, so this cold number is optimistic.'
+        ? 'served from http cache'
         : null;
     if (caveat && !clamped) {
-      log.append({ event: 'caveat', detail: caveat, kind: 'warn', aside: true });
+      log.append({ event: 'http cache', detail: 'epochs served locally', kind: 'warn', aside: true });
     }
 
     const capture = engine
@@ -206,20 +181,26 @@ async function runPass(trigger: 'sse' | 'manual'): Promise<void> {
   const s = store.get();
   if (s.stage.s !== 'ready' && s.stage.s !== 'waiting') return;
   passInFlight = true;
+  if (trigger === 'manual') store.set({ checking: true });
   try {
     const out = await engine.discover(identity());
-    const changed = out.added.length > 0 || out.spent.length > 0;
-    const detail = changed
-      ? `via ${trigger} · ${out.added.length} new, ${out.spent.length} newly spent`
-      : `via ${trigger} · no change`;
-    const line = { event: 'check', detail, kind: changed ? ('ok' as const) : ('net' as const), durationMs: out.timing.totalMs };
-    if (changed) log.append(line);
-    else log.appendCoalesced(line);
+    // A poll that found nothing is not an event. The subscription's liveness
+    // lives in its toggle, its cost in the requests panel, and the moving head
+    // in the feed panel — all state, all already on screen.
+    if (out.added.length > 0 || out.spent.length > 0) {
+      log.append({
+        event: 'check',
+        detail: `${trigger} · ${out.added.length} new, ${out.spent.length} spent`,
+        kind: 'ok',
+        durationMs: out.timing.totalMs,
+      });
+    }
 
     store.set({ notes: out.notes, feed: engine.feed(), network: [...engine.network()] });
     resolveWaitIfPossible(out, trigger);
   } finally {
     passInFlight = false;
+    if (trigger === 'manual') store.set({ checking: false });
   }
 }
 
@@ -227,14 +208,12 @@ function resolveWaitIfPossible(out: DiscoverOut, trigger: 'sse' | 'manual'): voi
   const w = store.get().waiting;
   if (!w || !waitLine) return;
 
-  const via = trigger === 'sse' ? 'via subscription' : 'via check now';
-
   if (w.kind === 'deposit') {
     const fresh = out.notes.find((n) => !w.noteIds.has(n.id) && !n.spent);
     if (!fresh) return;
     waitLine.resolve({
       event: 'note found',
-      detail: `${f.shortFelt(fresh.id)} · ${f.strk(fresh.amount)} · blk ${f.block(fresh.block)} · ${via}`,
+      detail: `${f.shortFelt(fresh.id)} · ${f.strk(fresh.amount)} · ${trigger}`,
       kind: 'ok',
     });
   } else {
@@ -244,20 +223,12 @@ function resolveWaitIfPossible(out: DiscoverOut, trigger: 'sse' | 'manual'): voi
     waitLine.resolve({
       event: 'nullifier landed',
       detail:
-        `${f.shortFelt(gone.nullifier)} · ${w.kind} confirmed` +
-        (change ? ` · change note ${f.strk(change.amount)}` : ' · no change note') +
-        ` · ${via}`,
+        f.shortFelt(gone.nullifier) +
+        (change ? ` · change ${f.strk(change.amount)}` : '') +
+        ` · ${trigger}`,
       kind: 'ok',
     });
   }
-
-  const moved = store.get().feed.head - w.headAtArm;
-  log.append({
-    event: 'clock',
-    detail: `head moved ${moved} ${moved === 1 ? 'block' : 'blocks'} while waiting; the block clock here runs ~5× fast, so that elapsed time is not a mainnet latency`,
-    kind: 'info',
-    aside: true,
-  });
 
   waitLine = null;
   store.set({ stage: { s: 'ready' }, waiting: null });
@@ -286,7 +257,7 @@ async function runStep(kind: ActionKind, step: 0 | 1): Promise<void> {
     action: step === 0 ? { kind, stepDone: false } : s.action,
   });
 
-  const line = log.pending(`${kind} ${step + 1}/2`, `${stepDef.pending} — ${stepDef.actor}`);
+  const line = log.pending(`${kind} ${step + 1}/2`, stepDef.pending);
   try {
     const out = await wallet.runStep(kind, step, identity());
     line.resolve({ event: `${kind} ${step + 1}/2`, detail: out.detail, kind: 'action' });
@@ -312,16 +283,8 @@ async function runStep(kind: ActionKind, step: 0 | 1): Promise<void> {
     });
     waitLine = log.pending(
       def.awaiting === 'note' ? 'waiting for the note' : 'waiting for the spend',
-      def.awaiting === 'note' ? 'no new note in the feed yet' : 'nullifier has not landed yet',
+      '',
     );
-    if (!store.get().subscription) {
-      log.append({
-        event: 'hint',
-        detail: 'subscription is off — nothing will resolve that line until you press “check now”',
-        kind: 'warn',
-        aside: true,
-      });
-    }
   } catch (err) {
     line.fail(err instanceof Error ? err.message : String(err));
     store.set({ stage: { s: 'ready' }, action: { kind: null, stepDone: false } });
@@ -334,7 +297,7 @@ async function runStep(kind: ActionKind, step: 0 | 1): Promise<void> {
 
 async function switchIdentity(to: 'A' | 'B'): Promise<void> {
   if (store.get().identityId === to || syncInFlight) return;
-  cancelWait('identity switched');
+  cancelWait();
 
   store.set({
     identityId: to,
@@ -344,30 +307,15 @@ async function switchIdentity(to: 'A' | 'B'): Promise<void> {
   });
 
   const id = IDENTITIES[to];
-  log.append({
-    event: 'identity',
-    detail: `switched to ${id.label} — different viewing key, same feed, same URLs`,
-    kind: 'privacy',
-  });
+  log.append({ event: 'identity', detail: id.label, kind: 'privacy' });
 
-  const line = log.pending('open', 'opening the local store for this key');
   const r = await engine.open(id);
-  line.resolve({
-    event: 'open',
-    detail: `${r.store}, persisted=${r.persisted}, ${r.warm ? 'warm — mirror already folded' : 'cold — no mirror for this key'}`,
-  });
 
   if (r.warm) {
     store.set({ stage: { s: 'ready' } });
     await runSync('warm');
   } else {
     store.set({ stage: { s: 'cold' } });
-    log.append({
-      event: 'hint',
-      detail: 'run a cold sync for this wallet, then compare the two request lists in the network panel',
-      kind: 'info',
-      aside: true,
-    });
   }
 }
 
@@ -386,17 +334,6 @@ function setSubscription(on: boolean): void {
       store.set({ feed: engine.feed() });
       void runPass('sse');
     });
-    log.append({
-      event: 'subscribe',
-      detail: 'listening for feed pokes; each poke costs one conditional GET and one discovery pass',
-      kind: 'privacy',
-    });
-  } else {
-    log.append({
-      event: 'unsubscribe',
-      detail: 'stream closed — the client now learns nothing until you press check now',
-      kind: 'warn',
-    });
   }
 }
 
@@ -407,7 +344,7 @@ function setSubscription(on: boolean): void {
 need<HTMLButtonElement>('#btn-run-cold').addEventListener('click', () => void runSync('cold'));
 need<HTMLButtonElement>('#btn-run-warm').addEventListener('click', () => void runSync('warm'));
 need<HTMLButtonElement>('#btn-check-now').addEventListener('click', () => void runPass('manual'));
-need<HTMLButtonElement>('#btn-cancel-wait').addEventListener('click', () => cancelWait('cancelled by hand'));
+need<HTMLButtonElement>('#btn-cancel-wait').addEventListener('click', () => cancelWait());
 
 need<HTMLInputElement>('#sub-toggle').addEventListener('change', (e) => {
   setSubscription((e.currentTarget as HTMLInputElement).checked);
@@ -429,10 +366,7 @@ for (const btn of all<HTMLButtonElement>('.lane')) {
     store.set({ lane, feed: engine.feed() });
     log.append({
       event: 'lane',
-      detail:
-        lane === 'snapshot'
-          ? 'snapshot cold start — PLANNED, not built (roadmap item 1). Run cold to see the shape it would have.'
-          : 'epoch replay cold start — this is what ships today',
+      detail: lane === 'snapshot' ? 'snapshot' : 'epochs',
       kind: lane === 'snapshot' ? 'warn' : 'info',
     });
   });
@@ -456,19 +390,11 @@ if (!engine.probe) {
     selfTest.disabled = true;
     probe.plantKeyProbe(identity());
     store.set({ network: [...engine.network()], netExpanded: true });
-    log.append({
-      event: 'self-test',
-      detail: 'planted a compat-mode URL carrying the viewing key — the scanner must now go red, or it proves nothing',
-      kind: 'warn',
-    });
+    log.append({ event: 'probe', detail: 'key planted', kind: 'warn' });
     window.setTimeout(() => {
       probe.clearProbes();
       store.set({ network: [...engine.network()] });
-      log.append({
-        event: 'self-test',
-        detail: 'planted request removed; scanner back to 0 hits. The feed lane has no API that could emit that URL.',
-        kind: 'privacy',
-      });
+      log.append({ event: 'probe', detail: 'cleared', kind: 'privacy' });
       selfTest.disabled = false;
     }, 6_000);
   });
@@ -492,27 +418,7 @@ need('#log-scroll').addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 
 async function boot(): Promise<void> {
-  log.append({
-    event: 'prototype',
-    detail: `engine=${engine.info.name} · ${engine.info.notice} · every number below is invented`,
-    kind: 'warn',
-  });
-  log.append({
-    event: 'role',
-    detail:
-      'this page is the WALLET: it holds its own viewing key and discovers its own notes from a public feed. ' +
-      'A dapp using the Starknet Wallet API never sees a viewing key, so the customer for this is a wallet, not a dapp.',
-    kind: 'info',
-    aside: true,
-  });
-
-  const line = log.pending('open', 'instantiating the engine');
-  const r = await engine.open(identity());
-  line.resolve({
-    event: 'open',
-    detail: `${r.store}, persisted=${r.persisted}, ${r.warm ? 'warm' : 'cold — no mirror for this key'}`,
-  });
-
+  await engine.open(identity());
   store.set({ stage: { s: 'cold' }, network: [...engine.network()] });
   chain.start();
   setSubscription(true);

@@ -1,0 +1,35 @@
+{
+  "name": "strk20-discovery",
+  "version": "0.0.0-dev.0",
+  "type": "module",
+  "description": "Keyless STRK20 note discovery. The viewing key stays in the browser; every client fetches identical public bytes.",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": "./dist/index.js",
+    "./sdk": "./dist/sdk.js",
+    "./delegated": "./dist/delegated.js",
+    "./engine/mock": "./dist/engine-mock.js",
+    "./engine/wasm": "./dist/engine-wasm.js",
+    "./scan": "./dist/scan.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "scan:chokepoint": "node scripts/scan-chokepoint.mjs"
+  },
+  "dependencies": {
+    "fzstd": "0.1.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

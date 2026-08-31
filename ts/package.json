@@ -1,0 +1,21 @@
+{
+  "name": "strk20-ts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "TypeScript consumer path: the strk20-discovery npm package and the demo that exists to be criticised.",
+  "workspaces": [
+    "strk20-discovery",
+    "demo"
+  ],
+  "scripts": {
+    "typecheck": "npm run build --workspace strk20-discovery && npm run typecheck --workspaces --if-present",
+    "test": "npm run build --workspace strk20-discovery && npm run test --workspaces --if-present",
+    "dev": "npm run build --workspace strk20-discovery && npm run dev --workspace demo",
+    "build": "npm run build --workspace strk20-discovery && npm run build --workspace demo",
+    "scan:chokepoint": "node strk20-discovery/scripts/scan-chokepoint.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2"
+  }
+}

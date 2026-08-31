@@ -6,9 +6,21 @@ and discovers nothing: a mock engine sleeps for jittered intervals shaped like
 the phases the real client will have, and reports the wall clock it actually
 spent asleep.
 
-**Every number on the screen is invented.** The banner says so and cannot be
-dismissed, each numeric panel carries a `SIMULATED` chip, and the log has the
-word watermarked into its background so no crop of a screenshot can lose it.
+**Every number on the screen is invented.** A fixed `SIMULATED mock-engine` chip
+sits in the top-right corner, and the word is watermarked into the log's
+background so no crop of a screenshot can lose it.
+
+The page carries no explanatory copy at all: **the log is for events, the panels
+are for state.** Nothing on screen explains the product, justifies a design choice
+or argues a case. Everything below is documentation, not UI text — if you find
+yourself wanting to move a paragraph from here onto the page, don't.
+
+The test every log line has to pass: *would a person reading this learn that
+something happened?* If the honest answer is "it tells them the machinery is
+running", it does not get a line. So there is no `open`, no `subscribed`, and
+above all no `check … no change`: a poll that found nothing is not an event. That
+the subscription is alive is visible in its toggle, its cost in the requests
+counter, and its effect in the feed panel's moving head.
 
 ```bash
 npm install
@@ -70,7 +82,7 @@ To drop in the real client:
    `THE ONE BINDING`);
 3. change nothing else.
 
-`info.name` and `info.simulated` are rendered in the banner, so a screenshot can
+`info.name` and `info.simulated` render in the corner chip, so a screenshot can
 never pass a mock number off as a measurement of the real engine.
 
 Two things are deliberately **not** on the seam:
@@ -110,8 +122,9 @@ Staged actions are two steps each, approve-before-swap:
 | Send | select note | prove & send | needs an unspent note ≥ 25 STRK |
 | Withdraw | select note | unshield | needs an unspent note ≥ 10 STRK |
 
-Locked controls **say why** underneath rather than going quietly grey, and step 2
-renders as locked until step 1 is green.
+Locked controls **say why** underneath — terse (`no note yet`,
+`note 12.50 < 25.00 STRK`) — rather than going quietly grey, and step 2 renders
+as locked until step 1 is green.
 
 ## What is grounded, and what is invented
 
@@ -145,16 +158,19 @@ count** is left blank rather than invented.
 
 ## Honesty mechanisms
 
-- undismissable banner + per-panel `SIMULATED` chips + a watermark inside the log;
-- the active engine's name is always on screen;
+All of these are a chip, a word, or a colour — never a sentence.
+
+- fixed `SIMULATED mock-engine` chip, plus the watermark inside the log;
 - `visibility.ts` detects that the tab was backgrounded during a timed run —
-  browser timers clamp to ~1 Hz there, which inflates every phase — and marks the
-  run unreliable in the log and in the cold column;
-- a second cold run in the same session is labelled as partly served by the
-  browser HTTP cache, which a page cannot clear;
-- the "prove the scanner isn't vacuous" button plants a compat-mode URL carrying
-  the viewing key and shows the key scanner going red, then removes it. A scanner
-  that has never caught anything proves nothing.
+  browser timers clamp to ~1 Hz there, which inflates every phase — and logs
+  `tab hidden · timings clamped`, repeating it in amber under the cold column;
+- a second cold run in the same session logs `http cache · epochs served locally`,
+  because a page cannot clear that cache;
+- the `plant key` button injects a compat-mode URL carrying the viewing key; the
+  scanner line flips to red and back. A scanner that has never caught anything
+  proves nothing;
+- the `snapshot start` lane is tagged `planned` and flips the feed's `verified`
+  row to `server-asserted`. One word each.
 
 ## Known simplifications
 
@@ -163,5 +179,8 @@ count** is left blank rather than invented.
 - No 10-block note maturity window (it would be a 60 s wait under this clock).
 - No reorg, no `FEED_HASH_MISMATCH`, no `HISTORY_UNAVAILABLE` — all of which the
   real client has to surface and none of which has a designed UI yet.
+- A manual check that finds nothing writes no log line, so the only feedback is
+  the button reading `checking…` while the pass runs. If that turns out to be too
+  quiet, the fix is a busier button, not a log line.
 - State is in memory: a reload starts over. There is no IndexedDB here, so
   "warm" means "same page session".

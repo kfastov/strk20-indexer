@@ -1,0 +1,39 @@
+{
+  "generator": "ts/demo/scripts/gen-replay-feed.mjs",
+  "synthetic": true,
+  "why": "no captured Sepolia feed directory exists in this tree; see the header of the generator",
+  "chain_id": "SN_SEPOLIA",
+  "pool": "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+  "noteBlock": 14339115,
+  "spendBlock": 14340785,
+  "noteId": "0xce526b286fed962b9e3942771c5e519c69b8677dc24136ae380ba523a067ff",
+  "activeBlocks": 4457,
+  "events": 22273,
+  "mockNotes": 3001,
+  "stages": [
+    {
+      "stage": "t0",
+      "note": "before the note",
+      "epochs": 606,
+      "requests": 609,
+      "feedBytes": 3369557,
+      "manifestSha256": "92d3a971873fc8da379449787d7ba590acbad425c9cead8ecaffb3918e06b8dc"
+    },
+    {
+      "stage": "t1",
+      "note": "the note is in the tail",
+      "epochs": 606,
+      "requests": 609,
+      "feedBytes": 3369990,
+      "manifestSha256": "7bc8722fc6ea321c3d12f7f770c72fcda51360c119bfd2b220fbc2cfa6b9dc47"
+    },
+    {
+      "stage": "t2",
+      "note": "the epoch was cut and the note was spent",
+      "epochs": 608,
+      "requests": 611,
+      "feedBytes": 3366841,
+      "manifestSha256": "55d506405aca2eb3401fab030cb0740559476177d139b64a60495d764fa2b54a"
+    }
+  ]
+}

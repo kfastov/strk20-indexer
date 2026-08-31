@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>strk20-discovery demo</title>
+    <!--
+      Two entries here are wider than 'self', and both are load-bearing:
+
+      - `'wasm-unsafe-eval'` in script-src. Instantiating a WebAssembly module
+        needs it; without it the real engine cannot start at all and the demo
+        can only ever run on the mock. It permits wasm compilation and NOTHING
+        else — it is not `'unsafe-eval'`, so `eval` and `new Function` stay
+        blocked.
+      - the loopback origins in connect-src. The REPLAY and MAINNET lanes are
+        served from this origin, but the LIVE lane points at a locally running
+        indexer on another port, which is a different origin to the browser.
+        Only loopback is named: point the LIVE lane at a public host and the
+        browser blocks it until this line names that host, which is the
+        behaviour we want to keep.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <script type="module" crossorigin src="/assets/index-B1cU2wDj.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-QKmL_caP.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

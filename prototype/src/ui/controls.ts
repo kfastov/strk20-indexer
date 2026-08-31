@@ -56,13 +56,13 @@ export class Controls {
     const gateEl = need('[data-role="gate"]', root);
     gateEl.id = `gate-${kind}`;
     if (waiting) {
-      gateEl.textContent = 'submitted — waiting for discovery to see it';
+      gateEl.textContent = 'submitted';
       gateEl.dataset['tone'] = 'pending';
     } else if (active) {
-      gateEl.textContent = `step ${s.stage.s === 'acting' ? s.stage.step + 1 : 1} of 2 running`;
+      gateEl.textContent = 'running';
       gateEl.dataset['tone'] = 'pending';
     } else if (armed && s.action.stepDone) {
-      gateEl.textContent = 'step 1 done — step 2 unlocked';
+      gateEl.textContent = 'step 2 unlocked';
       gateEl.dataset['tone'] = 'ok';
     } else if (!gate.enabled) {
       gateEl.textContent = gate.reason;
@@ -74,25 +74,24 @@ export class Controls {
   }
 
   private renderAux(s: AppState): void {
+    // A check that finds nothing writes no log line, so the only feedback that
+    // the button did anything is the button itself.
     const canCheck = s.stage.s === 'ready' || s.stage.s === 'waiting';
     this.checkNow.hidden = s.subscription || !canCheck;
-    this.checkNow.disabled = !canCheck;
+    this.checkNow.disabled = !canCheck || s.checking;
+    this.checkNow.textContent = s.checking ? 'checking…' : 'check now';
     this.cancelWait.hidden = s.stage.s !== 'waiting';
 
-    this.auxSub.textContent = s.subscription
-      ? 'automatic — feed pokes drive it'
-      : 'manual — nothing runs by itself';
+    this.auxSub.textContent = s.subscription ? 'auto' : 'manual';
 
     if (s.stage.s === 'waiting') {
-      this.auxGate.textContent = s.subscription
-        ? 'a poke will resolve the pending line'
-        : 'press check now to resolve the pending line yourself';
+      this.auxGate.textContent = s.subscription ? 'waiting' : 'check now';
       this.auxGate.dataset['tone'] = 'pending';
     } else if (s.stage.s === 'ready') {
       this.auxGate.textContent = s.subscription ? 'listening' : 'idle';
       this.auxGate.dataset['tone'] = 'ready';
     } else {
-      this.auxGate.textContent = 'sync first';
+      this.auxGate.textContent = '';
       this.auxGate.dataset['tone'] = 'locked';
     }
   }
@@ -103,7 +102,6 @@ export class Controls {
     const warm = need<HTMLButtonElement>('#btn-run-warm');
     cold.disabled = busy;
     warm.disabled = busy || s.stage.s === 'cold';
-    warm.title = s.stage.s === 'cold' ? 'nothing folded yet — run cold first' : '';
 
     for (const b of all<HTMLButtonElement>('.lane')) b.disabled = busy;
     for (const b of all<HTMLButtonElement>('.ident')) b.disabled = busy;

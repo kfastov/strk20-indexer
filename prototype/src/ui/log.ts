@@ -12,9 +12,9 @@
  *     pending slot into the committed list, keeping its identity, with the
  *     elapsed time computed from two `performance.now()` stamps rather than
  *     from the tick counter (ticks drift; stamps do not);
- *   - repeated identical lines ("no change") collapse into a `xN` counter,
- *     because a subscription that pokes every few seconds otherwise buries
- *     everything the reader came for.
+ *   - the log carries events only. A discovery pass that found nothing never
+ *     reaches this module, so there is no counter, no collapsing and no
+ *     de-duplication to implement here.
  */
 
 import { clock, ms, tick } from '../format';
@@ -57,8 +57,6 @@ export class LogView {
   private raf = 0;
   private lastTick = 0;
   private current: ActivePending | null = null;
-  private lastLine: HTMLElement | null = null;
-  private lastSig = '';
   private reduced = prefersReducedMotion();
 
   constructor(
@@ -79,28 +77,9 @@ export class LogView {
     const stick = this.atBottom();
     const el = buildLine(spec);
     this.list.append(el);
-    this.lastLine = el;
-    this.lastSig = signature(spec);
     this.flash(el);
     if (stick) this.toBottom();
     return el;
-  }
-
-  /** Appends, or bumps a xN counter when identical to the previous line. */
-  appendCoalesced(spec: LineSpec): void {
-    if (this.lastLine && this.lastSig === signature(spec) && this.lastLine.isConnected) {
-      const n = Number(this.lastLine.dataset['repeat'] ?? '1') + 1;
-      this.lastLine.dataset['repeat'] = String(n);
-      need('.line-detail', this.lastLine).textContent = `${spec.detail}  ×${n}`;
-      if (spec.durationMs !== undefined) {
-        need('.line-dur', this.lastLine).textContent = ms(spec.durationMs);
-      }
-      need('.line-time', this.lastLine).textContent = clock();
-      this.flash(this.lastLine);
-      if (this.atBottom()) this.toBottom();
-      return;
-    }
-    this.append(spec);
   }
 
   // -------------------------------------------------------------------------
@@ -222,8 +201,6 @@ export class LogView {
     this.current?.handle.cancel('cleared');
     this.list.replaceChildren();
     this.slot.replaceChildren();
-    this.lastLine = null;
-    this.lastSig = '';
   }
 }
 
@@ -234,10 +211,6 @@ interface ActivePending {
   startedAt: number;
   frame: number;
   handle: PendingHandle;
-}
-
-function signature(s: LineSpec): string {
-  return `${s.kind ?? 'info'}|${s.event}|${s.detail}`;
 }
 
 function buildLine(spec: LineSpec): HTMLElement {

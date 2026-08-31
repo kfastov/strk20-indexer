@@ -74,6 +74,8 @@ export interface AppState {
   action: ActionProgress;
   waiting: WaitBaseline | null;
   network: readonly NetworkRecord[];
+  /** A manual discovery pass is in flight. Feedback for it lives on the button. */
+  checking: boolean;
   /** URL sequence captured per identity, for the privacy verdict. */
   captures: Partial<Record<'A' | 'B', readonly string[]>>;
   scanner: ScannerState;
@@ -122,6 +124,7 @@ export function initialState(engine: EngineInfo, feed: FeedState): AppState {
     action: { kind: null, stepDone: false },
     waiting: null,
     network: [],
+    checking: false,
     captures: {},
     scanner: { hits: 0, scanned: 0, planted: false },
     netExpanded: false,
@@ -152,19 +155,19 @@ const NEEDS: Readonly<Record<ActionKind, number>> = { deposit: 0, send: 25, with
 export function actionGate(s: AppState, kind: ActionKind): Gate {
   switch (s.stage.s) {
     case 'boot':
-      return { enabled: false, reason: 'engine still starting' };
+      return { enabled: false, reason: 'starting' };
     case 'cold':
-      return { enabled: false, reason: 'no local mirror yet — run a sync first' };
+      return { enabled: false, reason: 'no mirror' };
     case 'syncing':
       return { enabled: false, reason: 'syncing' };
     case 'acting':
       return s.stage.kind === kind
-        ? { enabled: false, reason: 'step in flight' }
+        ? { enabled: false, reason: 'running' }
         : { enabled: false, reason: `busy: ${s.stage.kind}` };
     case 'waiting':
-      return { enabled: false, reason: `waiting for the ${s.stage.kind} to land` };
+      return { enabled: false, reason: 'waiting' };
     case 'error':
-      return { enabled: false, reason: 'engine error — reload cold' };
+      return { enabled: false, reason: 'error' };
     case 'ready':
       break;
   }
@@ -172,18 +175,15 @@ export function actionGate(s: AppState, kind: ActionKind): Gate {
   const bal = balance(s.notes);
   if (kind === 'send' || kind === 'withdraw') {
     if (unspent(s.notes).length === 0) {
-      return { enabled: false, reason: 'no note exists yet — deposit first' };
+      return { enabled: false, reason: 'no note yet' };
     }
     const need = NEEDS[kind];
     const biggest = Math.max(...unspent(s.notes).map((n) => n.amount));
     if (biggest < need) {
-      return {
-        enabled: false,
-        reason: `largest note is ${strk(biggest)}, needs ${strk(need)} (no note joining in this prototype)`,
-      };
+      return { enabled: false, reason: `note ${biggest.toFixed(2)} < ${need.toFixed(2)} STRK` };
     }
   }
-  return { enabled: true, reason: kind === 'deposit' ? 'ready' : `spending from ${strk(bal)}` };
+  return { enabled: true, reason: kind === 'deposit' ? 'ready' : strk(bal) };
 }
 
 /** Whether one step button of a staged action may be pressed. */

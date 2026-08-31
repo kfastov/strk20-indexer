@@ -44,14 +44,14 @@ export const ACTIONS: Readonly<Record<ActionKind, ActionDef>> = {
     steps: [
       {
         id: 'approve',
-        label: 'approve STRK',
-        pending: 'approving 100.00 STRK to the pool',
+        label: 'approve',
+        pending: 'approving',
         actor: 'wallet',
       },
       {
         id: 'shield',
         label: 'shield',
-        pending: 'proving and submitting the shield',
+        pending: 'proving',
         actor: 'prover',
       },
     ],
@@ -61,8 +61,8 @@ export const ACTIONS: Readonly<Record<ActionKind, ActionDef>> = {
     kind: 'send',
     amount: ACTION_AMOUNT.send,
     steps: [
-      { id: 'select', label: 'select note', pending: 'selecting an unspent note', actor: 'wallet' },
-      { id: 'prove', label: 'prove & send', pending: 'proving the spend', actor: 'prover' },
+      { id: 'select', label: 'select', pending: 'selecting', actor: 'wallet' },
+      { id: 'prove', label: 'prove', pending: 'proving', actor: 'prover' },
     ],
     awaiting: 'nullifier',
   },
@@ -70,8 +70,8 @@ export const ACTIONS: Readonly<Record<ActionKind, ActionDef>> = {
     kind: 'withdraw',
     amount: ACTION_AMOUNT.withdraw,
     steps: [
-      { id: 'select', label: 'select note', pending: 'selecting an unspent note', actor: 'wallet' },
-      { id: 'unshield', label: 'unshield', pending: 'proving the unshield', actor: 'prover' },
+      { id: 'select', label: 'select', pending: 'selecting', actor: 'wallet' },
+      { id: 'unshield', label: 'unshield', pending: 'proving', actor: 'prover' },
     ],
     awaiting: 'nullifier',
   },
@@ -110,25 +110,17 @@ export class MockWallet implements Wallet {
     if (step === 0) {
       if (kind === 'deposit') {
         await sleep(this.lat.draw({ centre: 900, spread: 0.35, tailChance: 0.15 }), signal);
-        return { detail: `approve tx accepted, ${def.amount.toFixed(2)} STRK allowance` };
+        return { detail: `allowance ${def.amount.toFixed(2)} STRK` };
       }
       await sleep(this.lat.draw({ centre: 180, spread: 0.5 }), signal);
-      const balance = this.chain.balanceOf(identity);
-      return { detail: `note selected locally, ${balance.toFixed(2)} STRK available` };
+      return { detail: 'note selected' };
     }
 
     // Step 2 is always the expensive one: a proof, then a submission.
     const proveMs = this.lat.draw({ centre: kind === 'deposit' ? 2_100 : 1_750, spread: 0.3, tailChance: 0.2 });
     await sleep(proveMs, signal);
     const submission = this.chain.submit(identity, kind);
-    const who =
-      kind === 'deposit'
-        ? 'hosted prover (also minted the FPI screening attestation)'
-        : 'hosted prover';
-    return {
-      detail: `${who}, tx ${short(submission.txHash)} submitted`,
-      submission,
-    };
+    return { detail: `tx ${short(submission.txHash)}`, submission };
   }
 }
 

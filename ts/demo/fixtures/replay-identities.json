@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Demo viewing keys. These are PUBLIC test values with no funds behind them and no relation to",
+    "any real account. They exist so the replay lane is deterministic and so the A/B identity",
+    "comparison has two identities to compare.",
+    "",
+    "One source, consumed by the fixture generator (node) and by the demo (browser), so the tag the",
+    "generator stamps and the tag the engine derives cannot drift.",
+    "",
+    "The demo still treats them as secrets in every mechanical sense: they never enter a URL, a",
+    "header, a log line or a request body, and the in-page scanner asserts it over the whole session."
+  ],
+  "A": {
+    "label": "identity A (replay owner)",
+    "address": "0x04f2c9d1a7b3e5608c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f70a9b",
+    "viewingKey": "5f1c3a9d24e7b08163d5a2c47f9e0b6d38a1c5e79024b6d8f1a3c5e70924b6d8"
+  },
+  "B": {
+    "label": "identity B (second identity, owns nothing)",
+    "address": "0x0731ab55c9e0d4f28316a7b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f60718293",
+    "viewingKey": "a70d2f8e4b16c3950d7e2a4c6f8b0d1e3a5c7e9b0d2f4a6c8e0b2d4f6a8c0e2b"
+  }
+}

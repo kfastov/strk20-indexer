@@ -65,7 +65,7 @@ body {
   font: 13px/1.5 var(--mono);
   font-variant-ligatures: none;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   height: 100dvh;
   overflow: hidden;
 }
@@ -84,54 +84,6 @@ code {
 b {
   color: var(--text);
   font-weight: 600;
-}
-
-/* ================================ banner ================================ */
-
-.banner {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 8px 16px;
-  background: linear-gradient(90deg, #241c07, #1a1608 60%, #14120c);
-  border-bottom: 1px solid var(--amber-dim);
-  flex-wrap: wrap;
-}
-
-.banner-tag {
-  flex: none;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  font-size: 11px;
-  color: #0a0c0f;
-  background: var(--amber);
-  padding: 3px 8px;
-  border-radius: 2px;
-}
-
-.banner-text {
-  margin: 0;
-  flex: 1 1 320px;
-  color: #e8d9ad;
-  font-size: 12px;
-}
-
-.banner-text strong {
-  color: var(--amber);
-}
-
-.banner-engine {
-  flex: none;
-  color: var(--dim);
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.banner-engine b {
-  color: #e8d9ad;
-  font-weight: 500;
 }
 
 .chip {
@@ -162,6 +114,22 @@ b {
 .chip-priv[data-state='bad'] {
   border-color: var(--red-dim);
   color: var(--red);
+}
+
+/* the only honesty text on the page: one chip, top-right, over everything */
+.chip-sim {
+  position: fixed;
+  top: 6px;
+  right: 12px;
+  z-index: 20;
+  background: rgba(10, 12, 15, 0.85);
+  backdrop-filter: blur(3px);
+}
+
+.chip-sim b {
+  color: var(--dim);
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
 /* ================================ layout ================================ */
@@ -334,10 +302,14 @@ b {
   display: none;
 }
 
-.line-pending {
-  /* Aligned with the committed lines, but allowed to grow rather than
-     ellipsis away the one label the reader is actually watching. */
+/* `.line.line-pending` on purpose: this must outrank the narrow-window
+   `.line` rules below, which would otherwise ellipsis away the one label the
+   reader is actually watching. */
+.line.line-pending {
   grid-template-columns: 60px minmax(172px, max-content) minmax(0, 1fr) 76px;
+}
+
+.line-pending {
   border-left-color: var(--amber);
   background: linear-gradient(90deg, rgba(224, 179, 65, 0.09), rgba(224, 179, 65, 0.02) 40%, transparent);
   padding-top: 3px;
@@ -405,26 +377,14 @@ b {
   padding-inline: 14px;
 }
 
-.panel-note {
-  margin: 8px 0 12px;
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 1.55;
-}
-
-.panel-note b {
-  color: var(--amber);
-  font-weight: 600;
-}
-
-.panel-note em {
-  color: var(--dim);
-}
-
 .caveat {
-  display: block;
+  margin: 0 0 10px;
   color: var(--amber);
-  margin-bottom: 6px;
+  font-size: 11px;
+}
+
+.caveat[hidden] {
+  display: none;
 }
 
 /* ---- cold vs warm ---- */
@@ -453,24 +413,11 @@ b {
   color: var(--dim);
 }
 
-.cw-sub {
-  display: block;
-  letter-spacing: 0;
-  color: var(--faint);
-  font-size: 10px;
-  margin-top: 2px;
-}
-
 .cw-total {
   font-size: 22px;
   line-height: 1.15;
   color: var(--text);
   font-variant-numeric: tabular-nums;
-}
-
-.cw-total-sub {
-  font-size: 10px;
-  color: var(--faint);
 }
 
 .cw-running {
@@ -713,22 +660,6 @@ b {
   margin-top: 2px;
 }
 
-.req-delta {
-  margin: 4px 0 6px;
-  font-size: 12px;
-  color: var(--dim);
-}
-
-.req-delta b {
-  color: var(--cyan);
-  font-size: 14px;
-}
-
-.arrow {
-  color: var(--faint);
-  padding: 0 3px;
-}
-
 /* ---- network ---- */
 
 .net-scroll {
@@ -841,8 +772,7 @@ b {
 .scanner {
   margin: 0 0 12px;
   font-size: 11px;
-  line-height: 1.5;
-  padding: 7px 9px;
+  padding: 5px 8px;
   border-radius: 3px;
   border: 1px solid var(--line-2);
   color: var(--dim);
@@ -930,7 +860,7 @@ b {
 .verdict {
   border: 1px solid var(--line-2);
   border-radius: 3px;
-  padding: 9px 10px;
+  padding: 6px 9px;
   margin-bottom: 14px;
   background: var(--panel);
 }
@@ -939,14 +869,6 @@ b {
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--dim);
-  margin-bottom: 5px;
-}
-
-.verdict-body {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--faint);
 }
 
 .verdict[data-state='ok'] {
@@ -965,53 +887,6 @@ b {
 
 .verdict[data-state='bad'] .verdict-head {
   color: var(--red);
-}
-
-/* ---- about ---- */
-
-.about-list {
-  list-style: none;
-  margin: 10px 0 14px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.about-item {
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  gap: 8px;
-  font-size: 11px;
-  align-items: baseline;
-}
-
-.about-state {
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  text-align: right;
-  color: var(--faint);
-}
-
-.about-item[data-state='shipped'] .about-state {
-  color: var(--green);
-}
-.about-item[data-state='planned'] .about-state {
-  color: var(--amber);
-}
-.about-item[data-state='never'] .about-state {
-  color: var(--red);
-}
-
-.about-what {
-  color: var(--text);
-}
-
-.about-why {
-  grid-column: 2;
-  color: var(--faint);
-  font-size: 10px;
 }
 
 /* ============================== buttons ================================= */
@@ -1213,6 +1088,7 @@ b {
   font-size: 10px;
   color: var(--faint);
   min-height: 13px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1320,14 +1196,6 @@ b {
   .log-scroll {
     max-height: none;
     min-height: 46vh;
-  }
-  .banner {
-    padding: 7px 12px;
-    gap: 8px;
-  }
-  .banner-engine {
-    width: 100%;
-    flex-wrap: wrap;
   }
   .coldwarm {
     grid-template-columns: 1fr 1fr;
