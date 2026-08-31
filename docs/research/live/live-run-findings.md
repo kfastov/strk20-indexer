@@ -120,6 +120,67 @@ that turns an always-empty field into a real client-verifiable audit trail. And
 track per-endpoint capability (proofs / archive depth) instead of treating
 endpoints as interchangeable.
 
+## Session 3: the client against the real mainnet feed — open question #1 answered
+
+`strk20 run` served the completed 515-epoch feed; `strk20-sync` folded it with a
+throwaway key (no notes expected — the point is the fold, not the discovery).
+
+| measurement | value |
+|---|---|
+| cold start over HTTP (fetch 16 MB + verify hash chain + fold 515 epochs + discovery walk) | **5.97 s**, peak RSS 31 MB |
+| cold start from a local dir (no HTTP at all) | **6.18 s** |
+| warm re-sync (mirror already folded) | **0.03 s** |
+| client mirror on disk | 60 MB SQLite |
+| pool storage: writes / distinct slots | 139,131 / 134,879 (write-once confirmed: 96.9% of writes are first writes) |
+
+The two cold numbers being equal says the cost is **entirely the fold** (2.2 s user
++ 2.0 s sys), not the network. This settles design-notes §9 open question 1 in the
+direction the note called "mandatory": at 6 s native — and WASM will be slower, not
+faster — **the browser client cannot re-fold history on every page load**, so the
+persisted folded mirror is required, not an optimization. It also raises the value
+of roadmap item 1 (snapshots) from "nice cold-start win" to "the mechanism that
+makes a browser client viable at all": a snapshot ships 134,879 current slot values
+instead of replaying 139,131 writes across 515 epochs, and the 3.7× expansion from
+feed (16 MB) to client mirror (60 MB) is what IndexedDB would otherwise have to hold.
+
+Explorer stats over the full real history (`/v1/stats`), for the record:
+**31,077 notes** (the anonymity set), 2,628 registrations, 25,666 spends, 16,199
+deposits across 31 tokens, 40,204 withdrawals across 34 tokens.
+
+## Session 4: mirror caught up to head — and LIVE-7
+
+The mirror was brought to 14,151,973 with the head at 14,151,989 (16 blocks
+behind), i.e. inside the proof window for the first time, so the root check
+could finally be attempted for real. It failed for a *new* reason:
+
+```
+$ strk20 verify-root --block 14151973
+Error: rpc error from starknet_getStorageProof:
+{"code":-32602,"data":{"reason":"expected array for \"class_hashes\""},"message":"Invalid params"}
+```
+
+**LIVE-7 (defect, high): `get_storage_proof` sends `null` for the optional
+array parameters.** `crates/indexerd/src/rpc.rs:277` builds positional params
+`[block_id, null, [contract], null]`. Some backends accept that; others demand
+real arrays. Confirmed by direct probe at the same block and endpoint:
+
+| params | result |
+|---|---|
+| `[{block_number}, null, [pool], null]` | `-32602 expected array for "class_hashes"` |
+| `[{block_number}, [], [pool], []]` | **OK** |
+
+This is the third defect in a row caused by the same root cause as LIVE-1/6:
+we treated RPC endpoints as one uniform, forgiving implementation. They differ
+in retention, in which methods exist, and in strictness about optional params.
+
+Ground truth captured for the regression test —
+`fixtures/proof_mainnet_14151973.json`, the full live response at block
+14,151,973: pool `storage_root = 0x25e47f354ce696498d59e80ab4eb07483d4e737647a7b4832959a170ae8db09`,
+`block_hash = 0x46a19ce7fed109f163453d914dc174f394e4e29270dded25d1d84f78c6b8aaa`,
+class `0x67dddd89…76b554d`. Once LIVE-4/LIVE-7 are fixed, our mirror must
+recompute exactly that root from its own 134,879 slots — the strongest
+end-to-end statement the project can make about a real mirror of real history.
+
 ## Network facts confirmed live (2026-08-30)
 
 - Mainnet l1_accepted at time of run: 14,108,361; the user's own
