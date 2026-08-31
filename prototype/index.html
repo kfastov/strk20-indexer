@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>strk20 wallet — UX prototype (simulated)</title>
+    <link rel="icon" href="data:," />
+  </head>
+
+  <body>
+    <!--
+      ALL markup lives in this file. src/ only queries these ids/data-attrs and
+      updates text, classes and data-state. Restructure the layout here without
+      opening a .ts file; the only contract is that the ids survive.
+    -->
+
+    <!-- ================= honesty banner (not dismissible) ================= -->
+    <header class="banner" role="alert">
+      <span class="banner-tag">PROTOTYPE</span>
+      <p class="banner-text">
+        <strong>Every number on this page is invented by a mock engine.</strong>
+        Nothing here measures the real client. This is a UX sketch to argue with,
+        not a benchmark.
+      </p>
+      <span class="banner-engine">
+        engine: <b id="engine-name">—</b>
+        <span class="chip chip-sim" id="engine-sim">SIMULATED</span>
+      </span>
+    </header>
+
+    <main class="app">
+      <!-- ================= left: the log ================= -->
+      <section class="log-pane" aria-labelledby="log-title">
+        <div class="pane-head">
+          <h1 id="log-title" class="pane-title">wallet log</h1>
+          <span class="pane-meta" id="log-meta">newest at the bottom</span>
+        </div>
+
+        <!-- committed lines are appended here; the pending line is always the
+             last child of this scroller and is kept out of the live region -->
+        <div class="log-scroll" id="log-scroll" tabindex="0" role="log" aria-live="polite" aria-relevant="additions">
+          <ol class="log" id="log-list"></ol>
+          <div class="log-pending-slot" id="log-pending" aria-live="off"></div>
+        </div>
+      </section>
+
+      <!-- ================= right: the panels ================= -->
+      <aside class="panels" aria-label="measurements and evidence">
+
+        <!-- ---- cold vs warm ---- -->
+        <section class="panel" id="panel-coldwarm">
+          <div class="panel-head">
+            <h2>cold vs warm</h2>
+            <span class="chip chip-sim">SIMULATED</span>
+          </div>
+
+          <div class="coldwarm">
+            <div class="cw-col" data-col="cold">
+              <div class="cw-head">COLD <span class="cw-sub">first ever open</span></div>
+              <div class="cw-total" data-role="total">not measured<br /><span class="cw-total-sub">in this session</span></div>
+              <dl class="cw-phases" data-role="phases"></dl>
+              <button class="btn btn-wide" id="btn-run-cold" type="button">
+                clear local state, reload cold
+              </button>
+            </div>
+
+            <div class="cw-col" data-col="warm">
+              <div class="cw-head">WARM <span class="cw-sub">returning user</span></div>
+              <div class="cw-total" data-role="total">not measured<br /><span class="cw-total-sub">in this session</span></div>
+              <dl class="cw-phases" data-role="phases"></dl>
+              <button class="btn btn-wide" id="btn-run-warm" type="button">re-sync warm</button>
+            </div>
+          </div>
+
+          <p class="panel-note" id="coldwarm-provenance">
+            shape taken from a <b>native Rust CLI</b> run (mainnet, 2026-08-31):
+            cold 5.97&nbsp;s / warm 0.03&nbsp;s. Fold time <em>inside a browser</em>
+            has never been measured — roadmap item 3/4 is unbuilt.
+          </p>
+        </section>
+
+        <!-- ---- feed / subscription ---- -->
+        <section class="panel" id="panel-feed">
+          <div class="panel-head">
+            <h2>feed</h2>
+            <span class="chip chip-sim">SIMULATED</span>
+          </div>
+          <dl class="kv" id="feed-kv"></dl>
+
+          <div class="toggle-row">
+            <label class="switch">
+              <input type="checkbox" id="sub-toggle" checked />
+              <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+              <span class="switch-label">subscription</span>
+            </label>
+            <span class="pill" id="sub-state">on</span>
+          </div>
+          <p class="panel-note" id="sub-note"></p>
+        </section>
+
+        <!-- ---- requests this session ---- -->
+        <section class="panel" id="panel-requests">
+          <div class="panel-head">
+            <h2>requests</h2>
+            <span class="chip chip-sim">SIMULATED</span>
+          </div>
+
+          <div class="lane-switch" role="radiogroup" aria-label="cold-start lane">
+            <button class="lane" type="button" id="lane-epochs" role="radio" aria-checked="true" data-lane="epochs">
+              epoch replay <span class="lane-tag lane-tag-shipped">shipped</span>
+            </button>
+            <button class="lane" type="button" id="lane-snapshot" role="radio" aria-checked="false" data-lane="snapshot">
+              snapshot start <span class="lane-tag lane-tag-planned">planned</span>
+            </button>
+          </div>
+
+          <div class="req-figures">
+            <div class="req-fig">
+              <span class="req-num" id="req-count">0</span>
+              <span class="req-lbl">requests this session</span>
+            </div>
+            <div class="req-fig">
+              <span class="req-num" id="req-bytes">0 B</span>
+              <span class="req-lbl">bytes this session</span>
+            </div>
+          </div>
+
+          <p class="req-delta" id="req-delta"></p>
+          <p class="panel-note" id="req-note"></p>
+        </section>
+
+        <!-- ---- network ---- -->
+        <section class="panel" id="panel-network">
+          <div class="panel-head">
+            <h2>network</h2>
+            <span class="chip chip-priv" id="net-verdict">—</span>
+          </div>
+          <p class="panel-note">
+            every URL this page "fetched", verbatim. Read them: no key, no
+            address, no query string anywhere.
+          </p>
+
+          <div class="net-scroll">
+            <ul class="net-list" id="net-list"></ul>
+          </div>
+
+          <div class="net-actions">
+            <button class="btn btn-sm" id="btn-expand-net" type="button">expand all rows</button>
+            <button class="btn btn-sm" id="btn-scanner-selftest" type="button">
+              prove the scanner isn't vacuous
+            </button>
+          </div>
+          <p class="scanner" id="scanner-line">—</p>
+        </section>
+
+        <!-- ---- identity ---- -->
+        <section class="panel" id="panel-identity">
+          <div class="panel-head">
+            <h2>identity</h2>
+            <span class="chip chip-sim">SIMULATED</span>
+          </div>
+
+          <div class="ident-switch" role="radiogroup" aria-label="simulated wallet">
+            <button class="ident" type="button" role="radio" aria-checked="true" data-identity="A">wallet A</button>
+            <button class="ident" type="button" role="radio" aria-checked="false" data-identity="B">wallet B</button>
+          </div>
+
+          <dl class="kv" id="ident-kv"></dl>
+          <div class="notes" id="notes-list"></div>
+
+          <div class="verdict" id="ident-verdict" data-state="pending">
+            <div class="verdict-head" id="ident-verdict-head">run both wallets to compare</div>
+            <p class="verdict-body" id="ident-verdict-body">
+              sync wallet A, then switch to wallet B. The request list is
+              captured for each and compared URL by URL, in order.
+            </p>
+          </div>
+        </section>
+
+        <!-- ---- what is real ---- -->
+        <section class="panel panel-about" id="panel-about">
+          <div class="panel-head"><h2>what is actually shipped</h2></div>
+          <ul class="about-list" id="about-list"></ul>
+        </section>
+      </aside>
+    </main>
+
+    <!-- ================= bottom: staged actions ================= -->
+    <footer class="actionbar" id="actionbar">
+      <div class="action" data-action="deposit" data-state="locked">
+        <div class="action-head">
+          <span class="action-name">Deposit</span>
+          <span class="action-sub">shield 100.00 STRK</span>
+        </div>
+        <ol class="steps">
+          <li class="step" data-step="0">
+            <button class="btn step-btn" type="button" data-action="deposit" data-step="0">
+              <span class="step-idx">1</span><span class="step-label">approve STRK</span>
+            </button>
+          </li>
+          <li class="step-arrow" aria-hidden="true">›</li>
+          <li class="step" data-step="1">
+            <button class="btn step-btn" type="button" data-action="deposit" data-step="1">
+              <span class="step-idx">2</span><span class="step-label">shield</span>
+            </button>
+          </li>
+        </ol>
+        <p class="action-gate" data-role="gate"></p>
+      </div>
+
+      <div class="action" data-action="send" data-state="locked">
+        <div class="action-head">
+          <span class="action-name">Send</span>
+          <span class="action-sub">25.00 STRK, private</span>
+        </div>
+        <ol class="steps">
+          <li class="step" data-step="0">
+            <button class="btn step-btn" type="button" data-action="send" data-step="0">
+              <span class="step-idx">1</span><span class="step-label">select note</span>
+            </button>
+          </li>
+          <li class="step-arrow" aria-hidden="true">›</li>
+          <li class="step" data-step="1">
+            <button class="btn step-btn" type="button" data-action="send" data-step="1">
+              <span class="step-idx">2</span><span class="step-label">prove &amp; send</span>
+            </button>
+          </li>
+        </ol>
+        <p class="action-gate" data-role="gate"></p>
+      </div>
+
+      <div class="action" data-action="withdraw" data-state="locked">
+        <div class="action-head">
+          <span class="action-name">Withdraw</span>
+          <span class="action-sub">unshield 10.00 STRK</span>
+        </div>
+        <ol class="steps">
+          <li class="step" data-step="0">
+            <button class="btn step-btn" type="button" data-action="withdraw" data-step="0">
+              <span class="step-idx">1</span><span class="step-label">select note</span>
+            </button>
+          </li>
+          <li class="step-arrow" aria-hidden="true">›</li>
+          <li class="step" data-step="1">
+            <button class="btn step-btn" type="button" data-action="withdraw" data-step="1">
+              <span class="step-idx">2</span><span class="step-label">unshield</span>
+            </button>
+          </li>
+        </ol>
+        <p class="action-gate" data-role="gate"></p>
+      </div>
+
+      <div class="action action-aux">
+        <div class="action-head">
+          <span class="action-name">Discovery</span>
+          <span class="action-sub" id="aux-sub">automatic — feed pokes drive it</span>
+        </div>
+        <div class="aux-buttons">
+          <button class="btn btn-accent" type="button" id="btn-check-now" hidden>check now</button>
+          <button class="btn" type="button" id="btn-cancel-wait" hidden>cancel wait</button>
+        </div>
+        <p class="action-gate" id="aux-gate"></p>
+      </div>
+    </footer>
+
+    <!-- ================= templates ================= -->
+    <template id="tpl-log-line">
+      <li class="line" data-kind="info">
+        <span class="line-time"></span>
+        <span class="line-event"></span>
+        <span class="line-detail"></span>
+        <span class="line-dur"></span>
+      </li>
+    </template>
+
+    <template id="tpl-pending-line">
+      <div class="line line-pending" data-kind="pending">
+        <span class="line-time"></span>
+        <span class="line-event"><span class="caret" aria-hidden="true">▸</span> <span class="line-event-text"></span></span>
+        <span class="line-detail"><span class="line-detail-text"></span><span class="dots" aria-hidden="true"></span></span>
+        <span class="line-dur"></span>
+      </div>
+    </template>
+
+    <template id="tpl-net-row">
+      <li class="net-row">
+        <span class="net-method">GET</span>
+        <span class="net-url"></span>
+        <span class="net-status"></span>
+        <span class="net-bytes"></span>
+      </li>
+    </template>
+
+    <template id="tpl-net-group">
+      <li class="net-row net-group">
+        <button class="net-group-btn" type="button" aria-expanded="false">
+          <span class="net-disclosure" aria-hidden="true">▸</span>
+          <span class="net-url"></span>
+          <span class="net-bytes"></span>
+        </button>
+      </li>
+    </template>
+
+    <template id="tpl-note">
+      <div class="note" data-spent="false">
+        <span class="note-id"></span>
+        <span class="note-amount"></span>
+        <span class="note-block"></span>
+        <span class="note-state"></span>
+      </div>
+    </template>
+
+    <template id="tpl-kv">
+      <div class="kv-row">
+        <dt></dt>
+        <dd></dd>
+      </div>
+    </template>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

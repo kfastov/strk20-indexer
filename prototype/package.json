@@ -1,0 +1,17 @@
+{
+  "name": "strk20-wallet-prototype",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Clickable UX prototype of an in-browser STRK20 wallet doing keyless note discovery. Every number is simulated.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}
