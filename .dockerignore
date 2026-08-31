@@ -1,8 +1,9 @@
 # Build context = the sources cargo needs, and nothing else.
 #
-# `target/`, `data/` and `examples/` are the three that matter. `data/` alone is
-# ~600 MB of live mainnet + Sepolia feed and databases, and shipping any of them
-# into the context would make every build upload them to the daemon.
+# `target/`, `data/`, `examples/`, `ts/` and `prototype/` are the five that
+# matter. `data/` alone is ~600 MB of live mainnet + Sepolia feed and databases,
+# and shipping any of them into the context would make every build upload them
+# to the daemon.
 #
 # `examples/` is excluded for a second reason on top of its 515 MB (a vendored
 # starknet-privacy clone plus node_modules): the demo scripts write operator key
@@ -19,6 +20,15 @@ examples/
 .gitignore
 .env
 *.log
+
+# The TypeScript halves of the project. Neither is a cargo workspace member and
+# no Rust source references a path under either, so `cargo build -p
+# strk20-indexerd` never opens them — but both carry a committed `node_modules/`
+# and committed build output (`ts/demo/dist/`, replay fixtures), which is 133 MB
+# uploaded to the daemon on every build for nothing. Added after `ts/` landed;
+# the list above predates it.
+ts/
+prototype/
 
 # Docs and notes are not compiled.
 docs/
