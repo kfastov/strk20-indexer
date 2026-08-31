@@ -10,7 +10,7 @@
 // views, and the prover/discovery health checks.
 import fs from "node:fs";
 import { ec, hash, stark, constants, CallData } from "starknet";
-import { CFG, keystorePaths, providerFor, guardChain, printPool, deriveViewingKey, balanceOf, log, step, fail, fmt, mask, toWei, STRK } from "./lib.mjs";
+import { CFG, keystorePaths, providerFor, guardChain, printPool, deriveViewingKey, balanceOf, log, step, fail, fmt, mask, toWei, assertAddressAgrees, STRK } from "./lib.mjs";
 
 const cfg = CFG();
 const p = keystorePaths(cfg.keystore);
@@ -59,6 +59,10 @@ const publicKey = ec.starkCurve.getStarkKey(privateKey);
 const salt = publicKey; // conventional: salt = pubkey, as sncast/starkli do
 const constructorCalldata = CallData.compile({ publicKey });
 const address = hash.calculateContractAddressFromHash(salt, cfg.accountClass, constructorCalldata, 0);
+
+// Independently re-derive the address before we ever tell anyone to fund it.
+assertAddressAgrees(address, salt, cfg.accountClass, constructorCalldata);
+log(`address derivation cross-checked by an independent implementation ✓`);
 
 // verify the account class really is declared, or step 02 cannot possibly work
 try {
