@@ -1,66 +1,92 @@
 # Storage-proof availability on Starknet RPC — measured, 2026-08-31
 
-Why this document exists: the project's central integrity mechanism
-(`verify-root`, and now the snapshot anchor in
-[consumer-path.md](../../spec/consumer-path.md) §1.3/§1.4) assumes
-`starknet_getStorageProof` can be asked about a block of our choosing. Running
-the real binary against mainnet showed it cannot. These are the measurements
-that must constrain the design.
+> **CORRECTED 2026-08-31 (same day).** The first version of this document
+> concluded that historical storage proofs are unobtainable and that the
+> project must abandon block-of-our-choosing verification. **That conclusion
+> was wrong**, and it was wrong because of a measurement error described in
+> §3. Deep proofs *are* available, back to genesis, from an endpoint we
+> already use. The original design stands. The corrected findings follow; the
+> retracted reasoning is kept in §3 because the mistake is instructive.
 
-## The window is ~1024 blocks, not ~25-55k
+## 1. What is actually true
 
-Bisection against `https://rpc.starknet.lava.build`, mainnet pool
-`0x0403…812a`, head 14,151,406 at the time of the run:
+`starknet_getStorageProof` on `https://rpc.starknet.lava.build` answers for
+**any historical block, back to genesis** — but only on the subset of backends
+in its pool that run archive tries, so a single attempt fails often and a
+retry succeeds. Measured against the mainnet pool
+`0x0403…812a`, retrying until two successes:
 
-| block | result |
-|---|---|
-| head−0, −1, −2, −5, −10, −50, −200 | OK |
-| head−600, −800, −900, −950, −962, −968 | OK |
-| head−975, −1000, −5000 | error 42 |
+| block | blocks behind head | successes / attempts | proof `block_hash` vs real header |
+|---|---|---|---|
+| 9,000,000 | ~5,150,000 | 2 / 4 | **match** |
+| 11,263,135 | ~2,890,000 | 2 / 10 | **match** |
+| 12,000,000 | ~2,150,000 | 2 / 4 | **match** |
+| 14,000,000 | ~150,000 | 2 / 5 | **match** |
+| 14,140,000 | ~15,000 | 2 / 5 | **match** |
 
-Boundary: **OK at head−968, error 42 at head−975** — a sliding window of
-~1024 blocks (pathfinder's default trie retention). The
-implementation-notes.md §5 figure of "~25–55k blocks on lava" is wrong and is
-corrected here.
+Every returned proof carries a `global_roots.block_hash` equal to the block's
+real hash from `starknet_getBlockWithTxHashes`, so these are genuine proofs
+for the requested block, not a near-head substitute. Success rate is roughly
+one in two to one in five attempts; there is no depth at which it stops.
 
-## No public provider serves deep proofs
+**Consequence: verifying at a block of our choosing — `l1_accepted`, an epoch
+boundary, a snapshot basis — is possible.** It needs a bounded retry loop on
+error 42, exactly like the pruned-history retry that LIVE-1 already required
+for `getEvents`.
 
-Same request at block 14,000,000 and 14,140,000:
+## 2. Endpoint capability still differs, and still matters
 
 | endpoint | verdict |
 |---|---|
-| `rpc.starknet.lava.build` | error 42 at both depths; OK only inside the ~1024-block window |
-| `starknet-rpc.publicnode.com` | error 42 at **every** height including head — the method is not implemented at all |
+| `rpc.starknet.lava.build` | archive to genesis on ~a fifth to a half of attempts; **retry required** |
+| `starknet-rpc.publicnode.com` | error 42 at **every** height — does not implement proofs at all |
 | `starknet.drpc.org` | `-32601 method is not available` |
-| `starknet-mainnet.public.blastapi.io` | service discontinued (redirects to Alchemy) |
-| `free-rpc.nethermind.io/mainnet-juno` | no response to any method from here |
+| `starknet-mainnet.public.blastapi.io` | discontinued |
+| Alchemy (open demo key) | works from ~13.2M; error 42 below ~13.15M |
+| Juno-backed providers | head block only, by design — Juno's source says "We do not support historical storage proofs for now" |
 
-Sepolia is the same story from the other direction: proofs answer **only at the
-exact current head**, and a block becomes unprovable as soon as the next one
-lands (~1.7 s), per [sepolia-volume.md](sepolia-volume.md).
+So LIVE-6 stands unchanged: a capability gap must never be reported as a
+mirror mismatch, and failover must not move a proof request onto an endpoint
+that cannot serve it. What changes is that a *retry on the same endpoint* is
+the first thing to try, not a last resort.
 
-## What this forces
+Because the pool is anonymous and load-balanced, every accepted proof must be
+bound to the chain independently: check `global_roots.block_hash` against
+`starknet_getBlockWithTxHashes(block).block_hash` before believing the root.
+That check is cheap and was verified to hold at all five depths above.
 
-1. **Any block-of-our-choosing proof design is dead.** That includes
-   verifying at `min(l1_accepted, frontier)` (l1 lags head by ~5,000 blocks on
-   mainnet — measured 14,128,517 vs 14,123,420) and the per-epoch or
-   per-snapshot anchor at an epoch's end block (thousands of blocks old at cut
-   time). Live proof: 0 of 515 epochs in a completed mainnet backfill carry an
-   anchor, and `verify-root` returns error 42 every time.
-2. **Proof capture must be head-driven and opportunistic.** The only block that
-   is reliably provable is the one that just landed. So the indexer must
-   capture (block, block_hash, storage_root) *as it follows the head*, into an
-   append-only log, and verify its mirror at that moment.
-3. **This is not a weakening.** Pool slots are write-once (measured: 134,879
-   distinct slots across 139,131 writes, 96.9% first-writes), so a root match at
-   block B attests every write below B. A head-side check is therefore at least
-   as strong for mirror-completeness as an l1-side one; finality is a separate
-   concern, already handled by cutting epochs only below `l1_accepted`.
-4. **Endpoint capability is not uniform and must be tracked.** publicnode does
-   not implement proofs at any height, so failing over to it turns every check
-   into a false alarm. A capability gap must never be reported as a mirror
-   mismatch.
-5. **The stronger check remains available to whoever wants it**: an operator
-   running their own archive node with tries retained can verify at any block.
-   That is an opt-in configuration, not something a public-provider deployment
-   can assume.
+## 3. The measurement error, kept as a lesson
+
+The retracted conclusion came from a bisection: proofs answered OK at head−968
+and error 42 at head−975, so a ~1024-block sliding window was inferred (and
+attributed to pathfinder's default trie retention, which is real — the default
+really is 20 blocks kept, and only `--storage.state-tries=archive` at database
+creation changes it).
+
+The flaw: **a bisection assumes a deterministic predicate.** Lava is an
+aggregator; "does this block have a proof" is a property of whichever backend
+answered, not of the block. Every "error 42" was read as evidence about depth
+when it was evidence about routing. One retry at head−975 would have falsified
+the whole conclusion.
+
+This is the *same* root cause as LIVE-1 (a pruned-history error that succeeds
+on retry) and LIVE-8 (continuation tokens routed to a foreign backend). The
+lesson had already been written down in this project and was still not applied
+to the next measurement: **against an aggregating endpoint, never conclude
+anything from a single failed request.**
+
+## 4. What the earlier version got right, and keeps
+
+- Pool slots are write-once (134,879 distinct slots across 139,131 writes), so
+  a root match at block B attests every write at or below B. Still true, still
+  useful — it is why a single verification point is worth so much.
+- `verify-root` must be three-valued: `MATCH` / `MISMATCH` / `UNAVAILABLE`.
+  Conflating "we could not check" with "the mirror is wrong" is what made a
+  capability-poor endpoint look like corruption. Still required.
+- An append-only anchors log is cheap and worth keeping as a running audit
+  trail. It is no longer a *replacement* for per-epoch anchors — those are
+  obtainable — but a complement.
+- Self-hosting an archive node remains the strict-SLA option: pathfinder with
+  `--storage.state-tries=archive`, chosen at DB creation and immutable after,
+  requiring a full genesis resync (the published snapshot is trie-pruned and
+  cannot be upgraded to archive) at an inferred ~2 TB.

@@ -133,3 +133,65 @@ re-ingests blocks *below* the frontier, and `insert_block_data` let that pull
 the ingest cursor backwards — a backfill that hit a mismatch then looped
 forever (rescan rewinds, next cycle re-advances, repeat). The cursor now only
 advances there; `rollback_above` remains the only thing that moves it down.
+
+## Repair pass on the live-run fixes (2026-08-31)
+
+Two independent reviews of the fix pack (test-vacuity and adversarial) found
+one critical regression, two false-alarm generators, and three tests that did
+not pin what they claimed. The corrections, and the design decisions worth
+recording rather than rediscovering:
+
+- **verify-root has ONE candidate block, not a search.** The target is
+  `min(frontier, rpc_head)`: pinned from below because a root above the frontier
+  covers writes we have not ingested, and from above by what the chain has. The
+  original fix wrapped that in a four-probe loop, but the target is recomputed
+  identically every time, so the loop could only ever return the same answer at
+  a cost of eight RPC calls and 1.4 s. It is now a single attempt. The
+  consequence is deliberate and permanent: while `head - frontier` exceeds the
+  storage-proof window — the whole deep-backfill phase — verify-root can only
+  answer UNAVAILABLE, and the check becomes live once the mirror catches up.
+  `t12_a_frontier_far_below_head_is_unavailable_not_a_failure` pins it.
+- **The §5.6 recovery rescan follows the verification block.** It used to stop
+  at `min(l1_accepted, frontier)`; since LIVE-4 the check happens ~5000 blocks
+  higher, so a divergence above `l1_accepted` fell outside the rescan,
+  reproduced on every retry, and stopped epoch publication permanently with
+  `/health` latched DEGRADED. The rescan now runs to the frontier.
+- **Anchors are reorg-scoped.** Head-side anchors sit far above `l1_accepted`
+  and are therefore reorgable; `rollback_above` now drops them with the rest of
+  the orphaned tail and the log is republished, or every client would report a
+  permanent false divergence the publisher manufactured.
+- **An anchor without a chain block hash is not published.** Substituting
+  `Felt::ZERO` for a missing `global_roots.block_hash` produced the same false
+  alarm from the other direction. The block header is used as a fallback; when
+  neither is available the anchor is dropped.
+- **Capture cadence is per ingest cycle, not per cut batch.** Tying it to a cut
+  meant one anchor per `epoch_size` (10 000) blocks on mainnet, which is not
+  "opportunistic". The probe still lives in the cutter, not in `ingest.rs` — it
+  depends on the mirror being complete to the frontier and on the root
+  comparison — and is skipped while the frontier has not moved.
+- **The tail is published before the cut.** `/health` reports the new head as
+  soon as the ingest cycle commits it, so a consumer that polls `/health` and
+  then fetches `head.ndjson` must not receive a tail from before that block; the
+  cut path (verify-root, anchor probe, a §5.6 rescan) can take seconds. The head
+  is regenerated again after any cut, when the epoch floor moves.
+- **"Could not check" is never "nothing was wrong".** `fetch_anchors` now
+  distinguishes 404 (the feed publishes none) from every other transport
+  outcome, and `verify-anchors` exits non-zero unless it actually checked at
+  least one anchor, reporting a `status` that says which case it was.
+- **Chain id is enforced, not merely stamped.** The client pins it on first sync
+  and compares it on every later one exactly as it does the pool, genesis and
+  manifest must agree, and each epoch payload is bound to the chain and pool the
+  feed declares (`verify_epoch_binding`). `--network` stays an additional
+  external assertion, not the only check.
+- **Storage proofs use a short transport budget and never strand on one
+  endpoint.** An unreachable or throttled endpoint is not an answer about the
+  proof, so `get_storage_proof` moves to the next candidate instead of
+  returning; only semantic answers short-circuit. Sustained HTTP 429 escalates
+  once to the next endpoint after the in-place budget is spent — still not
+  "429 counts toward failover", but no longer fatal to an unattended backfill.
+- **`anchors.ndjson` canonicality is a write-side property.** The bytes are a
+  pure function of the anchor SET; the set itself is operator-specific because
+  captures are opportunistic, so two honest mirrors legitimately differ.
+  `parse_anchors` validates structure but deliberately accepts non-canonical
+  spellings — a reader cannot detect a non-canonical publisher and must not be
+  written as if it could.

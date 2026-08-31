@@ -2742,6 +2742,13 @@ Every one is written in quote-and-replace form at the section named:
 
 ## 11. Measured-reality amendment — storage proofs (2026-08-31)
 
+> **RETRACTED THE SAME DAY — read §12 instead.** Everything below rests on the
+> claim that historical storage proofs cannot be obtained. That claim came from
+> a bisection against an aggregating endpoint and is FALSE: deep proofs are
+> available back to genesis with a retry. See
+> [../research/live/proof-window.md](../research/live/proof-window.md) §1 and
+> §3. The text is kept only because §12 refers to it.
+
 Everything above was designed against a premise that running the real binaries
 against mainnet falsified. This section supersedes the clauses it names. The
 measurements are in [../research/live/proof-window.md](../research/live/proof-window.md)
@@ -2846,3 +2853,53 @@ publish per-epoch anchors, and satisfy the original §1.3/§1.4 text. That path
 stays supported as an opt-in configuration and is the strictest mode we offer.
 It is not something a public-provider deployment may assume, which is exactly
 the mistake this amendment corrects.
+
+
+---
+
+## 12. Correction to §11 — historical proofs ARE obtainable (2026-08-31)
+
+§11 told this spec to abandon per-epoch and per-snapshot anchors because
+`getStorageProof` appeared to answer only within ~1024 blocks of head. That
+measurement was a bisection over a *nondeterministic* predicate: lava routes
+each call to a different backend and only some run archive tries, so error 42
+reports which backend answered, not how old the block is. Retrying, proofs
+come back for any block — verified at 5.15M blocks behind head, with each
+proof's `global_roots.block_hash` matching the real block header.
+
+**Therefore §A1 as the council wrote it stands.** Specifically:
+
+1. **§1.3's required anchor sidecar is reinstated.** A snapshot's basis block
+   can be proved. Obtain it with a bounded retry loop on error 42 against a
+   proof-capable endpoint.
+2. **§1.4 step 4's basis-block root check is reinstated**, and so is the batch
+   `verify-root` at `min(l1_accepted, frontier)` — l1 lagging head by ~5,000
+   blocks is not an obstacle.
+3. **Every accepted proof must be bound to the chain**: compare
+   `global_roots.block_hash` with `starknet_getBlockWithTxHashes(block)`
+   before trusting `contract_leaves_data[].storage_root`. The proof pool is
+   anonymous and load-balanced; this check is what makes a retry-until-success
+   loop safe rather than a way to accept whichever answer we liked.
+4. **Retry, don't fail over.** Error 42 means "this backend cannot", not "this
+   block cannot". Retry the same endpoint a bounded number of times before
+   concluding `UNAVAILABLE`, and never move the active endpoint on account of
+   a proof refusal (LIVE-6 unchanged: publicnode implements no proofs at any
+   height, so failing over to it guarantees a false alarm).
+
+**What §11 contributed that survives:**
+
+- `verify-root` stays three-valued — `MATCH` / `MISMATCH` / `UNAVAILABLE` —
+  because a capability gap must never read as mirror corruption.
+- `feed/anchors.ndjson` stays, demoted from replacement to complement: a cheap
+  running audit trail that also covers epochs cut before proofs were sought.
+- The reachability check of §11.3 stays as a **fallback** for any snapshot
+  whose basis-block anchor could not be obtained, and as an extra check that
+  validates the intervening epochs. It is no longer the primary grounding.
+- Write-once slot semantics (measured: 134,879 distinct slots across 139,131
+  writes) remain the reason one verification point attests everything below it.
+
+**Method note, binding on future work in this repo:** against an aggregating
+endpoint, a single failed request proves nothing. This is the third defect in
+this project with that root cause (LIVE-1 pruned history, LIVE-8 continuation
+tokens, and this retracted measurement). Any conclusion of the form "the node
+cannot do X" must be established by a retried, multi-attempt probe.

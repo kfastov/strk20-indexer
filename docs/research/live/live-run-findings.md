@@ -281,6 +281,100 @@ from "slot is populated" would be wrong. Our engine gets this right because it
 reads nullifiers, but nothing in the suite currently pins it against a *live*
 spend.
 
+## Session 8: the client's own-RPC proof check works live — and why
+
+`strk20-sync verify` against a public Sepolia RPC, on the two notes above:
+
+```
+all_ok: true
+pool_class_hash: 0x7e2bbd7c…de33f
+storage_root:    0x2c7cdae493453a87660db1d2914fd17867eb81798d10613ba6887906c41aaa1
+note 0xce526b28…  note: proven   spent_state: spent-proven
+note 0x3aa1d44c…  note: proven   spent_state: unspent-proven
+```
+
+Both notes proven against Starknet state roots, both spent-states proven, with
+the indexer entirely out of the trust path.
+
+This is worth stating because it looks like it contradicts LIVE-4, and does
+not — it sharpens it. **The client never needs a historical proof.** Pool slots
+are write-once, so a note created at block 14,339,115 still occupies its slot at
+head, and its nullifier slot is present-or-absent at head; checking *current*
+state answers both questions. Only the server's `verify-root` asked about an
+old block, and that is exactly the query the ~1024-block window forbids.
+
+The same observation is what makes the §11 amendment sound rather than a
+climbdown: write-once means a root match at a recent block attests everything
+below it, so head-side verification is not a weaker substitute for l1-side
+verification — it is the same statement, obtained from a query providers will
+actually answer.
+
+## Session 9: verify-root works — and immediately finds real data loss
+
+With LIVE-4 (window-aware block choice) and LIVE-7 (empty-array params) fixed,
+`verify-root` ran against mainnet for the first time. It did not print OK:
+
+```
+VERIFY-ROOT MISMATCH at block 14154790:
+local 0x58a49c27f1509a3542fc9e53c4245d10e807f2e6b4cc6577bfc3468e254d273
+ != chain 0x31eeb9485ae623c4b65d3cf05f201e0aacf0c34de3349c73fbbced07ff5174c
+```
+
+Reproducible, stable across runs, and it survived the automatic rescan. So the
+mirror really was wrong — the check earned its keep on its first working run.
+
+**Narrowing it down** (each step ruling out a hypothesis):
+
+| test | result |
+|---|---|
+| zero-valued slots leaking into the trie | 5 exist, all correctly filtered by `full_slot_set_as_of` — not the cause |
+| per-block write completeness, 150 sampled ingested blocks | 150/150 match the chain's `storage_entries` count exactly |
+| slot values, 120 sampled slots via `getStorageAt` at the verified block | 120/120 identical |
+| **block coverage: full re-count of pool events from the chain** | **chain 120,135 events in 28,655 blocks; ours 119,646 in 28,532 — 139 blocks and 489 events missing** |
+
+Spot-checked, the loss is total for the affected blocks: block **11,263,135**
+has 6 pool events and 4 pool storage writes on chain, and our mirror has **no
+row for it in any table**. Same for 11,279,543. The missing blocks come in
+contiguous clusters (11,263,874–11,263,880; 11,265,889–11,265,893;
+11,279,543–11,279,756; …).
+
+### LIVE-8 (defect, CRITICAL): continuation-token paging is unsound across an aggregating endpoint
+
+The scan loop is internally correct — it accumulates all pages for a range into
+a `BTreeMap` and restarts if *our* failover fires. The flaw is the assumption
+underneath it: that a continuation token means the same thing on the next
+request. **It does not.** `rpc.starknet.lava.build` is an aggregator; successive
+calls to the same URL reach different backend nodes (already visible in this
+project as nondeterministic pruned-history errors and a `specVersion` that
+answers 0.8.1 or 0.10.x depending on the call). A continuation token is
+node-local state. Handed to a different node, it does not error — it resumes
+from somewhere else, and the events in between are silently dropped.
+
+Demonstrated directly, same range `11,260,000–11,285,000`, same endpoint:
+
+| method | pages | distinct blocks found |
+|---|---|---|
+| paged, `chunk_size=1000` | 13 | **2,628** |
+| paged, `chunk_size=200` | 62 | **2,608** — 19 blocks fewer |
+
+Two paginated scans of an identical range disagree, with no error raised in
+either. More pages means more chances to be routed elsewhere, so loss scales
+with page count — which is exactly why a 5.2M-block backfill with 150+ pages,
+restarted 27 times, lost 139 blocks.
+
+**Why nothing caught it earlier:** the fixture RPC in the test suite is a single
+honest process, so its tokens are always valid — the synthetic harness cannot
+express this failure at all. The one mechanism that *could* catch it is
+`verify-root`, and LIVE-4 had prevented it from ever running.
+
+**Fix direction:** stop trusting cross-request pagination. Subdivide the scan
+range until every window is answered in a **single page with no continuation
+token**, and take the union. A single response carries no cross-request state,
+so it is sound under any routing. Cost is bounded because pool-active blocks are
+sparse. `verify-root` stays the backstop that proves the result, and the fixture
+RPC needs a fault mode that returns a *plausible but wrong* page for a foreign
+token, so the suite can express this class of failure at all.
+
 ## Network facts confirmed live (2026-08-30)
 
 - Mainnet l1_accepted at time of run: 14,108,361; the user's own
