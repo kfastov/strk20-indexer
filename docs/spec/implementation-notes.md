@@ -39,13 +39,16 @@ implemented as specified.
    cursor interop), and the reference serde schema round-trip. Porting the
    upstream `devnet-dump.json.gz` harness is the top testing roadmap item.
 
-5. **verify-root runs once per cut batch** at `min(l1_accepted, frontier)`,
-   not per historical epoch: `starknet_getStorageProof` covers only a recent
-   window (~25–55k blocks on lava), so deep-backfill epochs cannot be
-   root-checked individually — but the cumulative mirror check at the batch
-   head subsumes them (a missing historical write corrupts the current root
-   too, because pool slots are write-once). Per-epoch anchors remain
-   best-effort sidecars, absent outside the proof window, as R7 specifies.
+5. **verify-root runs once per cut batch** at `min(frontier, rpc_head)`, not
+   per historical epoch: `starknet_getStorageProof` covers only a recent
+   window, so deep-backfill epochs cannot be root-checked individually — but
+   the cumulative mirror check at the batch head subsumes them (a missing
+   historical write corrupts the current root too, because pool slots are
+   write-once). **Corrected 2026-08-31:** the window was measured at ~1024
+   blocks, not the ~25–55k recorded here, while `l1_accepted` lags head by
+   ~5000 — so the original `min(l1_accepted, frontier)` target was outside
+   the window by construction and the check had never once run against
+   mainnet. See §"Live-run fixes" below.
 
 6. **trybuild → `compile_fail` doctests** for the two privacy locks
    (`SecretFelt: !Serialize`, `FeedTransport` signature). Same guarantee,
@@ -81,3 +84,52 @@ All 22 are fixed; highlights that changed observable behavior:
 - `strk20 mirror-pull` ingests verified epochs into the DB (real bootstrap);
   `strk20-sync --full-resync` exists; `--watch` emits each note once and
   survives transient transport errors; `verify` fails on unprovable slots.
+
+## Live-run fixes (2026-08-31)
+
+Six defects measured against real networks
+([../research/live/live-run-findings.md](../research/live/live-run-findings.md))
+plus the Sepolia chain profile. Behaviour that changed:
+
+- **LIVE-1** `RpcClient::call` classifies JSON-RPC errors instead of treating
+  them all as fatal. A pruned-history answer (`-32603 … has been pruned`) is a
+  *provider capability* answer — lava routes the same request to an archive or
+  a pruned backend nondeterministically — and is retried in place with backoff,
+  bounded by `CAPABILITY_RETRIES`, with the provider's own message preserved
+  when the bound is hit. Semantic errors (block not found, invalid params) stay
+  fatal on the first answer.
+- **LIVE-2** the scan phase emits a periodic `scan progress` INFO line
+  (`cursor`, `scan_to`, `blocks_ingested`, `events`, `endpoint`), cadence
+  `--progress-secs` (default 15, `0` = every page). Tracing now writes to
+  stderr with ANSI only on a terminal, so results on stdout stay parseable.
+- **LIVE-3** HTTP 429 backs off in place on its own budget and never increments
+  the consecutive-failure counter, so throttling can no longer flip a deep
+  backfill onto an endpoint that cannot serve the range.
+- **LIVE-4** verify-root probes `min(frontier, rpc_head)` — inside the live
+  proof window — and distinguishes three outcomes: `Verified`, `Unavailable`
+  (a provider gap; never latches `verify_root_failed`, never DEGRADED, exit 0),
+  and a `VERIFY-ROOT MISMATCH` error. Going above the frontier would be unsound:
+  the chain root there covers writes we have not ingested.
+- **LIVE-5** the feed publishes `feed/anchors.ndjson`, an append-only,
+  canonically encoded log of `(block, block_hash, storage_root, class)` captured
+  whenever a block was provable. `strk20-sync verify-anchors` folds the local
+  mirror to each anchor block and recomputes the root. The per-epoch anchor
+  sidecar is kept and still written when capturable. Trust meaning is documented
+  in `crates/client/src/anchors.rs`: the log is not content-addressed, so what
+  the check establishes is agreement between the folded mirror and the root the
+  publisher read from a chain proof.
+- **LIVE-6** storage proofs are treated as a per-endpoint capability learned at
+  runtime: `get_storage_proof` asks endpoints in capability order and never
+  moves the active endpoint on a proof refusal, so a failover to a
+  proofs-less provider cannot turn every root check into a failure.
+- **Fix pack B** `--network mainnet|sepolia` selects a whole verified profile
+  (pool, genesis block, chain id, decoder map, default RPC endpoints); every
+  explicit flag still overrides it field by field. `strk20-sync sync --network`
+  refuses a feed whose stamped chain id is not the expected one, before a single
+  epoch is applied.
+
+One latent defect surfaced while fixing the above: the §5.6 recovery rescan
+re-ingests blocks *below* the frontier, and `insert_block_data` let that pull
+the ingest cursor backwards — a backfill that hit a mismatch then looped
+forever (rescan rewinds, next cycle re-advances, repeat). The cursor now only
+advances there; `rollback_above` remains the only thing that moves it down.

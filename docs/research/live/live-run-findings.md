@@ -181,6 +181,70 @@ class `0x67dddd89…76b554d`. Once LIVE-4/LIVE-7 are fixed, our mirror must
 recompute exactly that root from its own 134,879 slots — the strongest
 end-to-end statement the project can make about a real mirror of real history.
 
+## Session 5: end-to-end on Sepolia, with a note we created ourselves
+
+We minted our own note on the Sepolia pool (see
+[sepolia-shield-run.md](sepolia-shield-run.md)): tx
+`0x701e056354f9e0e17e86b7d63d4403cb46e239e7061806e9f5e02ff47d65f49`, block
+**14,339,115**, 3 STRK, registration + deposit + note creation in one
+`apply_actions`. Then the whole read path was run against it.
+
+**Sepolia backfill:** completed in a single process run (no pruned-range
+aborts — publicnode Sepolia serves the full range), 19,030 events across 4,455
+pool-active blocks, 606 epochs, genesis 8,271,125 → head 14,340,535. Our
+transaction's block carries exactly the three expected events (`ViewingKeySet`,
+`Deposit`, `EncNoteCreated`).
+
+**Keyless discovery found our note, and only our note:**
+
+```json
+{"token":"0x4718f5a0…c938d","index":0,
+ "note_id":"0xce526b286fed962b9e3942771c5e519c69b8677dc24136ae380ba523a067ff",
+ "nullifier":"0x6f3769425be9f731773213fb6917264bfda572b2eeda180513d5cf5cbb71662",
+ "amount":"3000000000000000000","block_number":14339115,"spent":false}
+```
+
+in **1.19 s**. The `note_id` and amount match what the SDK reported at mint
+time, independently derived — the indexer never saw the SDK's output, only the
+chain.
+
+**The no-key claim, proven on live traffic.** A recording proxy
+(`data/sepolia/wireproxy.py`) sat between client and server for two syncs:
+wallet A = our real address + viewing key (finds the note), wallet B = an
+unrelated address + key (finds nothing).
+
+| | result |
+|---|---|
+| viewing key in wallet-A traffic | **not found** in any of 13 encodings (minimal hex, padded, decimal, upper/lower, 0x-prefixed, raw BE/LE bytes) |
+| address in wallet-A traffic | **not found** in any of 13 encodings |
+| request streams A vs B | **byte-identical**: 609 requests, 64,509 bytes each |
+| detector self-test | the same scanner **does** find the key when planted in a synthetic body |
+
+The requests are exactly what the design promises: `genesis.json`,
+`manifest.json`, and a sequence of `epochs/{n}.strk20e.zst` — public static
+files, in the same order, for both wallets.
+
+## Session 6: an unannounced contract upgrade, live, mid-run
+
+While the Sepolia server was running, the pool was **upgraded on chain** at
+block **14,339,893** — 778 blocks after our own note landed, and hours after
+the morning's research recorded `0x56ab118a…` as current. New class:
+`0x7e2bbd7ccc1e68b2695caef70aeb2a3be6cd017b5d5159278ba08f2d8de33f`, a sixth
+Sepolia class nobody told us about.
+
+The system behaved exactly as acceptance leg (i) simulates synthetically:
+
+- `class_history` recorded the new class at its block automatically;
+- typed decoding switched to `decode_state=degraded`, `/health` → `DEGRADED`,
+  with a WARN naming the unknown class;
+- **raw ingest and the feed continued uninterrupted** — the epochs kept cutting
+  and the keyless discovery above ran against this very feed and still found
+  our note, because discovery reads pool storage, not decoded event types.
+
+A synthetic test asserting this is worth something; the same thing happening
+unannounced, in production, during the run, is worth more. Recovery is
+`--allow-class 0x7e2bbd7c…` once the new ABI is diffed.
+
 ## Network facts confirmed live (2026-08-30)
 
 - Mainnet l1_accepted at time of run: 14,108,361; the user's own
