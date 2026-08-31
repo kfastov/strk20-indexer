@@ -1,0 +1,18 @@
+[package]
+name = "strk20-consumer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Block B: the host-independent STRK20 consumer state machine (feed apply/verify, discovery passes, note registry, report). No SQLite, no tokio, no HTTP — one implementation for the native client and the browser."
+
+[dependencies]
+strk20-feed = { workspace = true, features = ["mpt"] }
+discovery-core = { workspace = true }
+starknet-core = { workspace = true }
+starknet-types-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
