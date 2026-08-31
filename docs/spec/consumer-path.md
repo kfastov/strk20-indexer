@@ -121,6 +121,14 @@ wrapper — the least testable layer. P1's mechanical locks are mandatory on top
 thrown error strings and exported blobs, single-`[patch]` fork). These are
 orthogonal: P3 wins the interface, P1 wins the proof.
 
+> **C1 amended by §0.5 S2 (2026-08-31).** The *principle* — every decision out
+> of the TS wrapper — is preserved and strengthened. The *instance*
+> `check_manifest` is withdrawn: with `apply_feed` shipped in
+> `crates/consumer`, a standalone staleness method is a second arbiter beside
+> `apply.rs:197-207`, and two arbiters drift. Staleness is now a field on the
+> terminal Step (§3.3); `DiscoverOut` and `export_reference_cursor` are
+> unchanged.
+
 **C2 — wasm entropy: P1's `entropy32` parameter vs P2/P3's `getrandom` js
 feature.** Maintainer vetoed the parameter (misuse surface); auditor and
 integrator vetoed the dependency (it breaks the empty-import purity gate).
@@ -311,6 +319,18 @@ on a non-loopback keyed bind · TOFU-only client chain identity · silent
 `get_events` clamp to the history floor · maintainer's-laptop fold gate ·
 recompress-and-return in the DB transport.
 
+Added by §0.5 (2026-08-31): the §3.3 push ABI (`apply_snapshot`/`apply_epoch`/
+`apply_head`) · a second staleness arbiter beside `apply_feed` · a prefix
+denylist over key-derived meta keys · a clock or any time source in the wasm
+import allowlist · `MemStore`'s base collapsed to latest-per-slot ·
+`refresh_spent`/`prune_missing_notes` as overridable default trait methods ·
+a second `MemStore` authored in the wasm crate · verification obligations
+in the TypeScript wrapper · a key in any constructor · `DelegatedClient` on the
+main entry point · a demo path that submits a transaction or embeds an account
+key · an unqualified `IDENTICAL`/`DIFFERENT` verdict rendered across two feed
+states · any performance number in the README or a live demo panel that was not
+measured.
+
 ---
 
 ## 0.4 Preliminary refactor (prerequisite for everything below)
@@ -405,6 +425,15 @@ above requires it), `notes::{NoteSet, NoteRec}`, and `report::SyncReport` —
 **one report schema for the native CLI, the wasm module, `serve`, and npm**, so
 a single golden oracle file pins all four.
 
+> **§0.4.1 superseded in part by what landed — see §3.10 (2026-08-31).** The
+> shipped trait is row-level, not `NoteSet`-valued; the apply half is one
+> `apply_feed` rather than three pushed entry points; `sync_once`,
+> `refresh_spent`, `prune_missing_notes` and the pass loops are free functions
+> generic over `ConsumerStore`; and `MemStore` already exists in this crate.
+> §3.10 lists the deltas that remain owed, including two blocking corrections.
+> The one sentence above that is unchanged and load-bearing is the last: **one
+> report schema, one golden oracle.**
+
 `crates/client` keeps the SQLite `FeedStore` (an impl of `ConsumerStore`),
 `ClientView` (unchanged, `spawn_blocking`), transports, CLI, MPT verify.
 Deps of `crates/consumer`: `strk20-feed`, `discovery-core`, `serde_json` —
@@ -420,6 +449,171 @@ them); `indexerd` re-exports for source compatibility. This is what lets
 `strk20-sync serve` speak the reference wire without the client crate
 depending on `strk20-indexerd` — base §3's dependency-direction invariant
 ("nothing depends on `strk20-indexerd`") stays intact and enforceable.
+
+
+## 0.5 Second-pass conflict resolutions (ts-api council, 2026-08-31)
+
+§0.1–0.3 resolved the first council (consumer-path). A second council revised
+§A3/§A4 against the shipped `crates/consumer` and against the verified
+positioning fact that our customer holds a viewing key; its three judges — a
+wallet engineer who has to ship it, a privacy auditor, and a five-year
+maintainer — disagreed on every one of the three questions. Each disagreement is
+recorded here with the ruling and the reason, because a synthesis whose
+trade-offs are invisible is one refactor away from being undone. Rulings are
+argued from merit; a judge majority is evidence, never the argument.
+
+**S1 — which ABI wins for feed apply. Three judges, three winners.** Wallet
+engineer: batched `plan()`/`apply_staged()`. Auditor: `need()`/`provide()`/
+`advance()`, because `need()` takes no arguments and is therefore the strongest
+structural statement of blindness. Maintainer: the `sync_begin`/`sync_supply`
+trampoline, because the module emits the request set by *running* the real
+`apply_feed` rather than by predicting it. **Ruling: the trampoline (§3.3), plus
+an advisory `prefetch` hint on the Step the module already emits.** The
+maintainer's objection is the one that compounds over five years — `plan()` and
+`need()` are a *second* derivation of the fetch list that must stay in step with
+what `apply_feed` actually asks for, and the drift is silent (over-prediction
+wastes bandwidth, under-prediction adds round trips, neither fails a test). The
+wallet engineer's objection to the trampoline is real and fatal if unanswered —
+one outstanding request means 515 sequential round trips on mainnet — and the
+maintainer's own graft answers it without a second authority: demote the
+predicted list from an ABI method to a hint field, keep the module asking for and
+verifying each artifact individually. The auditor's blindness argument survives
+intact and is strengthened: the request sequence is now the output of a function
+whose inputs contain no key at all, which §3.9's proptest asserts directly.
+
+**S2 — `check_manifest`.** Auditor and maintainer: delete it (two staleness
+arbiters drift). Wallet engineer: silent, having adopted an ABI that folds it in.
+**Ruling: deleted**, staleness becomes a field on the terminal Step. This
+withdraws the *instance* named in §0.2 C1 while preserving and strengthening its
+*principle*; the amendment is written into §3.3 so the withdrawal cannot be read
+as drift.
+
+**S3 — key retention in the module.** Wallet engineer: must not ship, hold as a
+v2 option. Auditor: ship only as the backing for `staticAccount`, with the
+isolation claim corrected. Maintainer: ship as an opt-in `client.unlock(account)`
+requiring a worker. **Ruling: deferred to v2 with a named trigger (§3.3).** The
+deciding fact is the auditor's own correction — `WebAssembly.Memory.buffer` is a
+plain `ArrayBuffer` readable by any same-origin script in the same worker, so
+wasm linear memory is not a security domain relative to the JS heap beside it.
+The only real benefit left is that `zeroize` executes, and it accrues to the one
+caller that already holds the bytes for its process lifetime. The costs — a
+key-holding `Engine`, a larger key-accepting entry set, a lifecycle in the ABI's
+first version — are paid by everyone. If it ships later, it ships in the
+maintainer's shape, with the auditor's memory-dump leg as a blocker.
+
+**S4 — slicing discovery by wall clock.** All three judges rejected the clock
+import. **Recorded as unanimous:** `discover_step(handle, max_ops)`, calibrated
+in TypeScript (§3.3, §3.9). Reopening a purity gate by redefining one of its four
+nouns is the move the gate exists to prevent, and an ops budget makes the slicing
+deterministic, which is what lets leg **δ** assert that sliced and unsliced runs
+agree.
+
+**S5 — `MemStore`'s base as latest-per-slot, with a new error band.** Auditor and
+maintainer: breaks `check_reachability` and `verify_anchors`, both of which fold
+roots at anchors far below `last_epoch_to`. **Ruling: rejected** (§3.2); the full
+write log stays and `BOUND_UNSUPPORTED` is not added. The proposal would have
+traded the only grounding a cold-started client obtains for ~3 % of the smallest
+memory term.
+
+**S6 — `refresh_spent` / `prune_missing_notes` as default trait methods.**
+Wallet engineer and maintainer: must not ship — they are already free generic
+functions, which cannot be overridden, and the rule they encode (a spent note's
+slot is not cleared) is the one live-run §7 proved subtle. Auditor: had asked for
+them on the trait. **Ruling: free functions stay** (§3.10 item 6).
+
+**S7 — the owner scope.** The auditor's design has `notes`/`upsert_note`/… return
+`SCOPE_CLOSED` unless an owner scope is open. **Ruling: not adopted in that
+form** (§3.2). It would break the conformance leg, which runs the shipped
+`sync_once` over `MemStore` natively with no facade to open a scope, and it would
+make the two stores behave differently on precisely the path the leg exists to
+compare. The two properties it was buying are obtained instead by the closed
+export allowlist (nothing key-derived can be serialised) and by
+`discover_finish`/`discover_abort` clearing and zeroizing the session. All three
+judges' actual requirement — **allowlist, never a prefix denylist** — is adopted
+in full, together with the cursor/generation trait methods that make the mistake
+unrepresentable rather than merely refused.
+
+**S8 — ring 6 in the browser.** Wallet engineer and auditor: graft the proposed
+`anchor_request()` / `verify_anchor()` pair, because a browser must be able to
+reach `anchored`. Maintainer: that pair re-implements candidate selection, the
+`MAX_GROUNDING_CANDIDATES` truncation, the MATCH/MISMATCH/UNAVAILABLE
+classification and the reset-on-mismatch discipline in TypeScript — the same
+mistake §3.3 made for the apply half — and `ProofSource` can simply be parked
+like the transport. **Ruling: the maintainer's mechanism, delivering the other
+two judges' goal** (§3.3.1's `Step::Rpc`). Choosing the trampoline in S1 is what
+makes this free.
+
+**S9 — the tripwire's failure mode.** The trampoline's "pending with no armed
+request" was specified as a `panic!`. The wallet engineer noted that
+`mem.rs`'s `lock()` uses `.expect("mem store poisoned")`, so a panic while a
+guard is live kills the Engine for the session. **Ruling: it is an `Err`, and
+`lock()` recovers from poisoning** (§3.2). R-J's tripwire for the *engine*
+driver is unchanged.
+
+**S10 — npm winner.** Wallet engineer and maintainer: the integrator surface
+(`Account`, key-free `sync()`, `signal`, progress, multi-account,
+`anchorPolicy`). Auditor: the privacy surface (`net.ts` chokepoint, closed
+unions, delegated subpath). Their graft lists agree almost completely.
+**Ruling: the integrator's shapes with the auditor's mechanisms and the
+performance paper's browser realities**, which is what all three judges' own
+adoption lists describe (§4.2, §4.10, §4.11).
+
+**S11 — the `persist` default.** Auditor and maintainer: `'both'`. Wallet
+engineer: `'both'` on the epochs lane only; the snapshot lane's default belongs
+to a pre-registered gate that has not run. **Ruling: default `'both'`, justified
+solely by the L2 measurement, with the snapshot lane's default explicitly owned
+by §4.6's L1 FILL-IN and expected to become `'raw'` if it measures ≤ 500 ms.**
+Nobody may flip that arm by argument.
+
+**S12 — demo winner. Again three judges, three winners.** Wallet engineer: the
+cold/warm columns and the honesty rules. Auditor: the network panel. Maintainer:
+the cards/stages/log shell and "discovery makes zero requests". **Ruling: all
+three, in the arrangement each judge's own adoption list describes** — the
+shell resolves the brief-versus-orchestrator tension explicitly (cards never
+scroll away, the log scrolls, the mutating last line is in the log), the columns
+are the top card, the panel is the side card. Specified in
+[demo-app.md](demo-app.md), with the individual demo conflicts (S13–S17)
+resolved there and summarised in its §11.
+
+**S13 — the pending line's deadline.** Wallet engineer: cancel plus an automatic
+`warn` commit carrying **no** latency claim. Auditor and maintainer: cancel, no
+timeout, because "a timeout would produce a number that looks like a measurement
+and is not one". **Ruling: the wallet engineer's synthesis** — an eternal spinner
+is every demo's failure mode, and the objection is to the *number*, not to the
+commit (demo-app.md §5.4).
+
+**S14 — the identity comparison's verdict.** Wallet engineer: URL-sequence
+equality is the strict claim and a byte difference from a head cut must not
+render as a failure. Auditor: pin the manifest hash for the comparison and never
+render a verdict across two feed states. Maintainer: both runs must start from a
+deleted database. **Ruling: all three, composed** (demo-app.md §7). Each catches
+a different way the comparison can lie.
+
+**S15 — rendering the page's own CSP as evidence.** Auditor: the header is the
+claim and the list is the evidence. Maintainer: a page displaying its own meta
+tag proves nothing to a sceptic and is decoration in the one panel that must be
+all evidence. **Ruling: ship the CSP, render it, label it as the page's declared
+policy rather than as evidence**, and say in the panel that the viewer can
+confirm it independently. The evidence is the request list, the identity
+comparison and the scanner (demo-app.md §6.1).
+
+**S16 — the dev mode that submits real transactions.** All three judges:
+must not ship. A `VITE_`-prefixed variable is inlined into the client bundle by
+design, so one misconfigured CI job publishes a funded account private key from
+the page whose entire claim is that we never touch keys — and it contradicts the
+roadmap's deliberate no-write-path decision. **Recorded as unanimous and cut**
+(demo-app.md §9).
+
+**S17 — a "paste your viewing key" control in the published build.** Raised by
+the maintainer alone and uncontradicted: a page under our name that asks you to
+paste a wallet secret teaches the behaviour that gets our users phished later.
+**Ruling: adopted.** The hosted build offers a generated demo key and the REPLAY
+identity; paste is behind a local-build flag (demo-app.md §4).
+
+Two corrections bind regardless of any of the above, are cheap, and land with
+step 0a rather than with the wasm crate: the epoch path's missing `entry.zst`
+check (a live R-I violation in shipped Rust), and `apply_feed`'s
+trust-on-first-use adoption of the feed's own genesis. Both are in §3.10.
 
 ---
 
@@ -1064,14 +1258,46 @@ Two consequences, recorded so nothing drifts:
 
 ## A3 — WASM package of Block B
 
+Second pass, 2026-08-31. §A3 was written against the WASM spike; the consumer
+state machine now exists as shipped code (`crates/consumer`), and everything
+below is designed against **that tree**, not against the sketch in §0.4.1.
+Where the two disagree, the tree wins and the disagreement is named. The
+changelog is §3.11; the conflicts resolved between the three judges are §0.5.
+
 ### 3.1 Crates
 
 ```
-crates/consumer     strk20-consumer  (§0.4.1) — wasm-clean Block B core
-crates/client-wasm  strk20-engine    — cdylib, wasm-bindgen facade + MemStore
+crates/consumer     strk20-consumer  — Block B core: apply/verify, the discovery
+                                       passes, the registry, the report, AND
+                                       `mem::MemStore` (the in-memory store)
+crates/wasm         strk20-engine    — cdylib: the wasm-bindgen facade, the two
+                                       parked hosts (ParkingTransport,
+                                       ParkingProofSource), the AEAD seal, the
+                                       state blob codec
 ```
 
-`crates/client-wasm` deps, **with the features pinned rather than implied**
+**`MemStore` is NOT authored in the wasm crate.** It already exists at
+`crates/consumer/src/mem.rs` (446 lines, `Arc<Mutex<Inner>>`, `type View =
+MemView` with no lifetime) and it is the second implementation the conformance
+leg runs `sync_once` over. A browser-only copy would make that leg cover a store
+the browser does not use, which is precisely the equality claim this design
+rests on. §3.2's amendments are therefore edits **to that file**, and the
+conformance leg keeps running over the same type the browser folds into.
+
+**Status of the exploratory crate in the tree.** `crates/wasm` already contains a
+prototype facade (`stage_manifest` / `stage_epoch` / `stage_snapshot` / … /
+`apply(cold_start)` / `apply_head` / `check_manifest` / `discover` /
+`export_state` / `load`) over a `StagedTransport`. Two of its decisions are kept
+and are cited below as prior art: `decompress` looks the inflated payload up by
+`sha256(compressed)` and enforces the cap on Block B's side of the seam (§3.4),
+and the facade module carries the crate's single `unsafe_code` exemption (§3.9).
+The rest is **superseded by §3.3**: staging is driven by TypeScript deciding what
+to stage, which is the second-planner shape §0.5 S1 rules against, and
+`check_manifest` is a second staleness arbiter (§0.5 S2). The prototype's
+fixture, its golden reports and its example generator are kept and become the
+Node harness of step 3.
+
+`crates/wasm` deps, with the features pinned rather than implied
 (review finding 11a — as previously written the crate tripped the very
 `getrandom` gate §3.9 specifies, because `chacha20poly1305`'s default feature
 set pulls `getrandom` in through `aead`):
@@ -1089,38 +1315,133 @@ wasm-bindgen         = "0.2"
 ```
 
 No tokio, no reqwest, no rusqlite, no `getrandom`, no `web-sys`
-network/storage features. **`default-features = false` is load-bearing on every
-RustCrypto line, not tidiness**, and leg **s** asserts the *feature-resolved*
-dependency graph (`cargo tree -e features --target wasm32-unknown-unknown`),
-not merely the set of crate names — a name-only walk cannot see a feature-flag
-regression, which is exactly how this one would have shipped.
+network/storage features, **and no time source of any kind** (§3.9). `default-features
+= false` is load-bearing on every RustCrypto line, not tidiness, and leg **s**
+asserts the *feature-resolved* dependency graph (`cargo tree -e features
+--target wasm32-unknown-unknown`), not merely the set of crate names — a
+name-only walk cannot see a feature-flag regression, which is exactly how this
+one would have shipped. The workspace already records the measured effect of
+`discovery-core`'s `default-features = false` (142 → 118 crates on wasm32); that
+number moves from a comment into the diffed CI tree.
 
-### 3.2 The in-memory view
+### 3.2 The store, and the two drivers
+
+> **§3.2 quoted, replaced.** §3.2 declared a `MemStore` with `base`/`tail`
+> compartments and `pub struct MemView<'a> { store: &'a MemStore, bound: u64 }`.
+> That does not compile against the shipped trait: `ConsumerStore::View` has **no
+> lifetime parameter** and the trait requires `Send + Sync`, so the view owns an
+> `Arc` handle and the interior mutability is `std::sync::Mutex` — never
+> `RefCell`, which is not `Sync` and whose `unsafe` workaround is what §3.9's
+> `deny(unsafe_code)` posture exists to forbid. The tail is not a compartment
+> either: it is expressed through `replace_range(Range::Above { floor })`, which
+> is how the shipped store already models it.
+
+The store is `crates/consumer/src/mem.rs` as it stands, with three amendments.
+
+**(a) The event arena.** `Inner.events` is today `BTreeMap<(u64,u64), EventRec>`
+with a `Vec<Felt>` for `keys` and another for `data` — two allocations per
+event, 118,960 times on the mainnet epochs lane. Replaced by a flat arena:
 
 ```rust
-pub struct MemStore {
-    identity:  FeedIdentity,                       // chain_id, pool, genesis_block, epoch_size
-    base:      BTreeMap<[u8;32], SlotRec>,         // folded from snapshot + epochs
-    base_blocks: BTreeMap<u64, BlockMeta>,         // ≥ history_floor only
-    base_events: Vec<EventRec>,                    // ≥ history_floor, (block, event_index) ascending
-    tail:      BTreeMap<[u8;32], SlotRec>,         // folded from head.ndjson; replaced wholesale
-    tail_blocks: BTreeMap<u64, BlockMeta>,
-    tail_events: Vec<EventRec>,
-    chain:     ChainCursor,   // last_epoch, last_epoch_hash, last_epoch_to,
-                              // history_floor, head, l1_accepted, snapshot_basis
-}
-struct SlotRec { value: Felt, write_block: u64 }
-
-pub struct MemView<'a> { store: &'a MemStore, bound: u64 }
-// impl RawStorageAccess + RawEventAccess with futures that are Ready by construction
+struct EventHdr { block: u64, index: u32, kind: u8, _pad: [u8;3],
+                  tx:   u32,            // index into `tx_hashes`
+                  keys: (u32, u16),     // (offset into `felts`, count)
+                  data: (u32, u16) }
+struct Events { hdr: Vec<EventHdr>,     // ascending by (block, index)
+                felts: Vec<Felt>, tx_hashes: Vec<Felt> }
 ```
 
-Reads at `bound ≤ last_epoch_to` consult `base` only; reads at `head` consult
-tail-then-base. `MemStore` holds only plain data, so `Send` is satisfied without
-`SendWrapper` (which stays available as the base §7.6 escape hatch).
+`RawEventAccess::get_events` binary-searches `hdr` on `block` and materialises
+only the events it returns; nothing is allocated per event at fold time. Sizing
+on the epochs lane, **[est]** from the measured volumes (118,960 events,
+139,131 writes over 134,879 slots, 28,383 pool-active blocks):
 
-**Execution model.** `discovery-core`'s entry points are `async`, but over
-`MemView` no future ever suspends. They are driven by
+| component | naive layout | arena layout |
+|---|---|---|
+| slots | ~12.6 MB | ~12.6 MB |
+| blocks | ~2.3 MB | ~2.3 MB |
+| events | **45–60 MB** | **33.4 MB** |
+| live data | 60–75 MB | **~48 MB** |
+| realistic peak linear memory | 90–110 MB | **70–85 MB** |
+
+On the snapshot lane the events term collapses to whatever the epochs above the
+basis carry, and the whole store is ~15 MB **[est]**. That 5× difference is what
+decides whether a mobile tab survives, and it is why `close()` must terminate
+the worker (§4.11): wasm linear memory never shrinks, and dropping an instance
+does not return it to the OS.
+
+**Rejected: collapsing the write log to latest-per-slot.** It would break
+`check_reachability` (`apply.rs:563`) and `verify_anchors` (`anchors.rs:45`),
+both of which call `full_slot_set_as_of(a.block)` at **every published anchor
+between the basis and head** — and `anchors.ndjson` is head-captured and
+append-only, so most of its entries sit far below `last_epoch_to` by the time a
+client folds them. Under the collapse those calls error on the ordinary path,
+and the only grounding a cold-started client can obtain stops working. The
+saving would have been ~3 % of the smallest term (139,131 writes over 134,879
+distinct slots ⇒ ~0.4 MB). The full write log stays, and the proposed
+`BOUND_UNSUPPORTED` error is **not** added: `BOUND_BELOW_SNAPSHOT`
+(`apply.rs:41`) already covers the one case that is genuinely unanswerable.
+
+**(b) Cursors and generations get their own trait methods.** Today the
+discovery half persists key-derived state through `meta_set`:
+`sync.rs:102-109` composes `format!("cur_{kind}_{a}")` / `ckpt_` / `ckpt_at_`,
+`sync.rs:404` composes `gen_{owner}`, and `save_cursor` writes a serialized
+`DiscoveryCursor` — **which carries channel keys** — into the same `BTreeMap`
+as `head_etag`. An `export()` that iterated `meta` would ship channel keys and
+an owner address into a plaintext IndexedDB blob. `ConsumerStore` therefore
+gains six methods, and `sync.rs` uses them instead of `meta_*`:
+
+```rust
+#[derive(Clone, Copy, PartialEq, Eq)] pub enum CursorKind { Incoming, Outgoing }
+#[derive(Clone, Copy, PartialEq, Eq)] pub enum CursorSlot { Live, Checkpoint }
+
+fn cursor_get(&self, k: CursorKind, s: CursorSlot, owner: &Felt) -> Result<Option<String>>;
+fn cursor_put(&self, k: CursorKind, s: CursorSlot, owner: &Felt, json: Option<&str>) -> Result<()>;
+fn checkpoint_at(&self, k: CursorKind, owner: &Felt) -> Result<Option<u64>>;
+fn set_checkpoint_at(&self, k: CursorKind, owner: &Felt, block: u64) -> Result<()>;
+fn owner_generation(&self, owner: &Felt) -> Result<u64>;
+fn set_owner_generation(&self, owner: &Felt, gen: u64) -> Result<()>;
+```
+
+`FeedStore` keeps writing all of it into its existing `meta` table (no behaviour
+change, no migration, `full_resync` becomes six `cursor_put(None)` calls). The
+gain is that the type system now separates key-independent mirror metadata from
+key-derived per-owner state, and `MemStore`'s exporter **cannot name** the
+key-derived side.
+
+**(c) A closed allowlist for exportable meta, as the compensating control.**
+Even with (b), `meta_set` stays an open `&str` API. `MemStore::meta_set`
+therefore rejects with `SCOPE_VIOLATION` any key outside the closed set
+
+```
+{ pool, chain_id, epoch_size, genesis_block, last_epoch_applied, last_epoch_hash,
+  last_epoch_to, head_etag, head_number, head_hash, l1_accepted, history_floor,
+  snapshot_basis, snapshot_pending_grounding, tail_generation }
+```
+
+and `export()` **serialises from that list by name, never by iteration**. A
+prefix denylist (`cur_`, `ckpt_`, `gen_`) is forbidden: those strings are
+`format!`-composed in another module, so the filter is one rename away from
+drifting open, silently. After (b) this control should never fire; it exists so
+that a future refactor which reintroduces key-derived meta fails loudly instead
+of leaking.
+
+**Deliberately not adopted: making the note-registry methods require an open
+owner scope.** The proposal was `notes`/`upsert_note`/`set_note_spent`/
+`delete_note`/`delete_owner_notes` returning `SCOPE_CLOSED` unless a scope is
+open. It would break the conformance leg, which runs the shipped `sync_once`
+over `MemStore` natively with no facade to open one, and it would make the two
+stores behave differently on the exact path the leg exists to compare. Instead:
+the registry lives in `Inner.notes` as it does today; the two properties that
+mattered are obtained elsewhere — nothing key-derived is ever exported (by
+allowlist, above), and nothing key-derived outlives a discovery session
+(`discover_finish` and `discover_abort` both clear the registry and zeroize the
+session, §3.3).
+
+**Execution model — two drivers, two rules.**
+
+*The engine may never pend.* Over `MemView` every `discovery-core` future is
+`Ready` by construction, so R-J's tripwire is unchanged:
 
 ```rust
 fn drive<F: Future>(f: F) -> F::Output {
@@ -1128,313 +1449,506 @@ fn drive<F: Future>(f: F) -> F::Output {
 }
 ```
 
-— a panicking programming-error tripwire, never a runtime path, and never
-`block_on` (R-J). Any future dependency that could actually pend trips it on
-the first test run rather than hanging a browser tab.
+One repair is owed to it: `MemStore::lock()` is `self.inner.lock().expect("mem
+store poisoned")`, so a panic anywhere while a guard is live would kill the
+Engine for the rest of the session. `lock()` recovers instead
+(`unwrap_or_else(PoisonError::into_inner)`), because the tripwire is a
+programming-error signal and must not also be a denial of service.
 
-`apply_head` replaces the tail wholesale and detects contradiction exactly as
-the shipped `FeedStore` does (including the mid-sync
-`tail_from > last_epoch_to + 1` bail). Because nothing tail-derived is ever
-exported (§3.5) and per-key durable state is checkpoint-only (§3.6), the
-browser needs **no persisted reorg logic at all** — proven mechanically by
-leg **r**.
+*The feed may pend, and only at the transport.* `apply_feed` is `async` solely
+because `FeedTransport` is. The browser keeps the function and parks the host:
+
+```rust
+/// The browser's FeedTransport. It performs no IO. Each method records the
+/// request it wants and returns a future that is Pending until the wrapper
+/// supplies a response, then Ready.
+struct ParkingTransport {
+    pending:  Mutex<Option<FeedRequest>>,
+    supplied: Mutex<Option<FeedResponse>>,
+    log:      Mutex<Vec<LoggedRequest>>,   // canonical, key-independent (§3.3)
+}
+```
+
+The run is a boxed future over **owned** handles (`MemStore` is `Clone` over an
+`Arc`; the transport is an `Arc`), so it is `'static` and needs no self-reference
+and no `unsafe`. `Engine::pump` polls it once against a no-op waker:
+
+```rust
+fn pump(&mut self) -> Result<Step, EngineError> {
+    match self.run.as_mut().poll(&mut Context::from_waker(&noop_waker())) {
+        Poll::Ready(out)  => Ok(Step::Done(out?)),
+        Poll::Pending     => match self.transport.take_pending() {
+            Some(req) => Ok(Step::Fetch(req)),
+            None      => match self.proofs.take_pending() {
+                Some(rpc) => Ok(Step::Rpc(rpc)),
+                // Nothing but a parked host may pend. This is a programming
+                // error, and it is an Err rather than a panic because a panic
+                // here can fire while a store guard is live.
+                None => Err(EngineError::internal("PARK_WITHOUT_REQUEST")),
+            },
+        },
+    }
+}
+```
+
+This is what makes the design's central claim structural rather than tested:
+**the sequence of requests is the output of a function whose inputs are
+(profile, persisted mirror, server responses)** — no key, no address, no owner
+— so two identities produce identical logs by type, which a Rust proptest
+asserts directly (§3.9) and the wire capture then corroborates.
 
 ### 3.3 Exported ABI (exact)
 
-`wasm-bindgen`, `--target web` (plus a `nodejs` build for tests). Every
-fallible method throws a `JsError` whose message is one canonical JSON object
-(§3.7). All inputs are bytes or JSON strings; all outputs are JSON strings or
-`Uint8Array`.
+> **§3.3 quoted, replaced.** §3.3 exported `check_manifest`,
+> `apply_snapshot(payload, manifest_snapshot_json, anchor_json)`,
+> `apply_epoch(payload, manifest_entry_json)` and `apply_head(payload)` as
+> independent entry points, leaving TypeScript to decide which artifacts to
+> fetch, in what order, when to cold-start, when to fall back and when to reset.
+> **All four are deleted.** The ordering *is* the trust logic, and it now exists
+> once, in `crates/consumer/src/apply.rs`: the snapshot ladder, the
+> `SnapshotRejected → reset_mirror → Epochs` fallback (`apply.rs:86-106`), the
+> manifest-divergence check (`:197-207`), the masked-reorg contradiction test
+> (`:236`), the `tail_from > last_epoch_to + 1` mid-sync bail (`:273`), and the
+> grounding order (`:330`). Re-expressing that in the layer with the weakest
+> tests is the single largest correctness risk in the package, and the `auto`
+> fallback is not even expressible in the push ABI, because a rejected snapshot
+> changes what must be fetched after the driver has already decided.
+
+**Amendment to §0.2 C1.** C1 ruled "P3's shapes, P1's mechanics", and named
+`check_manifest` arbitrating staleness in Rust as an instance of the principle
+"keep every decision out of the TS wrapper". The **principle is preserved and
+strengthened** here; the **instance is withdrawn**. With `apply_feed` shipped,
+`check_manifest` would be a *second* staleness arbiter beside `apply.rs:197-207`,
+and two arbiters drift. The three discriminants survive as a field on the
+terminal Step (`staleness: "ok" | "behind" | "diverged"`), §3.7's rule that
+staleness is a return value and never a throw is unchanged, and leg **q** still
+asserts the three cases on the three constructed manifests.
+
+`wasm-bindgen`, `--target web` (plus a `nodejs` build for tests). Every fallible
+method throws a `JsError` whose message is one canonical JSON object (§3.7). All
+inputs are bytes or JSON strings; all outputs are JSON strings, `Uint8Array`, or
+`DiscoverOut`.
 
 ```rust
 #[wasm_bindgen]
-pub struct Engine { /* MemStore */ }
+pub struct Engine { /* MemStore + Option<SyncRun> + sessions */ }
 
 #[wasm_bindgen]
 impl Engine {
-    /// genesis_json = the fetched /feed/genesis.json bytes. Pins identity.
+    // ---------------------------------------------------------------- setup
+
+    /// `profile_json` is the §6.1 ChainProfile the caller expects — a built-in
+    /// or a custom one. Identity is pinned HERE, before a byte is requested;
+    /// genesis.json is then checked against it INSIDE apply_feed (§3.10), not
+    /// by the wrapper. This closes the trust-on-first-use hole at
+    /// `apply.rs:119-130`, where an empty mirror adopts whatever the feed says.
     #[wasm_bindgen(constructor)]
-    pub fn new(genesis_json: &str) -> Result<Engine, JsError>;
+    pub fn new(profile_json: &str) -> Result<Engine, JsError>;
 
-    /// Restore from a persisted state blob (§3.5). Verifies trailer + stamp
-    /// against `genesis_json`. Never partially loads.
-    pub fn load(blob: &[u8], genesis_json: &str) -> Result<Engine, JsError>;
-
-    /// {"chain_id","pool","last_epoch","last_epoch_hash","last_epoch_to",
-    ///  "history_floor","snapshot_basis","head","l1_accepted","slots","events",
-    ///  "engine_version"}
+    /// {"chain_id","pool","genesis_block","epoch_size","last_epoch",
+    ///  "last_epoch_hash","last_epoch_to","history_floor","snapshot_basis",
+    ///  "snapshot_pending_grounding","head","l1_accepted","slots","blocks",
+    ///  "events","verified","engine_version","state_dirty"}
     pub fn info(&self) -> String;
 
-    /// Arbitrate staleness against a freshly fetched manifest — ALL of it, in
-    /// Rust. "ok" | "behind" | "diverged".
-    pub fn check_manifest(&self, manifest_json: &str) -> Result<String, JsError>;
+    // ------------------------------------------------------------ feed sync
 
-    /// UNCOMPRESSED snapshot payload + its manifest "snapshot" object + the
-    /// anchor sidecar JSON. Runs §1.5 rings 2–5 inside the module. Empty state
-    /// only (SNAPSHOT_NOT_EMPTY otherwise).
-    /// {"applied_epoch":1405,"basis":14059999,"slots":48123,
-    ///  "history_floor":14060000,"verified":"anchored"|"server-asserted",
-    ///  "state_changed":true}
-    /// `state_changed` is the field §4.3's export rule reads; it was missing
-    /// from this method alone (review finding 14c).
-    pub fn apply_snapshot(&mut self, payload: &[u8], manifest_snapshot_json: &str,
-                          anchor_json: &str) -> Result<String, JsError>;
+    /// Start one sync. `cold_start` ∈ {"auto","snapshot","epochs"} (§4.2's one
+    /// vocabulary). Returns the first Step. SYNC_IN_PROGRESS if a run is open.
+    pub fn sync_begin(&mut self, cold_start: &str) -> Result<String, JsError>;
 
-    /// UNCOMPRESSED epoch payload + its manifest "epochs[i]" object. Verifies
-    /// content sha256, header identity + range, prev-linkage. Must be
-    /// last_epoch + 1 (FEED_EPOCH_GAP otherwise).
-    pub fn apply_epoch(&mut self, payload: &[u8], manifest_entry_json: &str)
-        -> Result<String, JsError>;   // {"applied":e,"state_changed":true}
+    /// Satisfy the outstanding request and get the next Step. `meta_json` is
+    /// the response envelope (§3.3.1); `compressed` is the bytes exactly as
+    /// served; `payload` is the inflated bytes for zstd artifacts, else None.
+    /// The module hashes BOTH (§3.4) — TypeScript performs no verification.
+    pub fn sync_supply(&mut self, meta_json: &str,
+                       compressed: Option<Vec<u8>>,
+                       payload: Option<Vec<u8>>) -> Result<String, JsError>;
 
-    /// head.ndjson bytes. {"head","l1_accepted","tail_rewound"}
-    pub fn apply_head(&mut self, payload: &[u8]) -> Result<String, JsError>;
+    /// Satisfy an outstanding Step::Rpc (§1.5 ring 6) with the `result` object
+    /// of the user's own endpoint, or with an `unavailable` envelope.
+    pub fn sync_supply_rpc(&mut self, meta_json: &str, result_json: Option<String>)
+        -> Result<String, JsError>;
 
-    /// Epoch-derived state ONLY; the tail is never exported (§3.5).
-    /// Call only when an apply reported state_changed.
-    pub fn export(&self) -> Vec<u8>;
+    /// Abandon an open run. Every store write is already atomic
+    /// (`install_snapshot` / `replace_range` carry their metadata), so an abort
+    /// is never a torn state — only an older one.
+    pub fn sync_abort(&mut self);
 
-    /// THE ONLY key-accepting entries are this and export_reference_cursor.
-    /// One full pass for one owner: checkpoint pass at last_epoch_to, live
-    /// pass at head, spent refresh — the two-pass structure of sync_once.
-    /// `key` is zeroized in place before return. `entropy32` MUST be 32 fresh
-    /// bytes from crypto.getRandomValues on EVERY call (§3.6).
-    pub fn discover(&mut self, owner_hex: &str, key: &mut [u8],
-                    sealed: Option<Vec<u8>>, entropy32: &[u8])
-        -> Result<DiscoverOut, JsError>;
+    /// Canonical NDJSON of every request this Engine has emitted since
+    /// construction, and its sha256. Key-independent BY CONSTRUCTION (§3.2).
+    /// This is the artifact the demo compares across identities and the one the
+    /// §3.9 proptest pins.
+    pub fn request_log(&self) -> String;
+    pub fn request_log_sha256(&self) -> String;
 
-    /// Paged tx history per §1.1's paging contract. Returns
-    /// {"transactions":[…],"complete":bool,"complete_from":<block>,
-    ///  "registration_available":bool}. A walk that crosses history_floor
-    /// TERMINATES the page set; it does not throw. An explicit
-    /// `from_block < history_floor` does throw HISTORY_UNAVAILABLE.
-    /// `sealed` is Option for symmetry with `discover` — a first call with no
-    /// prior blob is legal and does fresh discovery (review finding 14f).
-    pub fn history(&self, owner_hex: &str, key: &mut [u8],
-                   sealed: Option<Vec<u8>>,
-                   from_block: u64, limit: u32) -> Result<String, JsError>;
+    // ------------------------------------------------------ persisted state
 
-    /// Reference-schema DiscoveryCursor JSON (base §7.4 interop) extracted
-    /// from a sealed blob — migration to compat/SDK without resync.
+    /// Serialize epoch-derived state (§3.5) into a staging buffer; returns its
+    /// length. Call only when info().state_dirty.
+    pub fn export_begin(&mut self) -> Result<u32, JsError>;
+    /// Copy frame `i` (≤ 4 MiB) out. Frames are contiguous and in order.
+    pub fn export_chunk(&self, i: u32) -> Result<Vec<u8>, JsError>;
+    pub fn export_end(&mut self);
+
+    /// Restore. Frames are pushed in order; `finish` verifies the trailer hash,
+    /// the stamp against `profile_json`, and every structural bound — and NEVER
+    /// partially loads.
+    pub fn load_begin(profile_json: &str) -> Result<Loader, JsError>;
+
+    // -------------------------------------------------- key-accepting entries
+    // The closed set is exactly {discover_begin, history, export_reference_cursor},
+    // named in a checked-in allowlist file diffed in CI (§3.9) rather than by a
+    // magic count in prose.
+
+    /// Open a discovery session for one owner. `key` is copied into a
+    /// `SecretFelt` and the caller's staging buffer is zeroized before return.
+    /// `entropy32` MUST be 32 fresh bytes from crypto.getRandomValues on EVERY
+    /// call (§3.6); it is held by the session and consumed by `finish`.
+    pub fn discover_begin(&mut self, owner_hex: &str, key: &mut [u8],
+                          sealed: Option<Vec<u8>>, entropy32: &[u8])
+        -> Result<u32, JsError>;
+
+    /// Run engine passes until `max_ops` IO-budget units are consumed or the
+    /// current phase completes. Returns
+    /// {"done":bool,"phase":"ckpt_in"|"ckpt_out"|"live_in"|"live_out"|"spent"|"done",
+    ///  "ops":N,"ops_total":N,"channels":N,"notes":N}
+    /// NOTE: ops, never milliseconds. The module has no clock (§3.9); TypeScript
+    /// owns the clock, calibrates ops-per-millisecond across calls, and picks
+    /// its own slice. This also makes the slicing deterministic, which is what
+    /// lets leg δ assert that sliced and unsliced runs agree.
+    pub fn discover_step(&mut self, handle: u32, max_ops: u32)
+        -> Result<String, JsError>;
+
+    /// Persist cursors, refresh spent state, seal, produce the report, clear the
+    /// registry and zeroize the session. Legal only after a step said done.
+    pub fn discover_finish(&mut self, handle: u32) -> Result<DiscoverOut, JsError>;
+
+    /// Abandon a session: clears the registry, zeroizes key and entropy.
+    /// Idempotent. A session that never finishes never consumes its entropy, so
+    /// a torn discovery cannot burn a nonce.
+    pub fn discover_abort(&mut self, handle: u32);
+
+    /// Paged tx history per §1.1's paging contract. A walk that crosses
+    /// history_floor TERMINATES the page set; an explicit
+    /// from_block < history_floor throws HISTORY_UNAVAILABLE. One-shot: it is
+    /// already bounded by `limit`.
+    pub fn history(&mut self, owner_hex: &str, key: &mut [u8],
+                   sealed: Option<Vec<u8>>, from_block: Option<u64>, limit: u32)
+        -> Result<String, JsError>;
+
+    /// Reference-schema DiscoveryCursor JSON (base §7.4) extracted from a sealed
+    /// blob — Tier-0 migration to compat/SDK without resync.
     pub fn export_reference_cursor(&self, key: &mut [u8], sealed: &[u8])
         -> Result<String, JsError>;
 }
 
 #[wasm_bindgen(getter_with_clone)]
 pub struct DiscoverOut {
-    pub report_json: String,   // strk20-consumer SyncReport, field-identical to
-                               // `strk20-sync sync --json` (+ history_from)
+    pub report_json: String,   // strk20_consumer::sync::SyncReport, field-identical
+                               // to `strk20-sync sync --json` (one golden oracle)
     pub sealed: Vec<u8>,       // checkpoint-only sealed blob; hand back next time
     pub added_json: String,    // notes not present in the supplied sealed blob
     pub spent_json: String,    // nullifiers that flipped to spent this pass
+    pub stats_json: String,    // {"slots_read":N,"events_scanned":N,"passes_in":N,
+                               //  "passes_out":N,"ops":N,"cursor_reset":false}
+                               // counts only; scanner-asserted key-clean like
+                               // every other string this module emits
 }
 ```
 
-Why one `discover` rather than the roadmap sketch's per-flow calls: a wallet
-wants one call per feed change. Incoming/outgoing, the checkpoint/live split,
-cursor re-opening and spent refresh are internal mechanics, and `added`/`spent`
-deltas are computed here so the TS wrapper — the least testable layer — holds
-no discovery-adjacent logic at all. `check_manifest` is the same principle for
-staleness.
+**Deliberately absent: any method returning a duration.** The module has no
+clock. Timing is TypeScript's, measured around the call, which is also the only
+place it can honestly include `fetch` and zstd.
 
-Key handling: the 32-byte BE key enters linear memory, is copied into
-`SecretFelt` (zeroize-on-drop), and the staging buffer is zeroized before
-return. Honest limit, printed verbatim in the npm README: JS cannot reliably
-zeroize its own buffers; the guarantee is **non-transmission** — the module
-never writes the key anywhere and zeroizes what it owns — not memory hygiene
-in the host.
+**Deliberately absent in v1: `key_retain` / `key_forget` / retained-handle
+discovery.** It was proposed to move long-lived key residency out of the JS heap
+"into wasm memory where `zeroize` is real". Half of that is true and half is
+not: `zeroize` genuinely runs, but `WebAssembly.Memory.prototype.buffer` is a
+plain `ArrayBuffer` readable by any same-origin script in the same worker, so
+wasm linear memory is not a security domain relative to the JS heap beside it.
+The cost is paid by everyone — the module becomes a key-holding object and the
+key-accepting entry set grows — and the benefit accrues only to
+`staticAccount` (§4.2), whose caller already holds the bytes for the process
+lifetime. **Deferred with a trigger:** a wallet with a biometric- or
+hardware-gated keystore reporting that per-pass `viewingKey()` is a prompt
+storm. If it ships it ships in the reviewed shape — `client.unlock(account)`
+requiring `worker: true`, `status().unlocked`, an explicit `lock()`, a
+TypeScript auto-lock timer (never a wasm-side one, which would need a clock),
+and a blocking acceptance leg: after `key_forget_all`, a linear-memory dump
+contains the key in none of the 13 encodings.
 
-### 3.4 Note on decompression
+#### 3.3.1 Step and response envelopes (byte-precise)
 
-zstd is not compiled in (given). The module receives **uncompressed** payloads
-and hashes them; content identity is over uncompressed bytes everywhere, so
-nothing is lost. TypeScript decompresses and is bound by R-I (verify the `zst`
-hash first, cap the output).
+Steps, canonical JSON, one object per call:
 
-### 3.5 State blob (`export` / `load`)
+```json
+{"step":"fetch","seq":3,"artifact":"epoch","path":"/feed/epochs/00000412.strk20e.zst",
+ "optional":false,"compressed":true,"decompress_cap":67108864,
+ "conditional":null,"reason":"epoch 412 > last_epoch_applied 411",
+ "prefetch":[{"artifact":"epoch","path":"/feed/epochs/00000413.strk20e.zst",
+              "compressed":true,"decompress_cap":67108864}, …]}
 
-Canonical NDJSON in the one grammar family (C3), debuggable with `jq`, with a
-mandatory self-hash:
+{"step":"fetch","seq":9,"artifact":"head","path":"/feed/head.ndjson",
+ "optional":false,"compressed":false,"decompress_cap":null,
+ "conditional":{"if_none_match":"\"<64-hex>\""},"reason":"tail refresh",
+ "prefetch":[]}
+
+{"step":"rpc","seq":11,"endpoint":"anchor","method":"starknet_getStorageProof",
+ "params":[{"block_number":14151973},[],["0x…pool…"],[]],
+ "also":[{"method":"starknet_getBlockWithTxHashes","params":[{"block_number":14151973}]}],
+ "reason":"ring 6 candidate 1 of 4"}
+
+{"step":"done","staleness":"behind","verified":"server-asserted","state_dirty":true,
+ "outcome":{"epochs_applied":2,"tail_rewound":false,"tail_changed":true,
+  "head":14151989,"l1_accepted":14146900,"last_epoch_to":14149999,
+  "snapshot_basis":14059999,"snapshot_rejected":false,"history_floor":14060000}}
+```
+
+`artifact` is a **closed enum of eight variants** — `genesis`, `manifest`,
+`epoch`, `epoch_anchor`, `snapshot`, `snapshot_anchor`, `anchors`, `head` —
+mapping 1:1 onto §2.8.1's closed URL allowlist. `path` is emitted by the module;
+the wrapper prefixes the configured feed base and appends **nothing**. No
+variant carries a query string, so a query string is unrepresentable rather than
+forbidden.
+
+**`prefetch` is advisory and is the answer to serial round trips.** The
+trampoline satisfies one request at a time, and on the epochs lane that is 515
+strictly sequential RTTs on mainnet (609 on Sepolia) — tens of seconds of pure
+latency on top of the fold. `prefetch` is a hint the module emits *from the same
+verified manifest it is already walking*, so there is no second planner and no
+second authority: the module still asks for each artifact individually and still
+verifies each one. The wrapper may fetch the hinted paths in parallel into its
+own buffer; `prefetchConcurrency` (default 6, §4.2) is a knob rather than a
+contract. **Nothing is ever applied because it was hinted**: a staged artifact
+the module never asks for is simply dropped, so a hostile hint is a wasted GET.
+
+One honesty note that must be printed where the identical-stream claim is made:
+`request_log()` is ordered by the module's own asks and is byte-identical across
+identities; the **wire** order may interleave within a prefetch window, so the
+wire claim is an identical *multiset* unless `prefetchConcurrency: 1`. Leg **u**
+and §2.8.1's allowlist are multiset assertions and are unaffected; the demo's
+A/B comparison uses `request_log_sha256`, which is the stronger and simpler
+claim (§demo-app.md §7).
+
+Response envelope supplied back:
+
+```json
+{"seq":3,"status":200,"not_modified":false,"absent":false,"etag":null}
+```
+
+- `absent: true` is the *only* encoding of 404, and only for artifacts the Step
+  marked `optional` (`epoch_anchor`, `snapshot_anchor`, `anchors`). A 404 on a
+  non-optional artifact is `TRANSPORT`, raised by the wrapper, never `absent` —
+  `crates/client/src/transport.rs`'s `get_optional` discipline carried into
+  TypeScript verbatim.
+- `not_modified: true` is 304, for the one conditional artifact (`head`).
+- Any other non-2xx is `TRANSPORT` from the wrapper and never reaches
+  `sync_supply`.
+- A `seq` that is not the outstanding one throws `SYNC_PROTOCOL {expected, got}`.
+
+**Ring 6 rides the same trampoline.** `ProofSource` (`anchors.rs:32`) is an
+async trait taking `(pool, block)`, so it parks exactly like the transport and
+`Step::Rpc` is the result. The candidate selection, the
+`MAX_GROUNDING_CANDIDATES` truncation, the MATCH/MISMATCH/UNAVAILABLE
+classification, the `global_roots.block_hash` binding required by §12 point 3,
+and the `reset_mirror`-on-mismatch discipline (`sync.rs:341-382`) therefore all
+stay in Rust, shared with the native client. The alternative on the table —
+exporting `anchor_request(block)` and `verify_anchor(block, proof, header)` —
+would have re-implemented that ladder in the wrapper, which is the mistake §3.3
+made for the apply half. Two details are normative and come from the live run:
+the params array is `[]`, never `null` (LIVE-7), and `UNAVAILABLE` is a **value,
+never a throw** (LIVE-6: a capability gap must never read as corruption). This
+is what lets a browser reach `verified: "anchored"` at all — which matters
+because the browser's user is the one who already has an RPC URL in their wallet.
+
+**Resumability is a guarantee, not an accident.** `apply_feed_once` skips
+`entry.e <= last_epoch_applied` (`apply.rs:209`) and each epoch's
+`replace_range` carries its own metadata, so a run abandoned at epoch 200
+resumes at 201 from persisted meta with no new state. Leg **γ′** asserts it: kill
+the fetch at epoch 200, re-open, resume, and demand a byte-identical final export
+blob. Without that leg every flaky mobile network costs a full 16 MB refetch.
+
+### 3.4 Decompression, and where verification lives
+
+> **§3.4 quoted, amended.** §3.4 said the module receives uncompressed payloads
+> and *"TypeScript decompresses and is bound by R-I (verify the `zst` hash
+> first, cap the output)"*. That places a verification obligation in the least
+> testable layer. **Replaced:** the wrapper supplies **both** buffers and the
+> module hashes both — the `.zst` sha256 against `manifest.epochs[i].zst` /
+> `manifest.snapshot.zst`, and the payload sha256 against the content hash,
+> exactly as `apply.rs:439-457` already does on the snapshot path. TypeScript's
+> only remaining obligation is **not inflating past the cap the Step named**,
+> which is a resource bound backstopped by the payload hash, not a verification.
+
+Mechanically, `ParkingTransport::decompress(bytes, cap, artifact)` does not
+decompress: it looks up `sha256(bytes)` among the pairs supplied through
+`sync_supply` and returns the paired inflated buffer, raising
+`DECOMPRESS_UNSTAGED {artifact, zst_sha256}` when the pair is absent. That
+preserves `apply.rs`'s existing ring order byte for byte (ring 1 hashes the
+compressed bytes *before* `decompress` is called; ring 2 hashes the payload
+after) and it structurally forbids the wrapper from inflating bytes it did not
+stage. zstd is still not compiled in (given), and content identity is still over
+uncompressed bytes everywhere, so nothing is lost.
+
+**Precondition on the native side, blocking (R-I).** `apply.rs:214-224` fetches
+an epoch and calls `transport.decompress` having checked only the payload hash,
+while the snapshot path checks `entry.zst` first (`:439-446`). `EpochEntry.zst`
+exists (`crates/feed/src/manifest.rs:41`). That is a live R-I violation in
+shipped Rust and an asymmetry between the two hosts on the shared code path.
+Three lines, landed with step 0a, before the wasm crate exists.
+
+### 3.5 State blob (`export` / `load`) — format v2
+
+> **§3.5 quoted, replaced.** §3.5 specified canonical NDJSON with hex felts. On
+> the epochs lane that is ~15 MB of slot lines plus ~24 MB of event lines ≈
+> **40 MB [est]**, which costs ~250k hex parses, a 40 MB buffer on the wasm
+> heap, a 40 MB copy into JS and a structured clone into IndexedDB — seconds of
+> main-thread work spent to avoid seconds of fold work. Replaced by a framed
+> hybrid, `strk20-state v2`.
 
 ```
-{"t":"hdr","v":1,"kind":"strk20-state","chain_id":"SN_MAIN","pool":"0x…","genesis_block":8978970,"epoch_size":10000,"engine":"<crate semver>","last_epoch":1406,"last_epoch_hash":"<64-hex>","last_epoch_to":14069999,"history_floor":14060000,"snapshot_basis":14059999}
-{"t":"s","k":"0x…","v":"0x…","w":14031234}                      # slots as of last_epoch_to, ascending by 32-byte BE slot; w ≤ last_epoch_to
-{"t":"b","b":14061200,"h":"0x…","p":"0x…","ts":1720000000}      # blocks in [history_floor, last_epoch_to], ascending
-{"t":"ev","b":14061200,"i":0,"x":2,"h":"0x<tx>","K":["0x…"],"D":["0x…"]}  # events in [history_floor, last_epoch_to], (b,i) ascending
-{"t":"end","slots":N,"blocks":P,"events":M,"sha256":"<64-hex over all preceding bytes>"}
+line 1   : {"t":"hdr","v":2,"kind":"strk20-state","chain_id":"SN_MAIN","pool":"0x…",
+            "genesis_block":8978970,"epoch_size":10000,"engine":"<crate semver>",
+            "last_epoch":1406,"last_epoch_hash":"<64-hex>","last_epoch_to":14069999,
+            "history_floor":14060000,"snapshot_basis":14059999,
+            "snapshot_pending_grounding":false,"verified":"server-asserted",
+            "body":{"enc":"bin1","len":N}}\n
+body     : N bytes, little-endian framed, in this order:
+             u32 n_slots,  then n_slots × { [u8;32] slot, [u8;32] value, u64 w }
+             u32 n_blocks, then n_blocks × { u64 number, [u8;32] hash, [u8;32] parent, u64 ts }
+             u32 n_events, then the §3.2 arena: hdr table, tx_hashes, felts
+last line: {"t":"end","slots":N,"blocks":P,"events":M,"sha256":"<64-hex over all preceding bytes>"}\n
 ```
 
-**The example was wrong and is corrected (review finding 10).** §1.7 sets
-`history_floor = header.block + 1`, so for `snapshot_basis = 14059999` the floor
-is **14060000**, not 14050000 (which is epoch 1405's `from`). The example is the
-artifact an implementer copies, so it now shows a *coherent* client — one that
-applied the snapshot at basis 14059999 and then epoch 1406 — rather than a
-combination no run can produce. Note the degenerate case this exposes and which
-the old example hid: a client that has applied **only** the snapshot has
-`history_floor = last_epoch_to + 1`, so `[history_floor, last_epoch_to]` is
-empty and the blob has **zero** `b` and `ev` lines. That is correct, not a bug.
+`jq` still reads the stamp (`head -1`) and the trailer (`tail -1`), which is
+what §3.5's debuggability argument was actually about; nobody was going to `jq`
+134,879 slot lines. Size **[est]** ~40 MB → ~17 MB, and the body is
+`copy_from_slice` into the arena rather than parsed.
 
-**Bounds are now written into the format, not only into the prose.** §3.5's
-"only epoch-derived state is ever exported; the tail lives and dies in memory"
-was the sole statement of the upper bound, and leg **r**'s whole assertion (the
-blob is byte-identical across a tail fork) depends on it. `load`'s structural
-checks therefore gain, as hard rejects (`FEED_MALFORMED`):
+**Every §3.5 structural check survives, unchanged in strength and in two cases
+stronger** — as array-bounds checks they cannot be defeated by a malformed line:
 
-- **no line in the blob references a block `> last_epoch_to`** — slots' `w`,
-  block lines' `b`, event lines' `b`. This is the parser-level form of "the tail
-  is never exported", so leg **r** is pinned by the grammar and not only by a
-  byte comparison that happens to pass;
-- no `b`/`ev` line references a block `< history_floor`;
+- no slot's `w`, block's `number` or event's `block` exceeds `last_epoch_to` —
+  the parser-level form of "the tail is never exported", which is what leg **r**
+  depends on;
+- no block or event lies below `history_floor`;
 - `snapshot_basis` is either absent (replayed mirror, `history_floor == 0`) or
-  satisfies `history_floor == snapshot_basis + 1`.
+  satisfies `history_floor == snapshot_basis + 1`;
+- the trailer self-hash, and `load`'s three rejection codes, unchanged:
+  `STATE_CORRUPT` / `STATE_VERSION` / `STATE_FOREIGN`.
 
-The header is the **compatibility stamp** of discussion §7 made executable:
-format version, chain identity, engine major, and the hash of the last applied
-epoch. `load` rejects, never partially applies: bad trailer hash →
-`STATE_CORRUPT`; `v` ≠ 1 or engine major mismatch → `STATE_VERSION`;
-`chain_id`/`pool`/`genesis_block`/`epoch_size` ≠ the passed genesis →
-`STATE_FOREIGN`. `check_manifest` then arbitrates content staleness against the
-live feed (`ok` / `behind` / `diverged`).
+The degenerate case §3.5 called out stays correct and stays worth stating: a
+client that has applied **only** a snapshot has `history_floor = last_epoch_to +
+1`, so it exports zero blocks and zero events. That is not a bug.
 
-**Only epoch-derived state is ever exported.** The tail lives and dies in
-memory, which is what makes the blob un-stale-able by a reorg. Per-key material
-is never in this blob.
+Three header amendments, each earning its place:
+
+1. **`verified`** — the integrity grade is a property of how this mirror was
+   built and must survive a reload. It is never *upgraded* by memory: a blob
+   stamped `anchored` loads as `server-asserted` when the session configures no
+   anchor RPC.
+2. **`snapshot_pending_grounding`** — `apply.rs:79-85` discards a mirror
+   carrying an ungrounded snapshot. A blob that dropped the flag would let a
+   browser reload onto a slot set it never grounded and never re-enter the
+   snapshot branch. Carrying it means the existing mechanism fires unchanged.
+3. **The stamp is checked against the `ChainProfile`**, not only against a
+   genesis document, because under §3.3 the profile is the identity source at
+   construction.
+
+`load` rejects and never partially applies. **Export is by allowlist, by name,
+never by iteration** (§3.2c), so "only epoch-derived state is ever exported"
+becomes a property of the serializer's shape rather than of its author's care.
+Per-key material is never in this blob.
 
 ### 3.6 Sealed per-key state (checkpoint-only)
 
-Per-key artifacts are key-derived and therefore a fingerprint on a shared
-machine (discussion §7). The module seals them itself, so the wrapper and
-IndexedDB only ever see uniform noise.
+The construction is **unchanged**: `S20SEAL1` ‖ nonce(24) ‖
+XChaCha20-Poly1305, HKDF key and nonce derivation with their domain separation,
+the AAD, mandatory fresh `entropy32`, `ENTROPY_INVALID` on any length but 32,
+and the corrected nonce doctrine in full — **nonce safety comes from the
+caller's entropy, not from the counter**, with the `prev_entropy_h` guard stated
+at exactly its real strength (it closes the constant-entropy case completely,
+including across a fork; it does not close two forks caching two different stale
+values, which is what fresh `getRandomValues` is for). Leg **q**'s nonce-safety
+sub-leg is unchanged, including the test-only build with the guard disabled that
+proves the guard is what prevents the collision.
+
+The plaintext is amended in two places:
 
 ```
-blob = "S20SEAL1" (8 bytes ASCII) ‖ nonce(24) ‖ XChaCha20-Poly1305 ciphertext
-
-key   = HKDF-SHA256(ikm  = viewing key, 32-byte BE,
-                    salt = "strk20-seal-key-v1",
-                    info = chain_id ‖ 0x00 ‖ pool_hex ‖ 0x00 ‖ owner_hex)
-nonce = HKDF-SHA256(ikm  = entropy32,
-                    salt = "strk20-seal-nonce-v1",
-                    info = counter_be8)[0..24]
-aad   = "S20SEAL1" ‖ chain_id ‖ 0x00 ‖ pool_hex
-plaintext (canonical JSON):
-{"v":1,"counter":<u64>,"prev_entropy_h":"<64-hex sha256 of the entropy32 that sealed this blob>",
+{"v":1,"counter":<u64>,"prev_entropy_h":"<64-hex>",
  "ckpt_at":<block ≤ last_epoch_to>,
+ "ckpt_epoch":<epoch index containing ckpt_at>,
+ "ckpt_epoch_hash":"<64-hex payload sha256 of that epoch>",
  "in_ckpt":<reference DiscoveryCursor JSON>,"out_ckpt":<reference DiscoveryCursor JSON>,
- "notes":[{"note_id","owner","sender","token","index","nullifier","amount","block","spent"},…]}
+ "notes":[{note fields…},…]}          # ONLY notes with block <= ckpt_at
 ```
 
-**Checkpoint-only (C4):** no live cursors, no generation counter, nothing bound
-to the tail. The live pass reruns from the checkpoint every slice, in memory.
+1. **`notes[]` is checkpoint-bounded.** §3.6 declared the blob checkpoint-only —
+   "no live cursors, no generation counter, nothing bound to the tail" — and
+   then sealed a `notes[]` with a `block` field and no bound. A note discovered
+   by the live pass sits above `last_epoch_to` and can be reorged away; sealing
+   it is exactly the durable tail state the browser design exists not to have.
+   Rule: **seal only notes with `block <= ckpt_at`; return live notes to the
+   caller and never seal them.** The live pass rediscovers them from the
+   refetched tail next session, at the cost of a walk over ≤ one epoch. This is
+   what makes "no persisted reorg logic at all" true rather than nearly true.
+2. **`ckpt_epoch` + `ckpt_epoch_hash` make the seal invalidatable.** A cursor is
+   a position in a history, and a diverged feed changes the history. On open the
+   module compares `ckpt_epoch_hash` against the verified manifest's entry for
+   `ckpt_epoch`; a mismatch is treated exactly like an AEAD failure — **no
+   cursor, fresh discovery, `stats.cursor_reset = true`** — never an exception.
+   Without it the seal is a cache with no invalidation rule.
 
-**Nonce discipline (C2, corrected by review finding 1).** The derivation is
-unchanged in shape — HKDF whitens possibly-biased caller entropy and gives the
-nonce its own domain separation — but the *claim* attached to it is replaced:
+`counter` keeps its demoted meaning (a rollback/authenticity signal inside the
+AEAD and nothing more), and no text in this spec may re-attach nonce safety to
+it. An AEAD failure is still "no cursor": fresh discovery with
+`cursor_reset: true` surfaced — the correct behaviour for a different user on
+the same origin. Cursors still use the exact reference JSON schema (base §7.4),
+so sealed cursors round-trip with compat and `serve` wire cursors, and
+`export_reference_cursor` still delivers Tier-0 migration without resync.
 
-> **Nonce safety comes from the caller's entropy, not from the counter.**
-> `entropy32` MUST be 32 fresh bytes from `crypto.getRandomValues` on every
-> `discover()` call. `counter` is a rollback/authenticity signal inside the
-> AEAD plaintext and nothing more.
-
-Why the old structural claim does not hold: `counter` is monotone only along a
-single non-forking chain of blob updates, and the spec deliberately supports
-forking — §4.3's "without Web Locks, last-writer-wins is safe", §4.4 quirk 3's
-evicted store, and a tab that crashes after `discover` but before the IDB write.
-Two forks read counter *N*, both derive *N+1*, and under identical stale entropy
-both produce the same nonce over different plaintexts (different `ckpt_at`,
-different `notes[]`). That is XChaCha20-Poly1305 `(key, nonce)` reuse over the
-reference cursors, note ids and nullifiers the seal exists to hide.
-
-**Structural guard, stated at exactly its real strength.** The plaintext carries
-`prev_entropy_h = sha256(entropy32 used for this blob)`. On re-seal, the module
-compares `sha256(entropy32)` against the decrypted `prev_entropy_h` and raises
-`ENTROPY_REUSED` on equality, refusing to seal. This closes the
-**constant-entropy** case completely, including across a fork (both forks read
-the same `prev_entropy_h` and both refuse). It does **not** close the case of two
-forks that each cache a *different* stale value and happen to supply the same one
-— that requires fresh entropy, which is the contract. The guard is
-defence-in-depth against the misuse the maintainer flagged; it is not a
-substitute for `getRandomValues`, and no text in this spec may claim otherwise.
-
-`entropy32` that is not exactly 32 bytes is `ENTROPY_INVALID` (never silently
-padded or truncated).
-
-Acceptance assertions (leg **q**), written so they can actually fail:
-
-- two `discover()` calls fed the **same** prior sealed blob and the **same**
-  `entropy32` (the forked path) — the module raises `ENTROPY_REUSED`; with the
-  guard disabled in a test-only build, the two nonces are asserted **equal**, so
-  the guard is proven to be the thing preventing the collision rather than an
-  accident of the derivation;
-- two `discover()` calls fed the same prior blob and **different** `entropy32`
-  produce different nonces;
-- a purity check that the wrapper never caches, reuses or derives `entropy32` —
-  every call site is a fresh `crypto.getRandomValues(new Uint8Array(32))`,
-  asserted by a scanner over the wrapper source and by a spy in the Node build.
-
-The old unit test ("nonce inequality across seals under fixed entropy" on the
-sequential path) is retained but explicitly labelled **non-sufficient**: it
-passes on the sequential path and cannot see the forked path, which is why the
-first assertion above exists.
-
-An AEAD failure (wrong key, tampered store, cross-network reuse caught by the
-AAD) is treated as **no cursor**: fresh discovery, with
-`details.cursor_reset = true` surfaced so the wrapper can log it. Correct
-behavior for "different user on the same origin".
-
-Cursors use the exact reference JSON schema (base §7.4), so sealed-state
-cursors round-trip with compat and `serve` wire cursors, and
-`export_reference_cursor` delivers Tier-0 migration without resync in the
-browser.
+**In-memory reorg logic is unaffected and is not a contradiction.** `apply_feed`
+still detects the masked reorg and the tail contradiction, still bumps
+`tail_generation`, and `sync_once` still rewinds an owner whose generation
+differs. In the browser all of that lives for one session, because the only
+durable per-key artifact is checkpoint-only. The claim is about persistence, and
+leg **r** is what proves it.
 
 ### 3.7 Error model
 
 Every throw is `{"code":"<SCREAMING_SNAKE>","message":"…","details":{…},"retryable":bool}`.
-Closed set, shared verbatim by `strk20-feed` (`FeedError` maps 1:1 onto the
-`FEED_*` and `SNAPSHOT_*` codes), the wasm module, npm, and `serve`:
+Closed set, shared verbatim by `strk20-feed`, the wasm module, npm and `serve`.
+§3.7's table stands — including the deletion of `STATE_STALE` and the standing
+prohibition on reintroducing a thrown staleness error — with these changes:
 
-| code | details | retryable | raised by |
-|---|---|---|---|
-| `FEED_HASH_MISMATCH` | `{artifact, epoch?, expected, actual}` | no | any content check |
-| `FEED_CHAIN_BROKEN` | `{epoch, expected_prev, actual_prev}` | no | epoch apply |
-| `FEED_MALFORMED` | `{artifact, line?, detail}` | no | any parser |
-| `FEED_EPOCH_GAP` | `{expected, got}` | no | epoch apply |
-| `FEED_ADVANCED_MIDSYNC` | `{tail_from, floor}` | **yes** | head apply (manifest/head race) |
-| `DECOMPRESS_LIMIT` | `{artifact, cap}` | no | TS/Rust decompression |
-| `SNAPSHOT_ROOT_MISMATCH` | `{computed, header, anchor}` | no | §1.5 ring 5 |
-| `SNAPSHOT_ANCHOR_MISSING` | `{e}` | no | manifest check |
-| `SNAPSHOT_NOT_EMPTY` | — | no | apply_snapshot |
-| `BOUND_BELOW_SNAPSHOT` | `{bound, basis}` | no | view construction |
-| `CHAIN_MISMATCH` | `{field, expected, got}` | no | every identity check |
-| `STATE_CORRUPT` / `STATE_VERSION` / `STATE_FOREIGN` | stamp fields | no | `load` |
-| `SEALED_STATE_MISMATCH` | `{cursor_reset:true}` | no | sealed open (non-fatal) |
-| `KEY_INVALID` | — | no | `discover` |
-| `ENTROPY_INVALID` | `{expected:32, got}` | no | `discover` (entropy32 length) |
-| `ENTROPY_REUSED` | — | no | `discover` (§3.6 `prev_entropy_h` guard) |
-| `DISCOVERY_INCOMPLETE` | `{passes}` | no | pass budget exhausted |
-| `HISTORY_UNAVAILABLE` | `{floor}` | no | history below the floor |
-| `INTERNAL` | scrubbed | no | panic hook |
+| change | code | details | retryable | raised by |
+|---|---|---|---|---|
+| **added** | `SYNC_PROTOCOL` | `{expected_seq, got_seq}` | no | `sync_supply` for a response that is not outstanding, or re-entry into a closed run |
+| **added** | `SYNC_IN_PROGRESS` | — | no | `sync_begin` while a run is open |
+| **added** | `DECOMPRESS_UNSTAGED` | `{artifact, zst_sha256}` | no | the parked transport: the wrapper inflated bytes it did not stage (§3.4) |
+| **added** | `SCOPE_VIOLATION` | `{key}` | no | `MemStore::meta_set` of a key outside §3.2c's allowlist — an internal invariant; escaping it is a bug |
+| **added** | `SESSION_INVALID` | `{handle}` | no | `discover_step`/`finish` on an unknown, finished or aborted handle |
+| **added** | `SESSION_INCOMPLETE` | `{phase}` | no | `discover_finish` before a step said `done` |
+| **added** | `SNAPSHOT_UNREACHABLE` | `{basis, head, tried}` | no | §11.3 reachability — already raised by `apply.rs:569-631` and missing from the table |
+| **added** | `SNAPSHOT_UNAVAILABLE` | — | no | `coldStart:'snapshot'` against a feed publishing none (`apply.rs:173-178`) — likewise missing |
+| **added** | `ANCHOR_UNBOUND` | `{block, proof_block_hash, header_hash}` | no | ring 6, §12 point 3 |
+| **added** | `KEY_UNAVAILABLE` | `{reason}` | **yes** | npm only — `Account.viewingKey()` rejected (locked wallet) |
+| **added** | `ABORTED` | — | no | npm only — `AbortSignal` |
+| **clarified** | `FEED_ADVANCED_MIDSYNC` stays, raised by `apply_feed` itself (`apply.rs:273-279`) | `{tail_from, floor}` | yes | — |
+| **clarified** | `DECOMPRESS_LIMIT` is raised by TypeScript (its one resource obligation) and by Rust for uncompressed-artifact bounds | `{artifact, cap}` | no | — |
+| **removed** | `BOUND_UNSUPPORTED` was proposed and is **not** added | — | — | `BOUND_BELOW_SNAPSHOT` already covers the only unanswerable case (§3.2) |
 
-**`STATE_STALE` is deleted from the set (review finding 13).** Staleness is a
-**return value, never a throw**: `check_manifest` returns `"ok" | "behind" |
-"diverged"`, §4.3's flow switches on it, and leg **q** asserts the three
-discriminants. A blob that is unusable rather than merely stale already has its
-code (`STATE_CORRUPT` / `STATE_VERSION` / `STATE_FOREIGN`, all from `load`).
-Nothing in this spec may reintroduce a thrown staleness error: a throw and a
-discriminant are different TypeScript control flow and different
-`DiscoveryEvent` emission, and the two cannot both be normative.
-
-Codes added by other layers: `TRANSPORT` (npm, retryable), `CONFIG_INVALID`
-(npm, a constructor option the shipped build does not implement — see §4.5),
-`INVALID_QUERY` (SSE 400), `AUTH_REQUIRED` / `INVALID_TOKEN` / `INVALID_BODY` /
-`SERVICE_UNAVAILABLE` / `BLOCK_REORGED` (serve + compat). Nothing else is ever
-thrown across a boundary. `FEED_HASH_MISMATCH` names the epoch and both hashes
-so the wasm, npm and Rust wordings are one vocabulary. Every `message` and
-`details` value is asserted key-clean by the scanner (leg **q**).
+Ring 6's `UNAVAILABLE`, `plan`-style staleness, and `need_more`-style
+continuation are all **control flow, never throws**. Every `message` and every
+`details` value is asserted key-clean by the leg **q** scanner.
 
 ### 3.8 Consuming the fork until the upstream PR lands
 
-Given: `starknet-providers` is declared but unused in `discovery-core` at rev
-`74841ca`; feature-gating it is a two-line `Cargo.toml` change (roadmap item
-7).
+Unchanged. Given: `starknet-providers` is declared but unused in
+`discovery-core` at rev `74841ca`; feature-gating it is a two-line
+`Cargo.toml` change (roadmap item 7).
 
 1. Fork `starkware-libs/starknet-privacy` under our org; branch
    `strk20/providers-gate-74841ca` = the pinned rev **plus exactly one commit**
@@ -1443,160 +1957,380 @@ Given: `starknet-providers` is declared but unused in `discovery-core` at rev
    `providers = ["dep:starknet-providers"]`).
 2. **One** workspace-wide
    `[patch."https://github.com/starkware-libs/starknet-privacy.git"]` entry
-   pinning the fork by rev, with the feature **default-on** so native builds
-   are behaviorally identical to today; `crates/client-wasm` and
-   `crates/consumer` set `default-features = false`. A split pin (wasm crates
-   on the fork, native crates on upstream) is **forbidden**: two sources for
+   pinning the fork by rev, with the feature **default-on** so native builds are
+   behaviorally identical to today; `crates/wasm` and `crates/consumer`
+   set `default-features = false`. A split pin is **forbidden**: two sources for
    one git dependency in one workspace yields two `discovery-core`/`Felt` type
-   identities — precisely the silent trait-bound failure base §3's CI deny
-   exists to prevent.
-3. The diff is vendored at `patches/discovery-core-providers-gate.patch`. CI
-   job `fork-delta-check` asserts, on every run: the fork rev equals the
-   upstream rev plus that patch, **and**
-   `git diff <upstream>..<fork> -- crates/discovery-core/src` is EMPTY — Cargo
-   metadata only, zero source lines. This is the mechanical form of "consumed
-   UNMODIFIED".
-4. The upstream PR is filed at implementation step 0b, in parallel with the
-   refactor, so the fork's clock starts immediately. On merge, the `[patch]`
-   section and `patches/` file are deleted in one commit and the CI job inverts
-   into a tripwire that fails if the `[patch]` section ever returns.
+   identities.
+3. The diff is vendored at `patches/discovery-core-providers-gate.patch`. CI job
+   `fork-delta-check` asserts, on every run: the fork rev equals the upstream rev
+   plus that patch, **and** `git diff <upstream>..<fork> --
+   crates/discovery-core/src` is EMPTY — Cargo metadata only, zero source lines.
+4. The upstream PR is filed at step 0b, in parallel with the refactor. On merge,
+   the `[patch]` section and `patches/` file are deleted in one commit and the CI
+   job inverts into a tripwire that fails if the `[patch]` section ever returns.
 
 ### 3.9 Purity and size gates (CI, run with the suite)
 
-- **Feature-resolved dependency walk** (not a lockfile name walk — review
-  finding 11a): `cargo tree -e features -p strk20-consumer` and
-  `-p strk20-engine --target wasm32-unknown-unknown` must not reach `tokio`,
-  `reqwest`, `rusqlite`, `getrandom`, or `web-sys` network/storage features.
-  The resolved tree is checked in and diffed in CI, so a transitive default
-  feature that re-enables `getrandom` is a red build rather than a silent
-  reopening of C2.
-- **`unsafe` posture, corrected (review finding 11b).**
-  `crates/consumer` is pure Rust and keeps `#![forbid(unsafe_code)]`.
-  **`crates/client-wasm` carries `#![deny(unsafe_code)]`, not `forbid`**:
-  `#[wasm_bindgen]` expansion emits `unsafe` items (the generated `__wbg_*_free`
-  externs and ABI shims), and `forbid` — unlike `deny` — cannot be lifted by an
-  `allow` inside macro-generated code, so the cdylib as previously specified
-  would not compile at all. Exactly one documented `#[allow(unsafe_code)]`
-  scope is permitted, on the `#[wasm_bindgen]` facade module; CI asserts the
-  count is one and that the crate contains no hand-written `unsafe` block.
-- **Import-section audit**: `wasm-objdump -j Import -x` on the release module,
-  compared against a checked-in `crates/client-wasm/import-allowlist.txt` of
-  permitted `(module, field)` pairs, diffed in CI. The allowlist is frozen by
-  that file rather than by a name-pattern judgement, because `__wbg_*` import
-  names are derived from the JS API being bound and a pattern match drifts open
-  (review finding 12).
+§3.9 stands entire — the feature-resolved dependency walk with its checked-in
+diffed tree, the corrected `deny`-not-`forbid` posture with exactly one
+documented `#[allow]` scope on the facade module, the checked-in
+`import-allowlist.txt` diffed as a **file** rather than matched as a name
+pattern, the honest restatement of what the audit proves (**the module cannot
+open a network handle, a storage handle, a timer or a randomness source of its
+own** — the import section is not empty, and `__wbindgen_*` calls into JS
+carrying arbitrary strings are how every ABI method returns its JSON), the one
+denominator for wire cost, and the size FILL-IN. Five amendments:
 
-  **The property, restated at its real strength.** The old wording — "the
-  allowlist is wasm-bindgen glue only… *the module cannot leak what it cannot
-  call*", with C2 pricing an ABI parameter on an "absolutely empty" import
-  section — overclaimed twice. The section is not empty: `__wbindgen_string_new`
-  / `__wbindgen_throw` / `__wbg_*` are calls **into JS carrying arbitrary
-  strings**, and they are how every ABI method returns its JSON. What the audit
-  actually proves is: **the module cannot open a network handle, a storage
-  handle, a timer or a randomness source of its own.** It can only hand bytes to
-  the wrapper — and the wrapper is what legs **q** and **u** scan. The entropy
-  parameter is justified on the merits recorded in C2 (dependency graph,
-  determinism), not on emptiness.
-- **Size budget — one denominator (review finding 17).** §4.1 counted module +
-  glue + fzstd against the same 300 KB that this section and leg **s** applied
-  to the module alone, a ~23 KB disagreement in the number integrators quote.
-  The single denominator is **total published wire cost**: gzip of
-  `engine_bg.wasm` + the wasm-bindgen glue + `fzstd`, i.e. what a consumer
-  actually downloads. Both this section and leg **s** gate that figure and
-  nothing else.
+- **The import allowlist must contain no time source, and that is now named as a
+  gate.** A wall-clock parameter for `discover_step` was proposed and is
+  rejected: §3.9's audit states its property in terms that include timers, and
+  reopening a purity gate by redefining one of its four nouns is exactly the
+  move the gate exists to prevent. It would also make the module's behaviour
+  device-dependent, which sits badly with the determinism leg **δ** asserts.
+  Slicing is by op budget (§3.3); TypeScript already owns the clock and every
+  other timing, and its calibration logic simply moves one layer up.
+- **The key-accepting entry lock becomes a named allowlist file.** CI parses the
+  wasm-bindgen-generated `.d.ts` and asserts that the set of exported methods
+  taking a `Uint8Array` named `key` is exactly `{discover_begin, history,
+  export_reference_cursor}` — a list, diffed as a file, for the same reason
+  §3.9 stopped pattern-matching import names.
+- **New gate: the request-emitter purity proptest.** In `strk20-consumer`,
+  native, over `MemStore` and a scripted transport: for any two distinct
+  (address, key) pairs and any feed fixture, `request_log()` after driving a sync
+  to completion is **byte-identical**, and stays so when `discover_*` is
+  interleaved between syncs. This is P-blind as a theorem about a key-blind
+  function; the wire capture in leg **u** becomes its independent empirical
+  check rather than its only evidence.
+- **New gate: the Pedersen delta, measured at step 3 before any npm code.**
+  `feed::mpt` pulls Pedersen, and Pedersen implementations ship large
+  precomputed point tables. If `discovery-core`'s slot derivation already links
+  the same tables the marginal cost is ~0; if not, the tables alone can approach
+  the whole provisional 300 KB budget. Procedure: build with default features,
+  record `gzip(wasm)`; build with `mpt` removed (ring 5 stubbed), record; the
+  delta is the true cost of client-side root verification. **The split-module
+  fallback is not designed until that number exists** — if the tables are shared
+  it buys nothing and costs a second artifact to version. If the split ships, the
+  denominator becomes the sum of what a cold snapshot-lane session downloads,
+  including the second module, so the split cannot make the number look smaller.
 
-  The **budget value is not settable from the spike.** 300 KB was derived from
-  the 231 KB spike baseline, which predates codec + mpt + AEAD + `serde_json` +
-  the ABI. It is therefore recorded as a FILL-IN, set from a measured number at
-  the end of step 4 and defended thereafter:
+  > **FILL-IN (Pedersen delta, pending step 3):** gzip(wasm) with `mpt` = ___ KB;
+  > without = ___ KB; delta = ___ KB. **Split module: yes / no.** Date: ___.
 
-  > **FILL-IN (size budget, pending step 4):** measured total wire cost = ___ KB
-  > gzip (wasm ___ + glue ___ + fzstd ___). **Budget = measured + 20 %**, entered
-  > here and in leg **s**. Date: ___.
+- **New gate: the Pedersen MPT at *runtime*, which nobody had costed.**
+  `check_reachability` ends a snapshot cold start with
+  `strk20_feed::mpt::storage_root` over `full_slot_set_as_of` — a Pedersen MPT
+  over ~135,000 mainnet slots, inside wasm, on a phone, on the path whose entire
+  selling point is a fast cold start. Measure it at step 3 alongside the size
+  delta. If it is seconds, grounding must move off the critical path (the sync
+  completes at `server-asserted` and upgrades asynchronously), and that is an
+  **ABI-shaped decision**, so it has to be known before step 4 rather than
+  discovered during it.
 
-  Until it is filled in, the provisional gate is 300 KB and a breach is a review
-  event, not silent creep.
-- **Compile-fail lock**: the module exposes exactly two key-accepting entries
-  (`discover`, `export_reference_cursor`) and no method taking a transport-ish
-  type — trivially true because no network type exists in the crate; the lock
-  is the wasm32 build plus the dependency-graph test above.
+  > **FILL-IN (MPT root runtime, pending step 3):** `mpt::storage_root` over the
+  > mainnet slot set, in wasm, desktop / 4× throttle = ___ / ___ ms.
+  > **Grounding stays on the critical path: yes / no.** Date: ___.
+
+### 3.10 Deltas required of `crates/consumer` (0a completion)
+
+Everything §A3 asks of the shared crate, in one place, so it lands with step 0a
+rather than being discovered by the browser. All of it is small, all of it is in
+the shared path, and the first two are **blocking and independent of the wasm
+crate**.
+
+1. **Check `entry.zst` before decompressing an epoch** (`apply.rs:214-224`), as
+   the snapshot path already does. Three lines. A live R-I violation today.
+2. **The exportable-meta allowlist and the cursor/generation trait methods**
+   (§3.2b, §3.2c), plus `MemStore::lock` recovering from poisoning.
+3. **`apply_feed` takes `expect: &ChainProfile`** and compares genesis against
+   it, not only against stored meta (`apply.rs:119-143`). This closes the
+   trust-on-first-use hole — an empty mirror today adopts whatever chain id and
+   pool the feed declares — and it is what §6.2's stamping matrix already
+   requires. Both hosts get the check; neither wrapper re-implements it.
+4. **`ApplyOutcome` gains `verified: &'static str` and `state_dirty: bool`.**
+   `verified` is computed in `sync_once` today; the browser needs it from the
+   apply half because `sync()` is key-free (§4.2).
+5. **The event arena** in `mem.rs` (§3.2a).
+6. **`refresh_spent` and `prune_missing_notes` stay free generic functions.** A
+   proposal to make them default trait methods "so `FeedStore` may override them
+   for batched SQL" is rejected: a free function cannot be overridden and a
+   default method can, and the one rule the live run showed is subtle — *a spent
+   note's storage slot is not cleared, so spentness lives only in the nullifier
+   slot* (live-run §7) — is exactly the rule that must not have two
+   implementations.
+7. **`ProofSource` stays the ring-6 seam** and is parked in the browser exactly
+   like the transport (§3.3.1). No ring-6 decision moves into a wrapper.
+
+Note for the record: the shipped `ConsumerStore` is **not** §0.4.1's nine-method
+sketch and not the eleven-method surface the second-pass brief described. It is
+seventeen methods today (`meta_get`, `meta_set`, `is_empty`, `block_hash`,
+`block_hashes`, `read_slot_as_of`, `full_slot_set_as_of`, `view`,
+`reset_mirror`, `install_snapshot`, `replace_range`, `tail_generation`, `notes`,
+`upsert_note`, `set_note_spent`, `delete_note`, `delete_owner_notes`), plus the
+six of §3.2b, with `apply_feed`, `sync_once`, `refresh_spent`,
+`prune_missing_notes`, `run_incoming`, `run_outgoing`, `register_notes`,
+`reopen_cursor` and `full_resync` as free functions generic over it. §0.4.1's
+`NoteSet` value type was not built and is not being built: the row-level trait
+is the better fit, and the `added`/`spent` pure diff it justified now happens in
+`discover_finish` against the decrypted prior seal.
+
+### 3.11 Changelog — second pass (2026-08-31)
+
+What changed against the council's first pass, and why.
+
+| § | first pass | now | why |
+|---|---|---|---|
+| 3.1 | `MemStore` lives in the wasm crate | it already lives in `crates/consumer/src/mem.rs`; the wasm crate is the facade only | a browser-only second store would make the conformance leg cover a store the browser does not use |
+| 3.2 | `MemView<'a>` borrowing the store; `base`/`tail` compartments | owned `Arc` view with no lifetime, `Mutex` interior mutability, tail expressed through `Range::Above` | the shipped trait has `type View` with no lifetime and demands `Send + Sync`; the borrowed form does not compile and `RefCell` is not `Sync` |
+| 3.3 | `apply_snapshot` / `apply_epoch` / `apply_head` pushed from TypeScript | `sync_begin` / `sync_supply` over the unmodified `apply_feed`, with an advisory `prefetch` hint | the ordering is the trust logic and now exists once; the `auto` fallback is inexpressible in a push ABI |
+| 3.3 | `check_manifest` as a standalone arbiter (§0.2 C1's instance) | deleted; `staleness` is a field on the terminal Step | two arbiters drift; C1's principle is preserved and strengthened |
+| 3.3 | `discover` as one synchronous full pass | `discover_begin` / `discover_step(max_ops)` / `discover_finish` / `discover_abort` | 1.19 s measured on Sepolia with one note; the engine's `IoBudget` pass loop already made it resumable and we were discarding that |
+| 3.3 | — | ring 6 as `Step::Rpc` on the same trampoline | the browser can otherwise never reach `verified: "anchored"` while the CLI can — backwards, since the browser's user has an RPC URL already |
+| 3.3 | "exactly two key-accepting entries" | three, named in a diffed allowlist file; `key_retain` deferred with a trigger | wasm linear memory is same-origin readable, so retention's only real win is that `zeroize` runs; that does not pay for a key-holding module in v1 |
+| 3.4 | TypeScript verifies the `.zst` hash | the module hashes both buffers; TypeScript owns only the output cap | verification does not belong in the least testable layer; and the native epoch path's missing `entry.zst` check is fixed rather than papered over |
+| 3.5 | NDJSON with hex felts, one buffer | v2: JSON header + binary body + JSON trailer, ≤4 MiB frames; header gains `verified` and `snapshot_pending_grounding` | ~40 MB → ~17 MB **[est]** and no parsing; the bounds become array checks, which are stronger than grammar checks |
+| 3.6 | `notes[]` unbounded; no seal invalidation | notes bounded by `ckpt_at`; `ckpt_epoch` + `ckpt_epoch_hash` | otherwise the seal carries tail state and a cursor outlives the history it indexes |
+| 3.9 | — | no-clock gate named explicitly; request-emitter proptest; Pedersen size **and runtime** gates | a clock import would have reopened an audited allowlist for a convenience; the MPT's runtime cost on a phone was uncosted by everyone |
+
+Two cross-cutting reasons sit behind most of the table:
+
+**The `ConsumerStore` reality.** §A3 was designed against a spike. Block B is
+now shipped code with a named seam, a second store, and a conformance leg that
+runs the same state machine over both. Every decision above is made against that
+tree, and where the first pass assumed a different shape — a borrowed view, a
+crate that does not hold `MemStore`, a `NoteSet` value type, an apply path that
+TypeScript drives — the tree wins and the assumption is retired in writing.
+
+**The customer holds a key.** Verified from the official Wallet API docs: *"No
+viewing keys in your app. The wallet holds the user's viewing key"* and *"The
+wallet discovers notes, builds the proof"*. A dapp on the Wallet API therefore
+never sees a viewing key and can never call this module. Our consumer is a
+**wallet or a key-holding app**, which is why the ABI is shaped around a
+short-lived key handed in per pass and zeroized on return, why the key-free
+phase (`sync`) is separately drivable, and why key *retention* is a deferred
+option rather than a v1 primitive.
 
 ---
 
 ## A4 — npm package
 
-### 4.1 Name and layout
+Second pass, 2026-08-31. Changelog at §4.12; judge conflicts at §0.5; the demo
+this package must carry is specified separately in
+[demo-app.md](demo-app.md).
+
+### 4.1 Name, layout, and who this is for
 
 Unscoped **`strk20-discovery`** (unanimous; amends base **§12.1**, which named
 it `@strk20/discovery-provider`). ESM + `.d.ts`, built with `tsc`, no bundler.
 
 ```
 strk20-discovery
-├── dist/index.js|d.ts        KeylessClient, DelegatedClient, types, errors
-├── dist/sdk.js|d.ts          LocalDiscoveryProvider  (subpath "strk20-discovery/sdk")
-├── dist/worker.js|d.ts       ~40-line worker host    (subpath "strk20-discovery/worker")
+├── dist/index.js|d.ts        LocalDiscoveryProvider, KeylessClient, Account,
+│                             types, errors            (package root)
+├── dist/sdk.js|d.ts          alias re-export          (subpath "strk20-discovery/sdk")
+├── dist/delegated.js|d.ts    DelegatedClient          (subpath "strk20-discovery/delegated")
+├── dist/worker.js|d.ts       ~40-line worker host     (subpath "strk20-discovery/worker")
 ├── dist/engine_bg.wasm       strk20-engine, lazily instantiated
 └── README.md
 ```
 
-`node >= 20` and evergreen browsers. The wasm loads via
-`new URL('engine_bg.wasm', import.meta.url)` — untouched in Vite, webpack 5 and
-Next; a `wasmUrl` option covers exotic setups. No inline-base64 entry (a second
-distribution artifact to version and test). Wire cost = wasm + glue + fzstd,
-gzipped — the **one** denominator §3.9 gates (review finding 17). The
-"~255 KB" arithmetic previously printed here assumed the module stayed at the
-231 KB spike baseline even though §3.9 anticipates growth from codec + mpt +
-AEAD + `serde_json` + the ABI; it is withdrawn in favour of §3.9's measured
-FILL-IN, and no number is quoted to integrators before step 4 measures one.
+**Is this for you?** The README opens with this table, because the positioning
+fact is the first thing an integrator can waste a day on.
 
-Supply-chain posture: **no install scripts**; npm provenance publishing;
-`files` whitelist; the wasm module's sha256 printed in the README and asserted
-in CI; the only runtime dependency is `fzstd` (pinned exact).
+| you are | do you hold a viewing key? | use |
+|---|---|---|
+| a dapp on the **Starknet Wallet API** | **no** — the wallet holds it, discovers your notes and builds the proof | not this package. You do not need it and cannot use it. |
+| a **wallet**, or an app with its own keystore | yes | `LocalDiscoveryProvider` (this package, keyless: the key stays in the browser) |
+| a **key-holding backend / self-hoster** | yes, server-side | `LocalDiscoveryProvider` in Node, or `DelegatedClient` against your own `strk20-sync serve` |
 
-The SDK adapter ships **inside** the same package (`/sdk`): one install, both
-audiences. All base §12.1 cursor-conversion semantics carry over verbatim, so
-`NotesCursor`/`ChannelCursor` round-trip identically to
+`LocalDiscoveryProvider` is exported **from the package root** and is the first
+identifier in the README, because our actual customer's integration is one field
+in `createPrivateTransfers({ discoveryProvider })`. `/sdk` remains as an alias
+subpath so nothing breaks. All base §12.1 cursor-conversion semantics carry over
+verbatim, so `NotesCursor`/`ChannelCursor` round-trip identically to
 `IndexerDiscoveryProvider`.
+
+`node >= 20` and evergreen browsers. The wasm loads via `new
+URL('engine_bg.wasm', import.meta.url)` — untouched in Vite, webpack 5 and Next;
+a `wasmUrl` option covers exotic setups; no inline-base64 entry. Instantiation
+uses `WebAssembly.instantiateStreaming` when the host serves
+`application/wasm`, falling back to `instantiate(await res.arrayBuffer())`,
+because the package cannot control the host's `Content-Type` and getting it
+wrong silently doubles cold start. The wasm is fetched **inside the worker**, so
+instantiation never competes with first paint.
+
+Wire cost = wasm + glue + `fzstd`, gzipped — the **one** denominator §3.9 gates.
+**No size or performance number appears in the README before §3.9 and §4.6
+measure one.**
+
+Supply-chain posture: no install scripts; npm provenance publishing; a `files`
+whitelist; the wasm module's sha256 printed in the README and asserted in CI;
+`fzstd` the only runtime dependency, pinned exact.
 
 ### 4.2 One interface, two clients
 
+> **§4.2 quoted, replaced in one place.** §4.2 declared
+> `interface KeyRef { address; viewingKey: Uint8Array }` and
+> `subscribe(k: KeyRef, cb)`. `getNotes(k)` with a `Uint8Array` is defensible —
+> one call, one copy, zeroized on return. A subscription is not: it forces the
+> integrator to hand a long-lived key to a long-lived object, which then holds
+> it across an unbounded number of passes, across a locked wallet, across a
+> backgrounded tab. For our verified customer — a wallet with a lock screen —
+> that is the wrong shape, and it is the shape they will have to work around.
+
 ```ts
-export interface KeyRef {
-  address: `0x${string}`;
-  viewingKey: Uint8Array;          // 32-byte BE. Uint8Array ONLY — see note.
+/** An owner the client can discover for. The client NEVER stores the key: it
+ *  calls `viewingKey()` at the start of every pass and zeroizes the bytes it
+ *  was given before the pass returns. A locked wallet rejects, and the client
+ *  reports `{type:'status', state:'locked'}` rather than failing the session. */
+export interface Account {
+  readonly address: `0x${string}`;
+  /** 32-byte big-endian viewing key. Return a FRESH array each call — the
+   *  client zeroizes it. Reject to decline (locked, denied, revoked). */
+  viewingKey(): Promise<Uint8Array>;
 }
+
+/** For a backend or CLI that legitimately holds the bytes for the process
+ *  lifetime. Named so the shape is visible in the integrator's own review. */
+export function staticAccount(address: `0x${string}`, key: Uint8Array): Account;
+```
+
+`Uint8Array` only, never a hex string: a string would create unzeroizable copies
+and make the honest zeroization statement cover nothing. The address is bundled
+because upstream discovery is (address, key)-parameterized and hiding that would
+be a lie. `staticAccount` holds a JS buffer that cannot be reliably zeroized; the
+README says so in the same paragraph that says the module never writes a key
+anywhere — **the guarantee is non-transmission, not host memory hygiene.**
+
+```ts
+export type Strk20ErrorCode =                     // closed union, never `string`
+  | 'FEED_HASH_MISMATCH' | 'FEED_CHAIN_BROKEN' | 'FEED_MALFORMED' | 'FEED_EPOCH_GAP'
+  | 'FEED_ADVANCED_MIDSYNC' | 'DECOMPRESS_LIMIT' | 'DECOMPRESS_UNSTAGED'
+  | 'SNAPSHOT_ROOT_MISMATCH' | 'SNAPSHOT_ANCHOR_MISSING' | 'SNAPSHOT_NOT_EMPTY'
+  | 'SNAPSHOT_UNREACHABLE' | 'SNAPSHOT_UNAVAILABLE' | 'ANCHOR_UNBOUND'
+  | 'BOUND_BELOW_SNAPSHOT' | 'CHAIN_MISMATCH'
+  | 'STATE_CORRUPT' | 'STATE_VERSION' | 'STATE_FOREIGN' | 'SEALED_STATE_MISMATCH'
+  | 'KEY_INVALID' | 'KEY_UNAVAILABLE' | 'ENTROPY_INVALID' | 'ENTROPY_REUSED'
+  | 'DISCOVERY_INCOMPLETE' | 'HISTORY_UNAVAILABLE'
+  | 'SYNC_PROTOCOL' | 'SYNC_IN_PROGRESS' | 'SCOPE_VIOLATION'
+  | 'SESSION_INVALID' | 'SESSION_INCOMPLETE'
+  | 'TRANSPORT' | 'CONFIG_INVALID' | 'ABORTED' | 'INTERNAL';
 
 export interface Note {
   token: string; index: number; noteId: string; nullifier: string;
-  amount: bigint; blockNumber: number; sender: string; spent: boolean;
+  amount: bigint; blockNumber: number; blockTimestamp: number;
+  sender: string; spent: boolean;
+}
+
+export type Phase = 'idle' | 'open' | 'manifest' | 'snapshot' | 'epochs' | 'head'
+                  | 'anchor' | 'persist' | 'discover';
+
+export interface Progress {
+  phase: Phase; done: number; total: number;
+  bytes: number; requests: number; elapsedMs: number;
+}
+
+export interface SyncTiming {
+  totalMs: number;
+  phases: { open: number; manifest: number; fetch: number; decompress: number;
+            apply: number; load: number; export: number; anchor: number;
+            discover: number };
+  cold: boolean;
+  fromCache: 'folded' | 'raw' | 'none';
+}
+
+export interface RequestRecord {
+  url: string;                       // absolute, exactly as issued, never truncated
+  method: 'GET' | 'POST';
+  purpose: 'feed' | 'live' | 'anchor-rpc';
+  artifact: 'genesis' | 'manifest' | 'epoch' | 'epoch_anchor' | 'snapshot'
+          | 'snapshot_anchor' | 'anchors' | 'head' | 'live' | 'rpc';
+  status: number;
+  bytes: number;                     // response body bytes
+  transferBytes: number | null;      // PerformanceResourceTiming.transferSize, or null
+  requestBodyBytes: number;          // 0 for every feed request, by construction
+  source: 'network' | 'etag-304' | 'idb-cache';
+  ms: number; at: number;            // performance.now()
+}
+export interface NetworkSummary {
+  requests: number; bytes: number;
+  byArtifact: Record<string, { requests: number; bytes: number }>;
+  requestLogSha256: string;          // computed INSIDE the module (§3.3)
+}
+
+export interface FeedState {
+  head: number; l1Accepted: number; lastEpoch: number; lastEpochTo: number;
+  historyFrom: number; snapshotBasis: number | null; snapshotRejected: boolean;
+  verified: 'anchored' | 'server-asserted' | 'replayed';
+  staleness: 'ok' | 'behind' | 'diverged';
+  changed: boolean; cold: boolean;
+  timing: SyncTiming; network: NetworkSummary;
 }
 
 export interface NotesResult {
   notes: Note[]; balances: Map<string, bigint>;
-  head: number; l1Accepted: number; complete: boolean;
-  historyFrom: number; snapshotRejected: boolean;
-  raw: unknown;                    // the untouched SyncReport JSON (oracle equality)
+  added: Note[]; spent: Note[];
+  feed: FeedState;
+  complete: boolean; historyFrom: number; cursorReset: boolean;
+  stats: { slotsRead: number; eventsScanned: number; passesIn: number; passesOut: number };
+  elapsedMs: number;                 // discovery only, excludes the feed pass
+  raw: unknown;                      // the untouched SyncReport (oracle equality)
 }
 
-export type DiscoveryEvent =
-  | { type: 'notes';  added: Note[]; spent: Note[]; head: number }
-  | { type: 'reorg';  rewoundTo: number }                     // epoch floor
-  | { type: 'status'; state: 'live' | 'polling' | 'degraded' }
-  | { type: 'error';  error: Strk20Error; recovering: boolean };
+export type DiscoveryEvent =         // closed union: no member carries a key,
+  | { type: 'progress'; progress: Progress }        // a cursor, or a free string
+  | { type: 'feed';     feed: FeedState }
+  | { type: 'notes';    added: Note[]; spent: Note[];
+                        balances: Map<string, bigint>; head: number; elapsedMs: number }
+  | { type: 'reorg';    rewoundTo: number }
+  | { type: 'status';   state: 'live' | 'polling' | 'degraded' | 'locked' | 'idle' }
+  | { type: 'request';  record: RequestRecord }
+  | { type: 'error';    error: Strk20Error; recovering: boolean };
+
+export interface Subscription { close(): void; readonly closed: boolean; }
 
 export interface DiscoveryClient {
-  getNotes(k: KeyRef): Promise<NotesResult>;
-  subscribe(k: KeyRef, cb: (ev: DiscoveryEvent) => void): () => void;   // unsubscribe
-  history(k: KeyRef, opts?: {fromBlock?: number; limit?: number}):
-      Promise<{ transactions: HistoryTx[];
-                complete: boolean;              // §1.1 paging contract
-                completeFrom: number;           // walk's last completed bound, ≥ historyFrom
-                registrationAvailable: boolean }>;
-  status(): ClientStatus;   // {mode:'keyless'|'delegated', transport:'sse'|'polling',
-                            //  head, l1Accepted, lastEpoch, historyFrom,
-                            //  verified: 'anchored'|'server-asserted'|'replayed',  // §1.5.1
-                            //  persistence:'indexeddb'|'memory'}
-  close(): Promise<void>;
+  /** Bring the local mirror to the feed's head. Takes NO key and emits no
+   *  key-derived value: a wallet can keep the mirror warm while locked, and the
+   *  expensive part of this system is demonstrably runnable with nothing about
+   *  the user in the process. */
+  sync(opts?: { signal?: AbortSignal; onProgress?: (p: Progress) => void })
+      : Promise<FeedState>;
+
+  getNotes(a: Account, opts?: {
+    signal?: AbortSignal;
+    onProgress?: (p: Progress) => void;
+    refresh?: 'auto' | 'force' | 'none';   // 'none' = discover over the mirror as it is
+  }): Promise<NotesResult>;
+
+  watch(a: Account, cb: (ev: DiscoveryEvent) => void): Subscription;
+
+  history(a: Account, opts?: { fromBlock?: number; limit?: number; signal?: AbortSignal })
+    : Promise<{ transactions: HistoryTx[]; complete: boolean;
+                completeFrom: number; registrationAvailable: boolean }>;
+
+  /** The SDK socket — the primary integration for a wallet. */
+  provider(a: Account): DiscoveryProvider;
+
+  status(): ClientStatus;
+  network(): { records: readonly RequestRecord[]; summary: NetworkSummary };
+  resetCache(opts?: { identities?: boolean }): Promise<void>;
+  close(): Promise<void>;            // terminates the worker; see §4.11
+}
+
+export interface ClientStatus {
+  mode: 'keyless' | 'delegated';
+  transport: 'sse' | 'polling';
+  persistence: 'indexeddb' | 'memory';
+  persisted: boolean;                // navigator.storage.persisted()
+  persistMode: 'raw' | 'folded' | 'both';
+  blocking: boolean;                 // true when worker:false — work runs on the caller's thread
+  leader: boolean;                   // this tab owns the SSE connection (§4.11)
+  engineBytes: number;               // wasm linear memory currently held
+  head: number; l1Accepted: number; lastEpoch: number; historyFrom: number;
+  verified: 'anchored' | 'server-asserted' | 'replayed';
+  accounts: number;
+  network: { requests: number; bytes: number };
 }
 
 export class KeylessClient implements DiscoveryClient {
@@ -1604,294 +2338,368 @@ export class KeylessClient implements DiscoveryClient {
     feedUrl: string;
     network?: 'mainnet' | 'sepolia' | ChainProfile;   // default 'mainnet' (§A6, C18)
     coldStart?: 'auto' | 'snapshot' | 'epochs';       // default 'auto' — ONE vocabulary
-    persistence?: 'indexeddb' | 'memory' | StorageAdapter;  // default 'indexeddb'
-    persist?: 'raw' | 'folded';                       // narrowed at publish; see §4.5
+    persistence?: 'indexeddb' | 'memory' | StorageAdapter;   // default 'indexeddb'
+    persist?: 'raw' | 'folded' | 'both';              // default 'both'; see §4.5
     live?: boolean;                                   // default true
     pollIntervalMs?: number;                          // default 30_000
     worker?: boolean;                                 // default true (C14)
+    prefetchConcurrency?: number;                     // default 6; 1 = strict wire order
+    stepBudgetMs?: number;                            // default 50 (worker) / 16 (main)
+    maxArtifactBytes?: number;                        // default 64 * 2**20
     anchorRpcUrl?: string;                            // enables §1.5 ring 6
+    anchorPolicy?: 'off' | 'best-effort' | 'require'; // default 'best-effort'
     requestPersistentStorage?: boolean;
     wasmUrl?: string | URL;
     fetch?: typeof fetch;
+    onRequest?: (r: RequestRecord) => void;
   });
-}
-
-export class DelegatedClient implements DiscoveryClient {
-  constructor(opts: { serverUrl: string; authToken?: string;
-                      network?: 'mainnet' | 'sepolia' | ChainProfile;
-                      assertUncheckedNetwork?: boolean;   // see §4.8
-                      pollIntervalMs?: number; fetch?: typeof fetch });
-}
-
-export class Strk20Error extends Error {
-  code: string;                        // the §3.7 closed set
-  details?: Record<string, unknown>;
-  retryable: boolean;
 }
 ```
 
-`viewingKey` is `Uint8Array` only. Accepting a hex string would create
-unzeroizable copies and make the honest-zeroization statement cover nothing;
-the type refuses the footgun rather than documenting it. `KeyRef` bundles the
-address because upstream discovery is (address, key)-parameterized — hiding
-that would be a lie.
+`stepBudgetMs` is a **TypeScript** budget: the wrapper calibrates ops per
+millisecond across `discover_step` calls and passes `max_ops`. The module has no
+clock (§3.9), and saying so in the option's docstring is cheaper than a support
+thread later.
 
-**One cold-start vocabulary across both languages (review finding 14a).** The
-three surfaces named the same three modes three ways — `strk20-sync sync
---cold-start auto|snapshot|epochs` (§1.7), `strk20-sync serve --cold-start
-epochs|snapshot` (§5.5), and npm `'auto'|'snapshot'|'genesis'` (above), where
-`epochs` and `genesis` were the same mode. The vocabulary is now
-**`auto` | `snapshot` | `epochs`** everywhere, including §1.1's escape-hatch
-sentence; `serve` continues to accept only the two modes that make sense for it
-(`epochs` default, `snapshot` allowed, no `auto`), using those names. §6.1's
-"one profile source" doctrine exists to stop exactly this kind of Rust/TS drift,
-and a vocabulary is as much a constant as a chain id: leg **t** asserts the
-accepted mode strings are identical in the two halves.
+**Additions to §4.2, each with its reason:**
 
-Switching keyless ↔ delegated is a constructor swap; leg **v** asserts
+- **`sync()`, key-free.** Separates "keep the mirror current" from "tell me my
+  notes". A wallet syncs on a schedule while locked; the demo times a cold load
+  before a key exists; and the central claim becomes a program you can run with
+  no key anywhere in it.
+- **`signal`.** A wallet UI closes the account screen mid-cold-start. Without
+  cancellation the integrator's only recourse is abandoning a running worker.
+  Abort is checked between Steps and between discovery slices; partial
+  application is retained (§3.3's resumability guarantee).
+- **`onProgress` / `progress` events.** The cold path is seconds of work — 3–5 s
+  desktop, 12–20 s on a mid-tier phone **[est]**. §4.2 gave no way to draw a
+  progress bar, so every integrator would build a fake one or block their UI.
+  Phases are the wrapper's own loop boundaries, so nothing is invented.
+- **`refresh: 'none'`.** Without it, N accounts cost N feed passes over 16 MB.
+- **`watch` replacing `subscribe`.** Returns a `Subscription` whose `closed` is
+  inspectable, which is the shape an integrator stores on a component instance.
+- **`Note.blockTimestamp`.** Already in `BlockLine` and in `MemStore`'s
+  `BlockRec` (currently `#[allow(dead_code)]`). Free, and every UI needs it.
+- **`anchorPolicy`.** §7.1's "configured means mandatory" is wrong in a browser
+  given LIVE-6: publicnode implements no storage proofs at any height, so a
+  user's own RPC that cannot answer would fail every sync. Three-valued: `off`
+  never asks; `best-effort` asks, downgrades `verified` on `UNAVAILABLE`, fails
+  on `MISMATCH`; `require` fails on anything but `MATCH`. **`MISMATCH` always
+  fails** — that one is evidence about the data, and the shipped code already
+  agrees (`sync.rs:341-382`).
+- **`network()` / `onRequest`.** A shipped surface, not demo scaffolding: it is
+  what makes the no-key claim checkable by the integrator rather than only by
+  our suite, it is a real cost meter, and it powers the demo's panel.
+
+**Multi-account, and where the lock lives.** Unstated in §A4 and the first thing
+a wallet asks:
+
+- **One client, one mirror, N accounts.** `KeylessClient` owns exactly one
+  `Engine` and one IndexedDB database. The feed pass runs once per refresh and is
+  shared; discovery is per account, and concurrent `getNotes` calls for different
+  accounts coalesce onto one feed pass.
+- All engine access is serialized inside the client (the wasm `Engine` is `&mut`
+  for both sync and discovery; there is no concurrency to be had). Cross-tab,
+  `navigator.locks.request('strk20:<db>')` as in §4.3, with §4.3's scope
+  correction intact.
+- **One sealed blob per (account, chain, pool)**, keyed by §4.4's `keyId`.
+  Accounts never share a cursor.
+- `watch()` over N accounts: one SSE subscription, one feed pass per poke, N
+  discoveries, N `notes` events. A locked account's `viewingKey()` rejection
+  emits `{type:'status', state:'locked'}` for that subscription and skips it; the
+  others proceed.
+
+**Must not ship**, recorded so it cannot drift back: any constructor that takes a
+key; `getNotes(k)`/`subscribe(k, cb)` with a raw key as the only way to make
+progress; `DelegatedClient` on the main entry (§4.8); any event payload or
+`details` field typed as an open `string`/`unknown` that a logger or telemetry
+pipe could receive; and any performance figure in the README before §3.9 and
+§4.6 measure one.
+
+Switching keyless ↔ delegated remains a constructor swap; leg **v** asserts
 deep-equal results from both against the same fixture.
 
-Worker (C14): on by default. The key crosses to the worker by **ArrayBuffer
-transfer**, detaching the caller's buffer, so exactly one copy is in flight and
-the module zeroizes it; `worker: false` runs on the main thread. The `/worker`
-subpath ships the recipe as code — advice without code never gets followed.
+Worker (C14): on by default. The key crosses by **ArrayBuffer transfer**,
+detaching the caller's buffer, so exactly one copy is in flight and the module
+zeroizes it. `worker: false` runs on the main thread and sets `status().blocking
+= true`; the README calls it a testing mode, not a deployment mode (§4.11).
 
 ### 4.3 Keyless data flow
 
 ```
-open IDB (or memory fallback)
-fetch genesis → byte-compare vs meta.genesis (CHAIN_MISMATCH on disagreement, §4.4)
-             → Engine.new(genesis) or Engine.load(stateBlob, genesis)
-fetch manifest → Engine.check_manifest        # RETURNS a discriminant; never throws
-   "ok"       → nothing to apply
-   "behind"   → fetch+apply epochs last_epoch+1..
-   "diverged" → drop persisted state, cold start
-cold start   → snapshot .zst → verify zst hash → fzstd → apply_snapshot(+anchor)
-fetch head (ETag) → apply_head
-per identity → sealed = IDB.cursors[keyId] → Engine.discover(addr, key, sealed, entropy32)
-             → store new sealed → emit added/spent deltas
-subscribe()  → EventSource /feed/live → on head/epoch/snapshot repeat the slice
-             → on error, poll fallback (§2.5)
-export()     → ONLY when an apply reported state_changed (epoch cadence ~4.7 h),
-               never on head events
+open IDB (or memory fallback)                       → status().persistence
+load profile → Engine.new(profile) or Engine.load_begin(profile) + frames
+loop:  step = Engine.sync_begin(coldStart) | Engine.sync_supply(...)
+         step.fetch → net.request(base + step.path)      # §4.10, one chokepoint
+                      (+ prefetch hints, ≤ prefetchConcurrency in flight)
+                      fzstd within step.decompress_cap
+                      Engine.sync_supply(env, zbytes, payload)   # module hashes both
+         step.rpc   → POST the user's own anchorRpcUrl (§1.5 ring 6)
+                      Engine.sync_supply_rpc(env, result | unavailable)
+         step.done  → FeedState { staleness, verified, changed, cold, timing, network }
+if info().state_dirty and persist includes 'folded':
+         Engine.export_begin/export_chunk → one IDB transaction, ≤4 MiB frames
+per account: sealed = IDB.cursors[keyId]
+         key = await account.viewingKey()             # fresh copy, per pass
+         h = Engine.discover_begin(addr, key, sealed, entropy32)   # key zeroized here
+         while (!done) Engine.discover_step(h, ops)   # ops calibrated from stepBudgetMs
+         out = Engine.discover_finish(h)  → store sealed, emit added/spent
+watch():  leader-elected EventSource /feed/live (§4.11); on poke, repeat the loop
+          on error, poll fallback (§2.5)
 ```
+
+`genesis.json` is fetched every session as the first Step and byte-compared
+against the stored copy before any row lands (§4.4). Nothing about the fetch
+plan is decided by TypeScript: the wrapper GETs the paths a key-blind module
+named, inflates within the cap the module named, and hands both buffers back.
 
 All sync passes run under `navigator.locks.request('strk20:<db>', …)` so tabs
 serialize; without Web Locks, last-writer-wins is safe **for key-independent
 state** because every persisted value is self-verifying (blobs carry a self-hash
-and a stamp; epochs are re-hashed) — stated and tested.
+and a stamp; epochs are re-hashed).
 
-**Scope correction (review finding 1).** That safety argument covers `meta`,
-`artifacts` and `state`. It does **not** extend to `cursors`: the sealed blob is
-an AEAD ciphertext, and two tabs that fork from the same prior blob are exactly
-the nonce-collision case §3.6 addresses. Forking there is safe only because
-every `discover()` call supplies fresh `crypto.getRandomValues` entropy, with
-`ENTROPY_REUSED` as the backstop against a caller that does not. Web Locks
-reduce the frequency of the fork; they are not what makes it safe, and no
-implementation may treat them as the mitigation.
+**Scope correction, unchanged and load-bearing.** That safety argument covers
+`meta`, `artifacts` and `state`. It does **not** extend to `cursors`: the sealed
+blob is an AEAD ciphertext, and two tabs forking from the same prior blob are
+exactly the nonce-collision case §3.6 addresses. Forking there is safe only
+because every discovery session supplies fresh `crypto.getRandomValues` entropy,
+with `ENTROPY_REUSED` as the backstop. Web Locks reduce the frequency of the
+fork; they are not what makes it safe, and no implementation may treat them as
+the mitigation.
 
 ### 4.4 IndexedDB layout
 
-Database name `strk20-discovery:<chain_id>:<pool>` — **per-chain-and-pool
-database**, so cross-network confusion is impossible rather than detected and
-a schema migration never touches two chains at once. Version 1:
+Database name `strk20-discovery:<chain_id>:<pool>` — per-chain-and-pool, so
+cross-network confusion is impossible rather than detected and a schema
+migration never touches two chains at once. Version 1:
 
 | store | key | value |
 |---|---|---|
 | `meta` | string | `format_v`, `last_epoch`, `last_epoch_hash`, `snapshot_e`, persist mode, **`genesis` (the raw `/feed/genesis.json` bytes)** |
 | `artifacts` | `"snapshot"` \| `"anchor"` \| epoch idx (number) | `{hash: string, zbytes: ArrayBuffer}` — compressed **exactly as served** |
-| `state` | `"folded"` | `ArrayBuffer` — `Engine.export()` blob (Design M only) |
+| `state` | `"folded/meta"` \| `"folded/<i>"` | `{frames, len, sha256, stamp, engine_version, profile_hash, written_at, source_manifest_hash}` / `ArrayBuffer` ≤ 4 MiB |
 | `cursors` | `keyId` (hex string) | `{sealed: ArrayBuffer, updatedAt: number}` |
 
-`keyId = hex(HKDF-SHA256(ikm = viewingKey, salt = "strk20-idb-keyid-v1",
-info = chain_id ‖ pool ‖ owner))` — the **full 32-byte HKDF output rendered as
-64 lowercase hex characters, no slice**. The previous `[0..32]` was ambiguous
-between 32 hex characters (128 bits) and 32 bytes of a 32-byte output (the whole
-thing), and the two readings give different row keys in the Rust and TS halves
-(review finding 14b). Unguessable without the key (R-K).
+`keyId = hex(HKDF-SHA256(ikm = viewingKey, salt = "strk20-idb-keyid-v1", info =
+chain_id ‖ pool ‖ owner))` — the **full 32-byte HKDF output rendered as 64
+lowercase hex characters, no slice**. Unguessable without the key (R-K).
 
-**`genesis` is persisted AND re-fetched (review finding 15).** Both
-`Engine.new(genesis_json)` and `Engine.load(blob, genesis_json)` require the
-genesis document and `load` compares the blob's stamp against it, but the `meta`
-store held none of it, so leg **u**'s asserted reload delta of `{manifest, head}`
-was unachievable — the client must fetch `/feed/genesis.json` on every reload,
-and reconstructing it from the listed `meta` rows is impossible. Both halves of
-the fix ship, because they buy different things:
+`artifacts` values stay compressed exactly as served, because Design R's whole
+point is that a reload re-runs the same verification ladder over the same bytes
+the network would have delivered; storing inflated payloads would put a
+TypeScript decompressor between the network and the hash the module checks.
 
-- the raw bytes are **stored**, so `load` has a stamp source that does not
-  depend on the network being reachable;
-- the document is **re-fetched every session** and byte-compared against the
-  stored copy, mismatch ⇒ `CHAIN_MISMATCH` before any row lands. This is the
-  stronger property and the reason to pay for the request: it catches **a feed
-  that changes its own genesis**, which a stored-only copy would never see and
-  which §6.3's first-contact profile check alone does not cover on later
-  sessions.
-
-Leg **u**'s reload delta is therefore `{genesis, manifest, head}` + SSE, and
-that is what the leg now asserts (§8).
+**`genesis` is persisted AND re-fetched.** The stored bytes give `load` a stamp
+source that does not depend on the network; the re-fetch and byte-compare each
+session is what catches **a feed that changes its own genesis**, which a
+stored-only copy would never see. Mismatch ⇒ `CHAIN_MISMATCH` before any row
+lands. Leg **u**'s reload delta is `{genesis, manifest, head}` + SSE.
 
 Never stored: `head.ndjson` bytes, the head ETag, anything tail-derived — the
-no-persisted-reorg-logic property is enforced by the schema having nowhere to
-put a tail. Documented residual metadata: row existence, sizes, timestamps.
+no-persisted-reorg-logic property is enforced by the schema having nowhere to put
+a tail. Documented residual metadata: row existence, sizes, timestamps.
 
 Quirks engineering, each with a test:
 
 1. IndexedDB transactions auto-commit at microtask end — never `await fetch`
    inside a transaction; stage bytes first, write in one transaction.
-2. `open` can throw synchronously or fire `onblocked` (private windows,
-   eviction, another tab mid-upgrade) — every path falls back to
+2. `open` can throw synchronously or fire `onblocked` — every path falls back to
    `persistence: 'memory'` and reports it through `status()`.
 3. Eviction is normal: an empty store is a cold start, never corruption.
-4. Multi-tab: Web Locks when present, safe without it (see §4.3).
+4. Multi-tab: Web Locks when present, safe without it (§4.3).
 5. Safari first-write latency: the initial persist happens after `getNotes`
    resolves, never on the critical path.
+6. **Safari evicts after 7 days without interaction (ITP)** unless
+   `navigator.storage.persist()` was granted. For a wallet this is the difference
+   between a 0.03 s-class warm start and a full cold fold on the user's second
+   visit a week later. `requestPersistentStorage: true` is the recommended wallet
+   setting, `status().persisted` reports the actual grant, and the README states
+   that a denied grant on Safari means periodic cold starts. The eviction is
+   **undetectable after the fact** — the flag that would record it is evicted too
+   — so quirk 3 governs: an empty store is a cold start, never an alarm.
+7. **Firefox private browsing gives an in-memory IndexedDB**: it opens
+   successfully and loses everything on close. Indistinguishable from eviction
+   and handled identically.
+8. **Structured clone of a large `ArrayBuffer` is a main-thread copy.** ≤4 MiB
+   frames (§3.5), written in one transaction; a partial write is detectable as a
+   frame-count mismatch and is treated as a cache miss, never a corruption.
+9. **`onblocked` during an upgrade with other tabs open**: the package does not
+   force-close other tabs. It falls back to `persistence: 'memory'` for the
+   session, reports it, and sends an advisory `BroadcastChannel` release request.
 
 ### 4.5 Persistence: both designs, one gate
 
-**Design R — raw artifacts are the persisted truth (the default lane).**
-Persist `artifacts` + `cursors` + `meta`. Every load re-runs the full
-verification ladder over stored bytes and refolds. A tampered or corrupted row
-fails its hash and is refetched: local storage is never trusted, only
-network-equivalent bytes re-verified per load. Zero cache coherence, zero reorg
-logic, one source of truth.
+**Design R — raw artifacts are the persisted truth.** Persist `artifacts` +
+`cursors` + `meta`. Every load re-runs the full verification ladder over stored
+bytes and refolds. A tampered row fails its hash and is refetched: local storage
+is never trusted, only network-equivalent bytes re-verified per load.
 
-**Design M — folded-mirror cache over R.** Additionally persist
-`Engine.export()` into `state` after an apply reports `state_changed` (epoch
-cadence — never per head poke; discussion §7's explicit hazard). Load:
-`Engine.load` → `check_manifest`; `"ok"`/`"behind"` skips all folding;
-`"diverged"` or any `STATE_*` error deletes the record and falls through to R,
-then to the network. Strictly a cache: deleting it is always correct.
+**Design M — folded-mirror cache over R.** Additionally persist the §3.5 blob
+into `state` after a sync reports `state_dirty` (epoch cadence — never per head
+poke; the discussion-§7 hazard). Load: frames → `Engine.load_begin` → sync;
+`"ok"`/`"behind"` skips all folding; `"diverged"` or any `STATE_*` deletes the
+record and falls through to R, then to the network. Strictly a cache: deleting it
+is always correct.
 
 Honest trust statement, printed in the README where M ships: M trusts IndexedDB
 integrity between loads. No secret exists to MAC a key-independent blob, so a
 same-origin attacker can alter folded values undetected until the next full
 refold. The marginal risk over R is precisely *persistence of tampering beyond
 the tampering code's presence*. Mitigation is architectural: an opportunistic
-idle-callback full refold + byte-compare every N loads, flagging divergence.
+`requestIdleCallback` full refold + byte-compare every N loads (default 20),
+flagging divergence as `{type:'error', error: STATE_CORRUPT, recovering:true}`.
 
-If the gate selects R, `export`/`load` **stay in the ABI, dormant** — they cost
-nothing and M is then turned on later by measurement, not by argument. There is
-no `'auto'` mode (C15).
+> **§4.5 amended.** §4.5 said *"if the gate selects R, `export`/`load` stay in
+> the ABI, dormant"*. **Design M is built**, and `persist` becomes
+> `'raw' | 'folded' | 'both'` with default `'both'`. The reason is measurement,
+> not argument: the L2 arm of §4.6's decision rule (`t_cold(L2) > 2000 ms` ⇒ M
+> for `coldStart:'epochs'` sessions) is already answered by the native
+> **5.97 s** cold fold of full mainnet history, and the browser is slower on
+> every term (§3.2 **[est]** 3–5 s desktop, 12–20 s throttled). The measured
+> **0.03 s** warm resync is itself a Design-M number — a persisted folded mirror
+> — so presenting M as an optimisation over R on the epochs lane is backwards.
+> `'raw'` stays available for a caller who wants no folded blob on disk at all;
+> `'folded'` for a caller who wants minimum stored bytes.
 
-**What `persist?: 'raw' | 'folded'` means when M is not built (review finding
-14g).** §4.2 published a two-member union while this section says M "is not
-built" under an R verdict — a documented option that may throw. Settled two
-ways, both required:
+**What is still open is L1, the snapshot lane, and its default is the bench's to
+set, not this document's.** Snapshots do not exist yet (roadmap item 1), so
+nothing has measured the snapshot-lane cold path. Until §4.6's L1 arm runs, a
+snapshot-lane session inherits the default `'both'`; when it runs and p95
+`t_cold(L1)` ≤ 500 ms, the snapshot lane's default becomes `'raw'`, which is the
+better trust posture. That flip is a measurement, and no argument in this
+document may pre-empt it.
 
-- the published union is **narrowed at publish time**. Step 5 (the gate) runs
-  before step 7 (npm) by §7's order, so under an R verdict the shipped `.d.ts`
-  declares `persist?: 'raw'`, and asking for `'folded'` is a compile error for
-  the integrator rather than a runtime surprise;
-- at runtime, an unimplemented mode arriving from untyped JavaScript is
-  rejected in the constructor with `CONFIG_INVALID
-  {option:'persist', got:'folded', built:['raw']}` — never silently downgraded
-  to `'raw'`, because a caller that asked for a cache and got none should learn
-  it at construction and not from a latency graph.
+`CONFIG_INVALID` still applies to a mode the shipped build does not implement,
+and the published union is still narrowed at publish time: an unimplemented mode
+arriving from untyped JavaScript is rejected in the constructor with
+`CONFIG_INVALID {option:'persist', got, built}` — never silently downgraded,
+because a caller that asked for a cache and got none should learn it at
+construction and not from a latency graph. There is no `'auto'` mode (C15).
+
+**Cache invalidation — normative, complete.** §A4 had no invalidation table, and
+a cache with no written invalidation rule is how the folded-mirror design earns
+the bad reputation §4.5 warns about.
+
+| trigger | `meta` | `artifacts` | `state` | `cursors` |
+|---|---|---|---|---|
+| `meta.format_v` ≠ ours | delete DB entirely | — | — | — |
+| stored `genesis` ≠ fetched genesis | **no writes at all**; throw `CHAIN_MISMATCH` | keep | keep | keep |
+| `staleness == "diverged"` | keep identity rows | delete all | delete | keep (each seal is invalidated on open by `ckpt_epoch_hash`, §3.6) |
+| `load` → `STATE_CORRUPT`/`STATE_VERSION`/`STATE_FOREIGN`, or `engine_version`/`profile_hash` differ | keep | keep | delete | keep |
+| engine major bump | keep | keep | delete | delete iff `seal_v` changed |
+| snapshot rejected (`auto` fell back) | keep | delete the snapshot **and** anchor rows together | delete | keep |
+| `FEED_HASH_MISMATCH` on a stored artifact | keep | delete that one row, refetch once; a second failure is a hard error naming both hashes | keep | keep |
+| **ring 6 `MISMATCH`** (the module called `reset_mirror`) | keep identity rows | **delete all** | **delete** | keep | 
+| sealed blob fails AEAD open, or `ckpt_at > last_epoch_to` | — | — | — | treated as **no cursor**: fresh discovery, `cursorReset: true` |
+| IDB eviction / empty store / private window | cold start; **never** an error (quirks 3, 6, 7) | | | |
+| `artifacts` over `maxArtifactBytes` | prune oldest epochs at or below the folded blob's floor; never the snapshot, never an epoch above it | | | |
+| `resetCache()` | keep `meta.genesis` | delete | delete | kept unless `{identities:true}` |
+| a sync reports `state_dirty == false` | **no write** — the epoch cadence is ~4.7 h and a head poke must never rewrite the blob | | | |
+
+The ring-6 `MISMATCH` row is the one nobody had, and it is the browser form of a
+bug the Rust already guards (`sync.rs:355-358`): the user's own RPC has proven
+this mirror is not the chain's, so `reset_mirror()` runs in wasm — and if the
+IDB `state` and `artifacts` rows survive it, the next load restores a refuted
+mirror from cache, sees a non-empty store, never re-enters the snapshot branch
+and never re-grounds. Both rows are dropped in the same transaction.
+
+**A non-obvious rule, stated because getting it wrong costs a full
+rediscovery:** re-cold-starting from a *newer* snapshot raises `history_floor`
+but does **not** invalidate sealed cursors or the note registry. Pool slots are
+write-once (134,879 distinct slots across 139,131 writes, 96.9 % first writes),
+so slot state below the new floor is complete and only *events* are missing.
+Discovery and spent-state read slots and nullifiers, so they are unaffected;
+only `history()` is, and that is exactly what `historyFrom` / `complete` report.
 
 ### 4.6 The fold-time measurement gate (pre-registered)
 
-Runs, and its results are published, **before any `KeylessClient` persistence
-code is written** — the discussion-§7 mandate, made binding.
+Runs, and its results are published, **before any persistence default is set for
+a lane it has measured** — the discussion-§7 mandate, made binding and now
+scoped by what is already known.
 
 - Harness `ts/strk20-discovery/bench/fold.bench.ts`, driven by Playwright.
-- Inputs, checked in under `bench/fixtures/`: **L1** = the default snapshot
-  lane (snapshot + epochs-after + head, recorded from the live feed at a pinned
-  manifest hash); **L2** = the full-history lane (all epochs + head); **L3** =
-  a synthetic 10× history from `strk20 bench synth-feed --scale 10` (headroom
-  only, never a shipping trigger).
+- Inputs, checked in under `bench/fixtures/`: **L1** = the snapshot lane
+  (snapshot + epochs-after + head, recorded at a pinned manifest hash); **L2** =
+  the full-history lane (all epochs + head); **L3** = a synthetic 10× history
+  from `strk20 bench synth-feed --scale 10` (headroom only, never a shipping
+  trigger).
 - Measurement profile (C17): **headless Chromium at 4× CPU throttle**, ≥5 runs,
   **p95** of `t_cold = decompress + verify + fold + root-verify` (network
   excluded; `t_zstd` recorded separately). One named physical mid-tier device is
   measured alongside and recorded, when available. CI runs the same bench as a
-  **trend line only**.
-- Decision rule, fixed now:
-  - p95 `t_cold(L1)` ≤ 500 ms → **ship Design R alone**; M is not built.
-  - p95 `t_cold(L1)` > 500 ms → **Design M is the default** for the snapshot
-    lane.
-  - Independently, p95 `t_cold(L2)` > 2000 ms → M is enabled for
-    `coldStart:'epochs'` sessions regardless of L1's verdict; **L2 alone never
-    makes M the default for snapshot-lane users**.
-  - CI alarm: fail the build if the L1 median regresses 3× against the recorded
-    baseline, so the verdict stays revisable by measurement rather than
-    argument.
-- Full numbers, device profiles and the decision go to
-  `docs/research/fold-gate-results.md`, and the verdict is recorded here:
+  **trend line only**, failing the build if the L1 median regresses 3× against
+  the recorded baseline.
+- **L2's arm is already answered** by the native 5.97 s measurement (live-run
+  §3) and is recorded as answered rather than re-run for show: M is built and is
+  the epochs-lane default. L2 and L3 continue as trend lines.
+- **L1 remains the open question**, and it is the one that decides a default:
 
-> **FILL-IN (fold gate, pending step 5):** `t_zstd` L1/L2 = ___ / ___ ms;
-> p95 `t_cold` L1/L2/L3 = ___ / ___ / ___ ms; throttled profile = ___;
-> reference device = ___. **Decision: R / M / M-for-fullHistory-only.**
+> **FILL-IN (fold gate L1, pending snapshots + step 5):** `t_zstd` L1 = ___ ms;
+> p95 `t_cold` L1 = ___ ms; throttled profile = ___; reference device = ___.
+> **Decision for the snapshot lane: `persist` default `raw` / `both`.**
 > Date: ___.
+
+Full numbers and device profiles go to `docs/research/fold-gate-results.md`.
 
 ### 4.7 zstd in TypeScript
 
 **`fzstd`** — pure-JS, decompress-only, ~8 KB gzip, MIT, no native or wasm
 dependency. We never compress client-side, so decompress-only is the whole
-requirement. Output is **always** sha256-verified against the manifest, so a
-decoder bug becomes a loud hash mismatch and never smuggled bytes; and per R-I
-the `zst` hash is checked **before** fzstd sees the bytes, with a 64 MiB cap
-for epochs and 256 MiB for snapshots. Exact-version pinned. One path only
-(C16); `DecompressionStream('zstd')` promotion is a recorded roadmap item.
+requirement. Exact-version pinned; one path only (C16);
+`DecompressionStream('zstd')` promotion is a recorded roadmap item.
+
+**What TypeScript owes here is now exactly one thing: the cap.** Per §3.4 the
+module hashes both the compressed and the inflated buffer, so a decoder bug or a
+substituted payload becomes a loud hash mismatch inside Rust. The wrapper's sole
+obligation is to inflate no further than `step.decompress_cap` (64 MiB for
+epochs, 256 MiB for snapshots) and to raise `DECOMPRESS_LIMIT {artifact, cap}`
+when it would — a resource bound, not a verification. The previous formulation
+("verify the `.zst` hash first, then inflate") is withdrawn: it put an
+accept/reject verdict in the least testable layer, and R-I is better served by
+the module checking both hashes in the order `apply.rs` already checks them.
 
 ### 4.8 DelegatedClient
 
-Speaks the **reference compat wire** (`POST /v1/sync/incoming_state`,
-`/v1/sync/outgoing_state`, `/v1/sync/preflight_check`, `POST /v1/history`;
-types from `crates/wire`) to either `strk20-sync serve` (§A5) or
-`strk20 --enable-compat`, and by construction to any stock reference
-deployment. Cursors round-trip through requests and responses in the reference
-schema, exercising the base §7.4 interop guarantee from TypeScript. The README
-states the trust boundary in the same words as base §9's compat row: the viewing
-key travels to a server the user runs.
+Exported from **`strk20-discovery/delegated`**, not from the package root. In
+delegated mode the viewing key leaves the browser; that is a legitimate
+self-host posture and a materially different trust boundary, and it should not be
+one autocomplete away from `KeylessClient`.
 
-**`subscribe()` uses fetch-based SSE, not `EventSource` (review finding 8).**
-`/feed/live` on `serve` is **inside the auth perimeter** (§5.5), and §5.7 already
-says in as many words that native `EventSource` cannot send headers. The
-previous text specified `EventSource` against an authenticated route, which has
-only two outcomes and both are bad: `subscribe()` silently degrades to polling
-on precisely the remote deployments R-F exists for, or `/feed/live` is carved
-out of the perimeter and becomes the one unauthenticated route on a keyed binary
-— a long-lived stream advertising the mirror's head/epoch/apply cadence to
-anyone who can reach the port. So:
+It speaks the **reference compat wire** (`POST /v1/sync/incoming_state`,
+`/v1/sync/outgoing_state`, `/v1/sync/preflight_check`, `POST /v1/history`; types
+from `crates/wire`) to either `strk20-sync serve` (§A5) or `strk20
+--enable-compat`, and by construction to any stock reference deployment. Cursors
+round-trip in the reference schema, exercising base §7.4 interop from
+TypeScript. It adopts §4.2's `Account` and event shapes, so the constructor swap
+in leg **v** still works. The README states the trust boundary in base §9's
+words: **the viewing key travels to a server you run.**
 
-- `DelegatedClient.subscribe()` consumes `/feed/live` over **fetch + `ReadableStream`
-  with an `Authorization: Bearer` header**, then keyed re-query on each poke.
-  This is §5.7's transport shipped in v1 **for the notification plane only**:
-  no capability token, no `POST /v1/watch`, no registry, nothing key-derived on
-  the wire. C7's veto is not reopened — it vetoed keyed registries, and there is
-  none here — and R-E is honoured, since the token rides a header and never a
-  URL.
-- Native `EventSource` remains the transport for the **keyless** `/feed/live`
-  on the indexer (§2.1), which takes no auth and no parameters.
-- Against a `serve` with no token file configured (loopback-only, the R-F
-  default), the same fetch-based path runs without the header.
+`subscribe()` uses **fetch-based SSE with an `Authorization: Bearer` header**,
+not `EventSource` (review finding 8): `/feed/live` on `serve` is inside the auth
+perimeter (§5.5) and native `EventSource` cannot send headers. No capability
+token, no `POST /v1/watch`, no registry, nothing key-derived on the wire; R-E is
+honoured since the token rides a header and never a URL. Native `EventSource`
+remains the transport for the **keyless** `/feed/live` on the indexer, which
+takes no auth and no parameters.
 
-**Chain identity on construction, made checkable (review finding 7).** The
-client reads `/health` and verifies chain identity **before sending any key**.
-That check was unimplementable against two of the three named targets: the ops
-`/health` body carries `{status, head, l1_accepted, lag_secs, latest_epoch,
-class_hash, decode_state, verify_root_failed}` and **no `chain_id`, no `pool`**;
-implementation-note 3 records that compat mode deliberately reuses that one
-route (axum forbids two handlers on one path), so `strk20 --enable-compat`
-cannot serve a chain-stamped health either. Left as written it would have been
-implemented as "check if present" — i.e. skipped exactly where it matters, on a
-stock reference deployment pointed at the wrong network. Fixed at the source:
+**Chain identity on construction.** The client reads `/health` and verifies
+chain identity **before sending any key**. Base §6.2's ops `/health` body gains
+`chain_id` and `pool` (additive). When the fields are **absent**,
+`DelegatedClient` **refuses to construct**, throwing `CHAIN_MISMATCH
+{field:'chain_id', expected:<profile>, got:null}` unless the caller passes
+`assertUncheckedNetwork`. There is no "verify if present" mode.
 
-- base **§6.2**'s ops `/health` body gains `chain_id` and `pool` (§6.2 below —
-  additive, breaks no existing consumer, and it is the same one-line change the
-  stamping matrix already mandates for `serve`);
-- **client behaviour when the fields are ABSENT is specified, not left to the
-  implementer**: `DelegatedClient` **refuses to construct**, throwing
-  `CHAIN_MISMATCH {field:'chain_id', expected:<profile>, got:null}`, unless the
-  caller passes an explicit `network` assertion acknowledging that the server
-  cannot be checked. There is no "verify if present" mode.
+**Insecure transport is refused.** A `serverUrl` that is neither loopback nor
+`https:` throws `CONFIG_INVALID {option:'serverUrl', reason:'plaintext
+non-loopback'}` unless `allowInsecureServer` is set. A viewing key travelling in
+clear over a LAN is not a trade-off anyone makes deliberately.
 
 ```ts
 export class DelegatedClient implements DiscoveryClient {
   constructor(opts: { serverUrl: string; authToken?: string;
                       network?: 'mainnet' | 'sepolia' | ChainProfile;
-                      // Required to proceed against a server whose /health
-                      // carries no chain_id/pool (pre-amendment binaries).
                       assertUncheckedNetwork?: boolean;
+                      allowInsecureServer?: boolean;
                       pollIntervalMs?: number; fetch?: typeof fetch });
 }
 ```
@@ -1913,17 +2721,108 @@ teardown: kill children; run capture-scan over proxy-capture.bin + idb-dump.json
 ```
 
 - Node polyfills: `fake-indexeddb`, an EventSource polyfill; one Playwright
-  Chromium smoke exercises real IndexedDB / EventSource / Worker against the
-  same stack.
+  Chromium smoke exercises real IndexedDB / EventSource / Worker against the same
+  stack.
 - **The scanner is not reimplemented in TypeScript.** `capture-scan` is the
   leg-d Rust scanner promoted to a bin and reused verbatim over the TS proxy
-  capture and an IndexedDB dump. One scanner implementation for every capture
-  surface, no port that can silently weaken. Its self-test leg is retained: the
-  scanner MUST find the key in a delegated capture.
+  capture, an IndexedDB dump, the emitted `RequestRecord` stream and the demo's
+  exported run log. One scanner implementation for every capture surface. Its
+  self-test leg is retained: the scanner MUST find the key in a delegated
+  capture, and the 13-encoding list lives in **one shared fixture** consumed by
+  both the Rust scanner and the in-page scanner of demo-app.md §6, so the two
+  cannot drift.
+- **The chokepoint scan** of §4.10 runs beside it.
+- **Resumability leg (γ′):** kill the transport at epoch 200 of the L2 fixture,
+  re-open, resume, and assert a byte-identical final export blob and identical
+  `SyncReport`. Without it every flaky mobile network costs a full refetch and
+  nothing would catch a regression.
 - Golden truth: the TS suite reads the **same** checked-in O2 golden JSON the
   Rust acceptance test pins — one file, byte-one, never duplicated.
 
 CI order: `cargo build` → `cargo test -p e2e-tests` → `pnpm e2e`. No network.
+
+### 4.10 The fetch chokepoint (new, and load-bearing)
+
+Every byte this package fetches goes through one module, `src/net.ts`, exporting
+one function.
+
+```ts
+// src/net.ts — the ONLY place this package touches the network.
+export async function request(spec: FetchSpec): Promise<FetchOutcome>;
+```
+
+Obligations:
+
+1. Emit a `RequestRecord` for every call, before and after, onto the event bus —
+   which is what `network()` accumulates and `onRequest` forwards. **Requests
+   issued inside the worker are forwarded to the hook over `postMessage`**;
+   otherwise the hook lies by omission exactly where the audit matters.
+2. Build the URL as `base + step.path` with **no interpolation of any
+   caller-supplied string** beyond the base. `step.path` comes from the module's
+   closed artifact enum, so a query string is unrepresentable.
+3. Set no request header beyond `Accept`, `If-None-Match` (head only) and, in
+   delegated mode, `Authorization`. `credentials: 'omit'`, no cookies, no custom
+   UA.
+4. Reject at runtime any URL not matching §2.8.1's eight whole-path patterns,
+   plus `/feed/live`, plus (when configured) the anchor-RPC origin. Whole-path
+   match, never a prefix, never `startsWith('/feed/')`.
+
+**Mechanical enforcement:** a build-time scan asserting that no file under
+`src/` other than `net.ts` contains the identifiers `fetch`,
+`XMLHttpRequest`, `EventSource`, `sendBeacon`, or a dynamic `import()` of a URL,
+run in CI beside leg **u**. TypeScript has no type-system move that expresses
+"this module does no IO"; a scan over one filename is the checkable substitute,
+and it is what makes `onRequest` honest rather than best-effort.
+
+The anchor RPC is the one `POST` and the one non-feed origin. Its body carries a
+public pool address and a public block number and is identical for every user
+(§3.3.1); it is recorded with `purpose: 'anchor-rpc'` so it is visually separable
+everywhere it is displayed.
+
+### 4.11 Worker, SSE leadership, and memory
+
+- **Everything expensive runs in the worker**: wasm instantiation, `fzstd`,
+  `sync_supply`, every `discover_step`, every `export_chunk`. The main thread
+  does `fetch`, IndexedDB and rendering.
+- **`close()` terminates the worker.** That is the only way to return the
+  ~70–85 MB **[est]** of wasm linear memory the epochs lane holds: linear memory
+  never shrinks, and dropping an instance does not return it to the OS. A
+  main-thread engine holds it for the life of the page, which is a killed tab on
+  mobile. `status().engineBytes` reports it so an integrator can see the cost,
+  and `worker: false` is documented as a testing mode with `status().blocking =
+  true`.
+- **SSE is leader-elected over Web Locks.** HTTP/1.1 caps concurrent connections
+  at 6 per origin and an `EventSource` holds one for its lifetime: four tabs on
+  the same feed origin leave two connections for every epoch fetch, and six
+  deadlock. One tab takes
+  `navigator.locks.request('strk20:sse:<db>', {mode:'exclusive'})`, opens the
+  stream, and fans pokes out over a `BroadcastChannel`; followers run their own
+  verified fetch on a poke — identical semantics, one connection.
+  `status().leader` reports which tab holds it. Where Web Locks are unavailable,
+  every tab opens its own stream and the package logs one warning; the poll
+  cadence bounds the damage. **Nothing about blindness changes**: the leader's
+  request is byte-identical to any other client's, and `/feed/live` is
+  parameterless.
+- **Operators should serve the feed over HTTP/2**, where the cap is per-stream
+  and the issue evaporates. This belongs in the ops docs beside §2.7, not in
+  client code.
+
+### 4.12 Changelog — second pass (2026-08-31)
+
+| § | first pass | now | why |
+|---|---|---|---|
+| 4.1 | `/sdk` a subpath afterthought; `KeylessClient` the headline | `LocalDiscoveryProvider` exported from the root and named first; an "Is this for you?" table opens the README | verified from the Wallet API docs: a Wallet-API dapp never receives a viewing key, so it can never call us. Our customer is a wallet or a key-holding app, and its integration is one field in `createPrivateTransfers` |
+| 4.2 | `KeyRef { viewingKey: Uint8Array }`, `subscribe(k, cb)` | `Account { address, viewingKey() }`, `watch(a, cb)`, `staticAccount` as the named escape hatch | a real keystore authorizes a *use*; it does not hand out bytes for an object's lifetime. This also makes the locked wallet a first-class status instead of an integrator workaround |
+| 4.2 | no key-free phase | `sync()` takes no key | a wallet keeps its mirror warm while locked, and the central claim becomes a runnable program |
+| 4.2 | no cancel, no progress, no multi-account, `anchorRpcUrl` mandatory | `signal`, `onProgress`, one client / one mirror / N accounts with coalesced passes, `anchorPolicy` three-valued | a 3–20 s cold path with no cancel and no progress is unshippable; N accounts × N feed passes over 16 MB is the first thing a wallet notices; LIVE-6 says a capability gap must never fail a sync |
+| 4.2 | — | `network()` / `onRequest` (worker-forwarded), closed `DiscoveryEvent` and `Strk20ErrorCode` unions | the no-key claim must be checkable by the integrator; a closed union means a logger attached to our bus *cannot* receive key material |
+| 4.3 | TypeScript decides what to fetch | TypeScript fetches what a key-blind module names | the URL author has no key on that code path |
+| 4.4 | five quirks | nine: + Safari ITP eviction, `persisted()` surfaced, Firefox private-mode IDB, `onblocked` without force-closing tabs; `state` re-shaped into ≤4 MiB frames | ITP turns a returning wallet user's 0.03 s warm start into a full cold fold and is undetectable after the fact |
+| 4.5 | R is the lane, M is dormant if the gate says R | **M is built**; `persist: 'raw'\|'folded'\|'both'` default `'both'`; full invalidation table incl. the ring-6 `MISMATCH` row | the L2 arm is answered by the 5.97 s native measurement; the 0.03 s warm figure is itself a Design-M number. A cache with no written invalidation rule is worse than no cache |
+| 4.6 | gate open on both lanes | L2 recorded as answered; the FILL-IN scoped to L1, which alone decides a default | measured, not argued — and the snapshot lane genuinely has not been measured |
+| 4.7 | TypeScript verifies the `.zst` hash | TypeScript owns only the output cap | §3.4 |
+| 4.8 | on the main entry | own subpath + insecure-transport gate | the key leaves the browser there |
+| — | no equivalent | §4.10 chokepoint + CI identifier scan; §4.11 worker/leader/memory | TypeScript cannot express "does no IO"; and six-connection starvation, ITP and 80 MB of linear memory are what a browser actually does to you |
 
 ---
 
@@ -2345,12 +3244,23 @@ vectors.** No time estimates; order and edges only.
 8.  Sepolia fill-in via `strk20 profile verify` + nightly smoke   [anytime after 1]
 ```
 
+**0a has largely landed, and what remains of it is §3.10.** `crates/consumer`
+now holds `ConsumerStore`, `MemStore`, `apply_feed`, `sync_once` and the pass
+loops as generics; `crates/client/src/sync.rs` is a re-export shim. §0.4.1's
+`NoteSet` value type was not built and is not being built (§3.10). The seven
+remaining deltas — including the two blocking corrections, the missing
+`entry.zst` check and `apply_feed`'s trust-on-first-use genesis adoption — land
+in step 0a, before the wasm crate exists. Step 3 additionally owns the two
+Pedersen gates of §3.9 (bundle delta and MPT runtime), because a bad answer
+there is ABI-shaped and must be known before step 4, not during it.
+
 Edges in words. The extraction (0a) is first because every other area sits on
 it, it is the only step whose test already exists, and doing it now means
 snapshot cold start and the watch logic are written **once** in the extracted
 crate instead of written in `crates/client` and moved later. Profiles (1) come
 next because their stamps flow through every format defined afterwards.
-Snapshots (2) precede wasm (4) because `apply_snapshot` consumes the format.
+Snapshots (2) precede wasm (4) because the snapshot branch of `apply_feed`
+consumes the format.
 SSE (3) and serve (6) are independent islands. The gate (5) sits between wasm
 and npm because the discussion note requires the measurement before the
 persistence layer exists. The npm package (7) is last because it integrates
@@ -2501,10 +3411,12 @@ the fixture feed's raw bytes on **both** paths (snapshot and full-epoch);
 output and the O2 pins. Sealed round-trip: a second `discover` with the returned
 blob does no rediscovery (identical report, `ckpt_at` advancing only with the
 feed). Wrong-key sealed blob → `SEALED_STATE_MISMATCH` with
-`cursor_reset: true`, fresh discovery, same final notes. `check_manifest`
-**returns** `ok`/`behind`/`diverged` on the three constructed manifests — the
-return-value form is the asserted one and no staleness throw exists to provoke
-(review finding 13). `export_reference_cursor` output round-trips into the
+`cursor_reset: true`, fresh discovery, same final notes. The terminal Step's
+`staleness` field **returns** `ok`/`behind`/`diverged` on the three constructed
+manifests — the return-value form is the asserted one and no staleness throw
+exists to provoke (review finding 13; the standalone `check_manifest` it used to
+be asserted on is deleted by §0.5 S2, and the assertion moves rather than
+lapsing). `export_reference_cursor` output round-trips into the
 compat wire (interop). Every error-table code is provoked at least once,
 including `ENTROPY_INVALID` (a 31-byte buffer) and `ENTROPY_REUSED`. **The
 scanner runs over every thrown error string and over the exported state blob** —
@@ -2525,22 +3437,24 @@ over `crypto.getRandomValues` in the Node build asserts one fresh 32-byte draw
 per `discover()`.
 
 **r. WASM reorg byte-identity (A3).** Replay the leg-g fork through the module:
-`apply_head` reports `tail_rewound`; the next `discover` equals the post-fork
-O1; and the exported state blob is **byte-identical before and after the fork**
+the terminal Step's outcome reports `tail_rewound`; the next discovery session
+equals the post-fork O1; the sealed blob carries no note above `ckpt_at`
+(§3.6); and the exported state blob is **byte-identical before and after the
+fork**
 — the mechanical proof that the tail is never exported and that browser
 persistence needs no reorg logic.
 
 **s. WASM purity + size (A3.9, CI gates run with the suite).**
 **Feature-resolved** dependency walk (`cargo tree -e features`, not a crate-name
-walk): `consumer` and `client-wasm` reach no
+walk): `consumer` and `wasm` reach no
 `tokio`/`reqwest`/`rusqlite`/`getrandom` — asserted with a **red-first negative**
 that removes `default-features = false` from `chacha20poly1305` and confirms the
 gate fires, since a name-only walk cannot see the default-feature path through
 `aead` that would otherwise have shipped `getrandom` (review finding 11a).
 `wasm-objdump` import section matches
-`crates/client-wasm/import-allowlist.txt` exactly, diffed as a file rather than
+`crates/wasm/import-allowlist.txt` exactly, diffed as a file rather than
 matched as a name pattern (review finding 12). `crates/consumer` compiles under
-`#![forbid(unsafe_code)]` and `crates/client-wasm` under
+`#![forbid(unsafe_code)]` and `crates/wasm` under
 `#![deny(unsafe_code)]` with exactly one documented `#[allow]` scope and zero
 hand-written `unsafe` blocks — the leg **builds the cdylib**, which is what
 would have caught `forbid` being impossible over `#[wasm_bindgen]` expansion
@@ -2639,8 +3553,58 @@ persistence code is allowed to reference a mode.
 **z. Compile-fail locks (extends base §10.1).** Regenerated for the new
 `FeedTransport` signatures including `EpochPayload`, `fetch_snapshot` and
 `fetch_snapshot_anchor` (no user-derived parameter is expressible);
-`SecretFelt: !Serialize` unchanged; the wasm crate exposes exactly two
-key-accepting entries and no transport type.
+`SecretFelt: !Serialize` unchanged; the wasm crate exposes **exactly the
+key-accepting entries named in `crates/wasm/key-entries.txt`** — a diffed
+file rather than a count in prose (§3.9) — and no transport type.
+
+### 8.1 Legs added by the second pass (§0.5)
+
+Greek letters, so the a–z sequence stays stable. All runnable, all red first.
+
+**α. Store conformance over the new trait surface.** `MemStore` and `FeedStore`
+give identical `refresh_spent` / `prune_missing_notes` results over the same
+fixture, including the live-observed case *a spent note's slot is not cleared*
+(live-run §7), and identical `cursor_get`/`cursor_put`/`owner_generation`
+round-trips (§3.2b).
+
+**β. Request-emitter purity (proptest, native).** For any two distinct
+(address, key) pairs and any feed fixture, `request_log()` after driving a sync
+to completion is **byte-identical**, and remains so when discovery sessions are
+interleaved between syncs (§3.9). P-blind as a theorem; leg **u**'s wire capture
+becomes its independent empirical check.
+
+**γ. Prefetch equivalence.** `prefetchConcurrency` 1, 6 and 64 yield identical
+`request_log()`, byte-identical export blobs and identical `SyncReport`s
+(§3.3.1).
+
+**γ′. Resumability.** Kill the transport at epoch 200 of the L2 fixture,
+re-open, resume; the final export blob is byte-identical to an uninterrupted
+run's and the report matches (§3.3, §4.9).
+
+**δ. Discovery slicing equivalence.** A session stepped at small `max_ops`
+produces the same `DiscoverOut` as one stepped with an unbounded budget, and no
+step overruns its budget by more than one pass (§3.3).
+
+**ε. State blob v2.** Round-trip; the §3.5 bounds asserted as array checks; the
+header's `verified` never upgraded on load; a blob carrying
+`snapshot_pending_grounding` causes the next sync to discard the mirror. Leg
+**r** is unchanged and still asserts byte-identity across a tail fork.
+
+**ζ. Memory budget.** Peak wasm linear memory on the L2 fixture stays under a
+recorded budget; the §3.2 arena layout is asserted by that budget rather than by
+inspection.
+
+**η. Leader election.** N simulated tabs open exactly one `EventSource`; killing
+the leader promotes another within one lock timeout (§4.11).
+
+**θ. Chokepoint scan.** No file under `ts/strk20-discovery/src/` other than
+`net.ts` names `fetch`, `XMLHttpRequest`, `EventSource`, `sendBeacon`, or a
+dynamic `import()` of a URL; and a URL outside §2.8.1's whole-path allowlist is
+rejected at runtime (§4.10).
+
+The demo's own legs (d1–d7, and the clock leg that asserts the demo measures
+what it claims) live in [demo-app.md](demo-app.md) §10 and run in CI against its
+REPLAY lane.
 
 ---
 
@@ -2712,7 +3676,7 @@ point of recording reasoning separately from verdicts.
 | 8 | MAJOR — `subscribe()` uses `EventSource` against a token-authenticated `serve` | **FIXED by deciding, not hedging.** `/feed/live` on `serve` is **inside** the auth perimeter; `/health` is outside (it is how a client checks identity before sending a key); a perimeter table now exists so no route is undecided. `DelegatedClient.subscribe()` uses fetch-based SSE with an `Authorization` header — §5.7's transport shipped for the notification plane only, with no capability token, no `POST /v1/watch` and no registry, so C7's veto of keyed registries is not reopened and R-E is honoured. Native `EventSource` remains the transport for the keyless `/feed/live`. | §4.8, §5.2, §5.5 |
 | 9 | MAJOR — `ConsumerStore` cannot express the note registry `§0.4.1` says moves into `strk20-consumer` | **FIXED.** Confirmed: `notes_registry` with `upsert_note`/`notes`/`refresh_spent`/`prune_missing_notes` lives in `crates/client/src/store.rs`, while §0.4.1's `register_notes`/`refresh_spent` were declared generic over a read-only view. The registry becomes a value type `NoteSet` that those functions take and return — which is also what makes `DiscoverOut.added/spent` a pure diff — plus `notes_get`/`notes_put` on the trait so the two incompatible persistence models (SQLite table natively, sealed AEAD blob in wasm) each get what they need. The review's key point is adopted verbatim: 0a's stated test (the existing suite) **cannot detect a missing abstraction**, so 0a gains a `NoteSet` conformance leg over both impls. | §0.4.1, §7 step 0a |
 | 10 | MAJOR — the frozen state-blob example contradicts §1.7's floor rule and lacks the upper bound leg r depends on | **FIXED, and the example rebuilt rather than patched.** `history_floor` for basis 14059999 is 14060000; correcting that number alone would have left the example's `b`/`ev` lines below the floor, so the example now shows a client that applied the snapshot *and* epoch 1406. The degenerate case it had been hiding is called out: a snapshot-only client has an empty `[history_floor, last_epoch_to]` and therefore zero block/event lines. Bounds are written into the format lines and into `load`'s structural checks, so "no line references a block > `last_epoch_to`" is enforced by the parser and leg **r** is pinned by the grammar rather than by a byte comparison that happens to pass. | §3.5 |
-| 11 | MAJOR — the wasm crate fails two of its own §3.9 gates on day one | **FIXED, both halves.** (a) Every RustCrypto dependency is pinned `default-features = false` with an explicit feature list, and the gate becomes a **feature-resolved** `cargo tree -e features` walk with a checked-in diffed tree — a crate-name walk cannot see the default-feature path that would have shipped `getrandom` and quietly voided C2. Leg **s** gets a red-first negative that removes the pin and confirms the gate fires. (b) `crates/client-wasm` moves to `#![deny(unsafe_code)]` with one documented `#[allow]` scope, since `forbid` cannot be lifted inside `#[wasm_bindgen]`-generated code and the cdylib would not have compiled; `#![forbid]` stays on the pure-Rust `crates/consumer`. Leg **s** builds the cdylib. | §3.1, §3.9, leg **s** |
+| 11 | MAJOR — the wasm crate fails two of its own §3.9 gates on day one | **FIXED, both halves.** (a) Every RustCrypto dependency is pinned `default-features = false` with an explicit feature list, and the gate becomes a **feature-resolved** `cargo tree -e features` walk with a checked-in diffed tree — a crate-name walk cannot see the default-feature path that would have shipped `getrandom` and quietly voided C2. Leg **s** gets a red-first negative that removes the pin and confirms the gate fires. (b) the wasm crate moves to `#![deny(unsafe_code)]` with one documented `#[allow]` scope, since `forbid` cannot be lifted inside `#[wasm_bindgen]`-generated code and the cdylib would not have compiled; `#![forbid]` stays on the pure-Rust `crates/consumer`. Leg **s** builds the cdylib. | §3.1, §3.9, leg **s** |
 | 12 | MINOR — the import-section audit proves less than C2 spends an ABI parameter on, and its allowlist is unspecified | **FIXED.** The allowlist becomes a checked-in `import-allowlist.txt` of `(module, field)` pairs diffed in CI, not a name-pattern judgement that drifts open. The property is restated honestly: the section is **not** empty — `__wbindgen_string_new`/`__wbindgen_throw`/`__wbg_*` are calls into JS carrying arbitrary strings, and are how every ABI method returns its JSON — so what the audit proves is that the module cannot open a network, storage, timer or randomness handle of its own. The entropy parameter is re-justified on dependency-graph and determinism merits (C2), not on emptiness. | C2, §3.9, leg **s** |
 | 13 | MINOR — `check_manifest`: returns "diverged" or throws `STATE_STALE`? | **FIXED.** The return-value form wins (it is what the ABI signature and §4.3's flow use) and the `STATE_STALE` row is deleted from the closed set, with a standing prohibition on reintroducing a thrown staleness error — a throw and a discriminant are different control flow and different `DiscoveryEvent` emission, and both cannot be normative. Genuinely unusable blobs keep their `STATE_CORRUPT`/`STATE_VERSION`/`STATE_FOREIGN` codes on `load`. | §3.7, §4.3, leg **q** |
 | 14 | MINOR — cluster of eight underspecified formats | **FIXED, all eight.** (a) one cold-start vocabulary `auto\|snapshot\|epochs` in Rust and TS, asserted identical from one fixture in leg **t**; (b) `keyId` is the full 32-byte HKDF output as 64 lowercase hex, no slice; (c) `apply_snapshot` gets its return schema including the `state_changed` field §4.3 reads; (d) `"e"` is the epoch key on both SSE events and the manifest; (e) `ENTROPY_INVALID` added; (f) `history()` takes `sealed: Option`; (g) `persist` is narrowed at publish time and rejects an unbuilt mode with `CONFIG_INVALID` rather than silently downgrading; (h) `header.class` is now checked by ring 5 against the sidecar's `class_hash` and the manifest — the field previously existed for nothing. | §1.5, §2.2, §3.3, §3.7, §4.2, §4.4, §4.5, leg **t** |

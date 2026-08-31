@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 strk20-feed = { workspace = true, features = ["compress", "mpt"] }
+strk20-consumer = { path = "../consumer" }
 discovery-core = { workspace = true }
 starknet-core = { workspace = true }
 starknet-crypto = { workspace = true }

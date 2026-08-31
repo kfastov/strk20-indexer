@@ -229,31 +229,59 @@ pub struct FeedIdentity {
     pub pool: Felt,
 }
 
-/// Rings 1–5 of the §1.5 ladder, minus ring 6 (which needs an RPC) and minus
-/// reachability (§11.3, which needs the folded mirror).
+/// Ring 1 of the §1.5 ladder on its own: the transport checksum, expressed
+/// over an already-computed digest so it can be run at the one moment that
+/// makes it worth anything — BEFORE the bytes reach a decompressor (R-I). A
+/// checksum that only runs after a decompressor has eaten the bytes protects
+/// nothing, and the host that owns the decompressor is not always the crate
+/// that owns the ladder (Block B inflates through
+/// `FeedTransport::decompress`, because linking zstd would put `zstd-sys` —
+/// a C build with no `wasm32-unknown-unknown` backend — in its graph).
 ///
-/// `compressed` is verified BEFORE decompression (R-I): a transport checksum
-/// that only runs after a decompressor has already eaten the bytes protects
-/// nothing.
-#[cfg(all(feature = "compress", feature = "mpt"))]
-pub fn verify_snapshot(
-    compressed: &[u8],
+/// `zst_sha256` is the lowercase hex sha256 of the COMPRESSED bytes.
+pub fn check_zst_hash(
+    zst_sha256: &str,
+    entry: &crate::manifest::ManifestSnapshot,
+) -> Result<(), FeedError> {
+    if zst_sha256 != entry.zst {
+        return Err(FeedError::Malformed(format!(
+            "FEED_HASH_MISMATCH: snapshot {} has sha256 {zst_sha256}, manifest says {}",
+            entry.file, entry.zst
+        )));
+    }
+    Ok(())
+}
+
+/// Rings 1–5 of the §1.5 ladder over an ALREADY-DECOMPRESSED payload, minus
+/// ring 6 (which needs an RPC) and minus reachability (§11.3, which needs the
+/// folded mirror).
+///
+/// This is the single implementation of the snapshot ladder. It is split out
+/// from [`verify_snapshot`] on the decompression boundary and nowhere else,
+/// because that boundary is the only thing a host can legitimately need to
+/// vary: the feed crate inflates with `zstd`, Block B hands the job to its
+/// host so it stays wasm-clean. Everything security-bearing — every ring,
+/// every ordering, every failure string — lives here once. A second copy of
+/// these checks anywhere in the workspace is a bug: the copy the tests pin
+/// stops being the copy a client executes.
+///
+/// `zst_sha256` (the digest of the compressed bytes) is re-checked here so a
+/// caller that inflated first cannot skip ring 1 altogether; callers that can
+/// run it earlier must, via [`check_zst_hash`].
+#[cfg(feature = "mpt")]
+pub fn verify_snapshot_payload(
+    payload: &[u8],
+    zst_sha256: &str,
     entry: &crate::manifest::ManifestSnapshot,
     basis_epoch_hash: &str,
     expect: &FeedIdentity,
 ) -> Result<Snapshot, FeedError> {
-    // ring 1 — transport, before decompression
-    let zst_hash = hex::encode(crate::payload_sha256(compressed));
-    if zst_hash != entry.zst {
-        return Err(FeedError::Malformed(format!(
-            "FEED_HASH_MISMATCH: snapshot {} has sha256 {zst_hash}, manifest says {}",
-            entry.file, entry.zst
-        )));
-    }
-    let payload = crate::decompress_capped(compressed, crate::MAX_DECOMPRESSED, &entry.file)?;
+    // ring 1 — transport. Already run before decompression by any caller that
+    // owns the decompressor; re-asserted so it can never be skipped entirely.
+    check_zst_hash(zst_sha256, entry)?;
 
     // ring 2 — content identity
-    let content_hash = hex::encode(crate::payload_sha256(&payload));
+    let content_hash = hex::encode(crate::payload_sha256(payload));
     if content_hash != entry.hash {
         return Err(FeedError::Malformed(format!(
             "FEED_HASH_MISMATCH: snapshot {} payload has sha256 {content_hash}, manifest says {}",
@@ -262,7 +290,7 @@ pub fn verify_snapshot(
     }
 
     // ring 3 — structure and identity
-    let snap = parse(&payload)?;
+    let snap = parse(payload)?;
     if snap.header.chain_id != expect.chain_id || snap.header.pool != expect.pool {
         return Err(FeedError::Malformed(format!(
             "CHAIN_MISMATCH: snapshot is stamped chain {} pool {} but the feed declares {} {}",
@@ -317,4 +345,21 @@ pub fn verify_snapshot(
         )));
     }
     Ok(snap)
+}
+
+/// Rings 1–5 over a COMPRESSED snapshot file, for hosts that inflate with
+/// `zstd`. A thin wrapper: ring 1 before the decompressor touches the bytes,
+/// then the shared ladder in [`verify_snapshot_payload`]. It holds no checks
+/// of its own.
+#[cfg(all(feature = "compress", feature = "mpt"))]
+pub fn verify_snapshot(
+    compressed: &[u8],
+    entry: &crate::manifest::ManifestSnapshot,
+    basis_epoch_hash: &str,
+    expect: &FeedIdentity,
+) -> Result<Snapshot, FeedError> {
+    let zst_sha256 = hex::encode(crate::payload_sha256(compressed));
+    check_zst_hash(&zst_sha256, entry)?;
+    let payload = crate::decompress_capped(compressed, crate::MAX_DECOMPRESSED, &entry.file)?;
+    verify_snapshot_payload(&payload, &zst_sha256, entry, basis_epoch_hash, expect)
 }

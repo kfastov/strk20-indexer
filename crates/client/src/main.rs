@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use strk20_client::events::{events_for, LiveUnsupported};
 use strk20_client::store::{ColdStart, FeedStore};
 use strk20_client::sync::{sync_once, SyncOptions};
+use strk20_consumer::anchors::ProofSource;
 use strk20_client::transport::transport_for;
 use zeroize::Zeroize;
 
@@ -250,9 +251,15 @@ async fn main() -> Result<()> {
             if let Some(net) = network {
                 strk20_client::sync::check_chain_id(transport.as_ref(), net.chain_id()).await?;
             }
+            let anchor_proofs: Option<std::sync::Arc<dyn ProofSource>> = match &verify_anchor {
+                Some(rpc) => Some(std::sync::Arc::new(
+                    strk20_client::anchors::RpcProofSource::new(rpc)?,
+                )),
+                None => None,
+            };
             let opts = SyncOptions {
                 cold_start: cold_start.into(),
-                verify_anchor_rpc: verify_anchor,
+                anchor_proofs,
             };
             let report = sync_once(&store, transport.as_ref(), owner, &key, &opts).await?;
             if json {

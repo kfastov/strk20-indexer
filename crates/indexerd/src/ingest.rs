@@ -491,7 +491,209 @@ impl<'a> Ingestor<'a> {
     }
 }
 
+/// One block the seeker found the mirror and the chain disagree about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CoverageGap {
+    pub block: u64,
+    /// Pool events the chain has in this block.
+    pub chain_events: u64,
+    /// Pool events the mirror has stored for it.
+    pub mirror_events: u64,
+    /// Whether the mirror holds a `blocks` row for it at all.
+    pub in_mirror: bool,
+}
+
+/// What a seeker pass found: the chain's own block→event-count map for a range,
+/// compared against the mirror, block by block.
+///
+/// The three categories are kept apart on purpose. `missing` is the LIVE-8
+/// shape (block 11,263,135 had 6 pool events and 4 slot writes on chain and no
+/// row in any of our tables); `undercounted` is what a lost PAGE rather than a
+/// lost window looks like, and a check that only compared block presence would
+/// certify it as healthy; `overcounted` should never happen and is reported
+/// rather than swallowed, because a mirror holding more events than the chain
+/// is a different defect that the same walk can see for free.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CoverageReport {
+    pub from: u64,
+    pub to: u64,
+    /// Pool-active blocks the chain has in [from, to].
+    pub chain_blocks: u64,
+    pub chain_events: u64,
+    /// How many of those the mirror holds, and how many of their events.
+    pub mirror_blocks: u64,
+    pub mirror_events: u64,
+    pub missing: Vec<CoverageGap>,
+    pub undercounted: Vec<CoverageGap>,
+    pub overcounted: Vec<CoverageGap>,
+}
+
+impl CoverageReport {
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty() && self.undercounted.is_empty() && self.overcounted.is_empty()
+    }
+
+    /// The same report re-read against the mirror after a repair, so what is
+    /// printed and written is the state the operator is left in rather than the
+    /// state that prompted the repair.
+    ///
+    /// Only the blocks that WERE gaps are re-read: every other block already
+    /// agreed with the chain and nothing in a targeted re-ingest can have
+    /// changed it. The chain-side numbers are the ones the seeker measured and
+    /// are not re-fetched — this must not become a second scan.
+    pub fn refreshed_after_repair(&self, db: &crate::db::Db) -> Result<CoverageReport> {
+        let mut out = self.clone();
+        let gapped: Vec<CoverageGap> = self
+            .missing
+            .iter()
+            .chain(&self.undercounted)
+            .chain(&self.overcounted)
+            .copied()
+            .collect();
+        out.missing.clear();
+        out.undercounted.clear();
+        out.overcounted.clear();
+        let old_blocks = gapped.iter().filter(|g| g.in_mirror).count() as u64;
+        let old_events: u64 = gapped.iter().map(|g| g.mirror_events).sum();
+        let (mut new_blocks, mut new_events) = (0u64, 0u64);
+        for g in &gapped {
+            let in_mirror = db.block(g.block)?.is_some();
+            let mirror_events = db.events_of_block(g.block)?.len() as u64;
+            if in_mirror {
+                new_blocks += 1;
+            }
+            new_events += mirror_events;
+            let now = CoverageGap {
+                block: g.block,
+                chain_events: g.chain_events,
+                mirror_events,
+                in_mirror,
+            };
+            if !in_mirror {
+                out.missing.push(now);
+            } else if mirror_events < g.chain_events {
+                out.undercounted.push(now);
+            } else if mirror_events > g.chain_events {
+                out.overcounted.push(now);
+            }
+        }
+        out.mirror_blocks = out.mirror_blocks.saturating_sub(old_blocks) + new_blocks;
+        out.mirror_events = out.mirror_events.saturating_sub(old_events) + new_events;
+        Ok(out)
+    }
+
+    /// Every block that needs re-ingesting, ascending and deduplicated.
+    pub fn repair_blocks(&self) -> Vec<u64> {
+        let mut blocks: Vec<u64> = self
+            .missing
+            .iter()
+            .chain(&self.undercounted)
+            .chain(&self.overcounted)
+            .map(|g| g.block)
+            .collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        blocks
+    }
+}
+
 impl<'a> Ingestor<'a> {
+    /// The SEEKER PASS: walk `[from, to]` with the same sound subdivision scan
+    /// the ingest uses, `getEvents` only, and report where the mirror disagrees
+    /// with the chain.
+    ///
+    /// This is the cheap half of a backfill — the expensive half is one
+    /// `getStateUpdate` plus one `getBlockWithTxHashes` per active block, and
+    /// none of that happens here — which is the whole point: a full mainnet
+    /// re-backfill costs ~70 minutes to repair 139 blocks, and this pass is the
+    /// part of it that can find them.
+    ///
+    /// It MUST be the subdivision scan and not a paging one. A continuation
+    /// token is node-local state and every endpoint we use is an aggregator
+    /// (LIVE-8), so a paging seeker would skip blocks exactly the way the
+    /// backfill did — and then report the resulting hole as "no gaps found",
+    /// certifying the very loss it was run to find. Scanning in segments
+    /// bounds the events held in memory the same way the ingest loop does.
+    pub async fn audit_coverage(&mut self, from: u64, to: u64) -> Result<CoverageReport> {
+        let mut report = CoverageReport {
+            from,
+            to,
+            ..Default::default()
+        };
+        if from > to {
+            return Ok(report);
+        }
+        let mut seg_from = from;
+        while seg_from <= to {
+            let seg_to = seg_from.saturating_add(SCAN_SEGMENT - 1).min(to);
+            let active = self.scan_active_blocks(seg_from, seg_to).await?;
+            for (number, events) in active {
+                let chain_events = events.len() as u64;
+                report.chain_blocks += 1;
+                report.chain_events += chain_events;
+                let in_mirror = self.db.block(number)?.is_some();
+                let mirror_events = self.db.events_of_block(number)?.len() as u64;
+                if in_mirror {
+                    report.mirror_blocks += 1;
+                }
+                report.mirror_events += mirror_events;
+                let gap = CoverageGap {
+                    block: number,
+                    chain_events,
+                    mirror_events,
+                    in_mirror,
+                };
+                if !in_mirror {
+                    report.missing.push(gap);
+                } else if mirror_events < chain_events {
+                    report.undercounted.push(gap);
+                } else if mirror_events > chain_events {
+                    report.overcounted.push(gap);
+                }
+            }
+            tracing::info!(
+                segment_from = seg_from,
+                segment_to = seg_to,
+                audit_to = to,
+                chain_blocks = report.chain_blocks,
+                chain_events = report.chain_events,
+                missing = report.missing.len(),
+                undercounted = report.undercounted.len(),
+                "coverage audit segment complete"
+            );
+            seg_from = seg_to + 1;
+        }
+        Ok(report)
+    }
+
+    /// Re-ingest exactly the blocks a seeker pass named, into the existing DB.
+    ///
+    /// Each block goes through the ordinary per-block ingest path — header,
+    /// state update, one single-page `getEvents` — so a repaired block is
+    /// byte-for-byte what a backfill would have stored, storage writes
+    /// included. The mainnet hole was 6 events AND 4 slot writes per block; a
+    /// repair that recovered only events would leave the storage root wrong and
+    /// verify-root would still mismatch.
+    ///
+    /// The ingest cursor is never pulled backwards by this: `insert_block_data`
+    /// only ever advances it.
+    pub async fn reingest_blocks(&mut self, blocks: &[u64]) -> Result<u64> {
+        let mut repaired = 0u64;
+        for (i, number) in blocks.iter().enumerate() {
+            self.ingest_block(*number, None)
+                .await
+                .with_context(|| format!("re-ingest of block {number}"))?;
+            repaired += 1;
+            tracing::info!(
+                block = number,
+                done = i + 1,
+                total = blocks.len(),
+                "block re-ingested"
+            );
+        }
+        Ok(repaired)
+    }
+
     /// Verify-root recovery slow path (spec §5.6): re-ingest EVERY block in
     /// [from, to] straight from per-block state updates — not events-first —
     /// so a pool write that rode a block with no pool event is recovered.

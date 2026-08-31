@@ -140,6 +140,37 @@ enum Command {
         #[arg(long)]
         block: Option<u64>,
     },
+    /// Seeker pass: re-ask the chain for the whole block -> event-count map and
+    /// report (or repair) blocks this mirror is missing or short of events
+    AuditCoverage {
+        #[command(flatten)]
+        common: CommonOpts,
+        /// First block to audit (default: the pool's genesis block)
+        #[arg(long)]
+        from: Option<u64>,
+        /// Last block to audit (default: the ingest frontier — a mirror cannot
+        /// be faulted for blocks it never claimed to have scanned)
+        #[arg(long)]
+        to: Option<u64>,
+        /// Re-ingest the blocks the pass names, into the existing DB
+        #[arg(long)]
+        repair: bool,
+        /// Also write the full report as JSON to this path
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
+    /// Re-cut published epochs from one epoch upward after a repair changed
+    /// blocks below the epoch floor (rewrites history; never automatic)
+    RecutEpochs {
+        #[command(flatten)]
+        common: CommonOpts,
+        /// Re-cut from the epoch containing this block (the repaired block)
+        #[arg(long, conflicts_with = "from_epoch")]
+        from_block: Option<u64>,
+        /// Re-cut from this epoch index
+        #[arg(long)]
+        from_epoch: Option<u64>,
+    },
     /// Import a feed directory from another instance (verified)
     MirrorPull {
         #[command(flatten)]
@@ -176,6 +207,18 @@ async fn main() -> Result<()> {
         Command::Status { common } => status(common),
         Command::EpochVerify { common, epoch } => epoch_verify(common, epoch),
         Command::VerifyRoot { common, block } => verify_root(common, block).await,
+        Command::AuditCoverage {
+            common,
+            from,
+            to,
+            repair,
+            json,
+        } => audit_coverage(common, from, to, repair, json).await,
+        Command::RecutEpochs {
+            common,
+            from_block,
+            from_epoch,
+        } => recut_epochs(common, from_block, from_epoch),
         Command::MirrorPull { common, url } => mirror_pull(common, url).await,
     }
 }
@@ -488,6 +531,232 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
              nothing about mirror correctness."
         ),
     }
+    Ok(())
+}
+
+/// The seeker pass, and with `--repair` the targeted re-ingest that follows it
+/// (docs/pre-submission-corrections.md plan A steps 1–2).
+///
+/// A hole below the ingest frontier is invisible to every forward mechanism
+/// this binary has: the scan starts at `cursor + 1`, the §5.6 rescan only
+/// widens to the epoch of a mismatch it was handed, and `verify-root` can say
+/// a root diverged but not which blocks are absent. Re-asking the chain for the
+/// whole block → event-count map is the only thing that names them, and doing
+/// it with `getEvents` alone costs a fraction of the re-backfill that would
+/// otherwise be the answer.
+async fn audit_coverage(
+    common: CommonOpts,
+    from: Option<u64>,
+    to: Option<u64>,
+    repair: bool,
+    json: Option<PathBuf>,
+) -> Result<()> {
+    let cfg = common.chain_config();
+    let rpc = common.rpc();
+    let mut db = Db::open(&common.db)?;
+    init_checks(&db, &rpc, &cfg).await?;
+    let frontier = db.ingest_cursor()?;
+    let from = from.unwrap_or(cfg.genesis_block);
+    let to = match to {
+        Some(t) => t,
+        // Auditing above the frontier would report blocks the mirror never
+        // claimed to have scanned as losses.
+        None => frontier.ok_or_else(|| {
+            anyhow::anyhow!(
+                "this db has no ingest cursor, so nothing has been scanned and there is no \
+                 coverage to audit. Run `strk20 backfill` first, or pass --to explicitly."
+            )
+        })?,
+    };
+    anyhow::ensure!(
+        from <= to,
+        "empty audit range [{from}..{to}]: --from must not be above --to"
+    );
+
+    let mut ingestor = Ingestor {
+        db: &mut db,
+        rpc: &rpc,
+        cfg: &cfg,
+        chunk_size: common.chunk_size,
+        progress_secs: common.progress_secs,
+    };
+    let report = ingestor.audit_coverage(from, to).await?;
+    print_coverage(&report);
+
+    let mut final_report = report.clone();
+    if repair && !report.is_complete() {
+        let blocks = report.repair_blocks();
+        println!("\nre-ingesting {} block(s)...", blocks.len());
+        let repaired = ingestor.reingest_blocks(&blocks).await?;
+        final_report = report.refreshed_after_repair(ingestor.db)?;
+        println!("re-ingested {repaired} block(s); rechecking them:");
+        print_coverage(&final_report);
+    }
+
+    if let Some(path) = &json {
+        std::fs::write(path, serde_json::to_vec_pretty(&final_report)?)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+
+    // Whether the feed still carries pre-repair bytes is a question about the
+    // blocks the REPAIR touched, not about whatever is left unrepaired.
+    let repaired_lowest = repair.then(|| report.repair_blocks().first().copied()).flatten();
+    if let Some(lowest) = repaired_lowest {
+        match db.last_epoch()? {
+            // A repaired block below the epoch floor sits inside bytes that are
+            // already published, and nothing rewrites those automatically.
+            Some((_, _, epoch_to)) if lowest <= epoch_to => println!(
+                "\nBlock {lowest} is inside already-cut epoch {}, so the published feed still \
+                 carries the pre-repair bytes. Republish with \
+                 `strk20 recut-epochs --from-block {lowest}`, then `strk20 epoch-verify` (the \
+                 re-cut rewrites published history one epoch at a time; epoch-verify is what \
+                 says the whole chain landed), then re-check with `verify-root`.",
+                cfg.epoch_of(lowest)
+            ),
+            _ => println!(
+                "\nEvery repaired block is above the epoch floor, so no published epoch \
+                 changed; the next `strk20 run` cycle regenerates head.ndjson from the \
+                 repaired database."
+            ),
+        }
+    }
+
+    if final_report.is_complete() {
+        println!(
+            "\naudit-coverage OK: every pool-active block the chain has in [{from}..{to}] is \
+             in this mirror, with the chain's event count."
+        );
+        return Ok(());
+    }
+    let lowest = final_report.repair_blocks().first().copied().unwrap_or(from);
+    if repair {
+        println!(
+            "\naudit-coverage INCOMPLETE: {} block(s) still disagree with the chain after the \
+             re-ingest. That is not a scan problem — re-run and, if it persists, treat it as a \
+             provider or ingest defect rather than a hole.",
+            final_report.repair_blocks().len()
+        );
+    } else {
+        println!(
+            "\naudit-coverage INCOMPLETE: {} block(s) need re-ingest. Repair with \
+             `strk20 audit-coverage --repair`.",
+            final_report.repair_blocks().len()
+        );
+    }
+    if !repair {
+        if let Some((_, _, epoch_to)) = db.last_epoch()? {
+            if lowest <= epoch_to {
+                println!(
+                    "Block {lowest} is inside already-cut epoch {}, so repairing it also \
+                     changes bytes that are already published: the repair is followed by \
+                     `strk20 recut-epochs --from-block {lowest}` and then \
+                     `strk20 epoch-verify`.",
+                    cfg.epoch_of(lowest)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cap on how many gap lines one section prints; the JSON report is complete.
+const GAP_PRINT_LIMIT: usize = 50;
+
+fn print_coverage(r: &strk20_indexerd::ingest::CoverageReport) {
+    println!("audit-coverage [{}..{}]", r.from, r.to);
+    println!(
+        "  chain:  {} pool-active blocks, {} events",
+        r.chain_blocks, r.chain_events
+    );
+    println!(
+        "  mirror: {} of those blocks, {} events",
+        r.mirror_blocks, r.mirror_events
+    );
+    println!("  missing blocks:      {}", r.missing.len());
+    println!("  undercounted blocks: {}", r.undercounted.len());
+    println!("  overcounted blocks:  {}", r.overcounted.len());
+    for (label, gaps) in [
+        ("MISSING", &r.missing),
+        ("UNDERCOUNT", &r.undercounted),
+        ("OVERCOUNT", &r.overcounted),
+    ] {
+        for g in gaps.iter().take(GAP_PRINT_LIMIT) {
+            println!(
+                "    {label:<10} block {}: chain {} event(s), mirror {}",
+                g.block, g.chain_events, g.mirror_events
+            );
+        }
+        if gaps.len() > GAP_PRINT_LIMIT {
+            println!(
+                "    {label:<10} ... and {} more (see --json for the full list)",
+                gaps.len() - GAP_PRINT_LIMIT
+            );
+        }
+    }
+}
+
+/// Backward epoch re-cut (plan A step 2). Explicit by construction: its own
+/// subcommand, never called from the ingest loop, and refused outright unless
+/// the first epoch named actually rebuilds to different bytes.
+fn recut_epochs(
+    common: CommonOpts,
+    from_block: Option<u64>,
+    from_epoch: Option<u64>,
+) -> Result<()> {
+    let cfg = common.chain_config();
+    let db = Db::open(&common.db)?;
+    let idx = match (from_epoch, from_block) {
+        (Some(e), _) => e,
+        (None, Some(b)) => cfg.epoch_of(b),
+        (None, None) => anyhow::bail!(
+            "name where to re-cut from: --from-block <block> (usually the lowest block the \
+             repair touched) or --from-epoch <idx>"
+        ),
+    };
+    // A Cutter is constructed with an RpcClient, but a re-cut makes no calls:
+    // DB → NDJSON → zstd → manifest, all local.
+    let rpc = common.rpc();
+    let cutter = Cutter {
+        db: &db,
+        rpc: &rpc,
+        cfg: &cfg,
+        feed_dir: common.feed_dir.clone(),
+    };
+    let out = cutter.recut_epochs_from(idx)?;
+    println!(
+        "re-cut {} epoch(s) from epoch {}:",
+        out.rewritten.len(),
+        out.first_epoch
+    );
+    if !out.already_current.is_empty() {
+        // Only an interrupted earlier re-cut produces this, so say what it
+        // means rather than leaving the operator to wonder why the range they
+        // named was not fully rewritten.
+        println!(
+            "  {} epoch(s) already matched this database and were left alone ({:?}) — an \
+             earlier re-cut of this range got that far before it stopped.",
+            out.already_current.len(),
+            out.already_current
+        );
+    }
+    for (e, old, new) in &out.rewritten {
+        println!("  epoch {e}: {} -> {}", hex::encode(old), hex::encode(new));
+    }
+    if !out.snapshots_dropped.is_empty() {
+        println!(
+            "withdrew {} snapshot(s) whose epoch was re-cut: {:?} — the next cut republishes \
+             from the repaired database.",
+            out.snapshots_dropped.len(),
+            out.snapshots_dropped
+        );
+    }
+    println!(
+        "manifest rewritten; every client re-verifies the chain from epoch {idx} up.\n\
+         Next: `strk20 epoch-verify` — it re-reads every published file and walks the hash \
+         chain, which is the only confirmation that the re-cut landed in full. If this \
+         command ever stops part-way, re-run it unchanged: it resumes from the first epoch \
+         that is still stale."
+    );
     Ok(())
 }
 

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 strk20-feed = { workspace = true, features = ["compress", "mpt"] }
 strk20-client = { workspace = true }
+strk20-consumer = { path = "../consumer" }
 strk20-indexerd = { path = "../indexerd" }
 discovery-core = { workspace = true }
 starknet-types-core = { workspace = true }

@@ -4,6 +4,7 @@
 //! non-membership proves un-spent-ness.
 
 use crate::store::FeedStore;
+use strk20_consumer::store::ConsumerStore;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use starknet_types_core::felt::Felt;

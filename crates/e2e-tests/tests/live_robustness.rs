@@ -24,6 +24,16 @@
 //! T18 §12 B1  an exhausted retry budget is UNAVAILABLE, not MISMATCH
 //! T19 §12 B2  a proof whose global_roots.block_hash is not the block's is
 //!             rejected as a hard error and never becomes a root
+//!
+//! The R legs are the mirror REPAIR path (docs/pre-submission-corrections.md
+//! plan A): a hole below the frontier is found, patched and republished
+//! without a full re-backfill.
+//!
+//! R1 repair  the seeker pass names every missing/undercounted block exactly
+//! R2 repair  targeted re-ingest restores them, block for block
+//! R3 repair  a backward re-cut rewrites the affected epoch and all above
+//! R4 repair  a re-cut with nothing changed is refused, nothing written
+//! R5 repair  verify-root MATCHes where it previously MISMATCHed
 
 use e2e_tests::bins::{bin, ensure_built, run_capture};
 use e2e_tests::chain::{ActiveBlock, FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR};
@@ -1861,4 +1871,568 @@ fn block_after(text: &str, marker: &str) -> Option<u64> {
     let rest = text.split(marker).nth(1)?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+// -------------------------------------------------- repair harness (R1–R5)
+
+/// The repair legs all start from the same shape as the mainnet loss: a mirror
+/// that scanned a range, moved its frontier past it, and only later turns out
+/// to be missing pool-active blocks DEEP inside it. Nothing above the hole ever
+/// looks down again, so no amount of forward ingest can heal it — which is why
+/// a seeker pass and a backward re-cut have to exist at all.
+const AUDIT_GENESIS: u64 = 100;
+const AUDIT_LAST_ACTIVE: u64 = 139;
+const AUDIT_HEAD: u64 = 200;
+/// A contiguous cluster, the shape the loss actually had on mainnet
+/// (11,263,874–11,263,880; 11,265,889–11,265,893; …). Inside epoch 7
+/// ([112..127] at epoch size 16), so epochs 8, 9 and 10 sit ABOVE it and must
+/// be rewritten by hash propagation alone.
+const HOLE: [u64; 3] = [118, 119, 120];
+/// Inside epoch 6, and holed by ONE event rather than by the whole block: a
+/// seeker that only compares block presence would call this mirror complete.
+const UNDERCOUNT_BLOCK: u64 = 105;
+
+/// The chain as the mirror first sees it: pool-active on every block of
+/// [AUDIT_GENESIS, AUDIT_LAST_ACTIVE] except the ones the mirror is going to
+/// be missing.
+fn holey_chain(pool: Felt) -> FixtureChain {
+    let mut chain = FixtureChain::synthetic(pool, AUDIT_HEAD, AUDIT_HEAD - 10);
+    for n in AUDIT_GENESIS..=AUDIT_LAST_ACTIVE {
+        if HOLE.contains(&n) {
+            continue;
+        }
+        chain.active.insert(n, active_block(n));
+    }
+    chain
+}
+
+/// Open the hole AFTER the mirror has passed the range. The bug is not
+/// simulated — the divergence is created exactly where LIVE-8 left one: blocks
+/// the chain has and the mirror does not, below a frontier that never moves
+/// back.
+fn open_the_hole(rpc: &FixtureRpc, with_undercount: bool) {
+    let mut chain = rpc.chain.write().unwrap();
+    for n in HOLE {
+        chain.active.insert(n, active_block(n));
+    }
+    if with_undercount {
+        let blk = chain
+            .active
+            .get_mut(&UNDERCOUNT_BLOCK)
+            .expect("the undercount block is pool-active from the start");
+        blk.events.push(FxEvent {
+            keys: vec![
+                Felt::from_hex(ENC_NOTE_CREATED_SELECTOR).unwrap(),
+                Felt::from(0xda7au64),
+            ],
+            data: vec![Felt::from(7u64)],
+        });
+        blk.diffs.push((Felt::from(0x30_0000u64), Felt::from(9u64)));
+        blk.diffs.sort_by_key(|a| a.0.to_bytes_be());
+    }
+}
+
+/// Chain truth: every pool-active block and how many events it carries.
+fn chain_counts(rpc: &FixtureRpc) -> Vec<(u64, usize)> {
+    rpc.chain
+        .read()
+        .unwrap()
+        .active
+        .iter()
+        .map(|(n, b)| (*n, b.events.len()))
+        .collect()
+}
+
+fn repair_args(dir: &Path, url: &str, pool: &Felt) -> Vec<String> {
+    vec![
+        "--db".into(),
+        dir.join("strk20.db").display().to_string(),
+        "--feed-dir".into(),
+        dir.join("feed").display().to_string(),
+        "--rpc-url".into(),
+        url.to_owned(),
+        "--rpc-fallback".into(),
+        url.to_owned(),
+        "--pool".into(),
+        felt_hex(pool),
+        "--chain-id".into(),
+        CHAIN_ID.into(),
+        "--genesis-block".into(),
+        AUDIT_GENESIS.to_string(),
+        "--epoch-size".into(),
+        "16".into(),
+        "--chunk-size".into(),
+        "5".into(),
+    ]
+}
+
+/// Run the seeker pass and return its machine-readable report.
+fn audit_coverage(
+    dir: &Path,
+    url: &str,
+    pool: &Felt,
+    extra: &[&str],
+) -> (Value, String, String, bool) {
+    let json = dir.join("audit.json");
+    let _ = std::fs::remove_file(&json);
+    let mut cmd = Command::new(bin("strk20"));
+    cmd.arg("audit-coverage")
+        .args(repair_args(dir, url, pool))
+        .args(["--json", &json.display().to_string()])
+        .args(extra);
+    let (stdout, stderr, ok) = run_capture(cmd, false);
+    let report = std::fs::read(&json)
+        .map(|b| serde_json::from_slice(&b).expect("audit report is JSON"))
+        .unwrap_or(Value::Null);
+    (report, stdout, stderr, ok)
+}
+
+fn recut_epochs(dir: &Path, url: &str, pool: &Felt, extra: &[&str]) -> (String, String, bool) {
+    let mut cmd = Command::new(bin("strk20"));
+    cmd.arg("recut-epochs")
+        .args(repair_args(dir, url, pool))
+        .args(extra);
+    run_capture(cmd, false)
+}
+
+fn epoch_verify(dir: &Path, url: &str, pool: &Felt) -> (String, String, bool) {
+    let mut cmd = Command::new(bin("strk20"));
+    cmd.arg("epoch-verify").args(repair_args(dir, url, pool));
+    run_capture(cmd, false)
+}
+
+fn verify_root_at(dir: &Path, url: &str, pool: &Felt, block: u64) -> (String, String, bool) {
+    let mut cmd = Command::new(bin("strk20"));
+    cmd.arg("verify-root")
+        .args(repair_args(dir, url, pool))
+        .args(["--block", &block.to_string()]);
+    run_capture(cmd, false)
+}
+
+/// (idx, content hash) for every epoch the DB has cut.
+fn epoch_hashes(dir: &Path) -> Vec<(u64, String)> {
+    let db = Db::open(&dir.join("strk20.db")).expect("open indexer db");
+    db.epoch_rows()
+        .expect("epoch rows")
+        .iter()
+        .map(|r| (r.idx, hex::encode(r.content_hash)))
+        .collect()
+}
+
+/// Blocks named in one section of the report, with their two event counts.
+fn gaps(report: &Value, section: &str) -> Vec<(u64, u64, u64)> {
+    report[section]
+        .as_array()
+        .unwrap_or_else(|| panic!("report has no {section} array: {report}"))
+        .iter()
+        .map(|g| {
+            (
+                g["block"].as_u64().expect("block"),
+                g["chain_events"].as_u64().expect("chain_events"),
+                g["mirror_events"].as_u64().expect("mirror_events"),
+            )
+        })
+        .collect()
+}
+
+/// Backfill a holed chain and assert the mirror is complete BEFORE the hole is
+/// opened — without that, every leg below could pass on a mirror that was
+/// broken all along.
+async fn mirror_before_the_hole(
+    pool: Felt,
+    faults: FaultSpec,
+) -> (FixtureRpc, String, tempfile::TempDir) {
+    let rpc = FixtureRpc::with_faults(holey_chain(pool), CHAIN_ID, faults);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = backfill_synthetic(dir.path(), &url, &pool, AUDIT_GENESIS, "5");
+    assert!(ok, "backfill failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    (rpc, url, dir)
+}
+
+// ------------------------------------------------------------------- R1
+
+/// A1 — the seeker pass. A mirror with a hole below its frontier can only be
+/// found by re-asking the chain about the WHOLE history, and the answer has to
+/// be exact: which blocks are absent, and which are present but short of
+/// events. Both halves are pinned here, because a check that only compares
+/// block presence would call the undercounted block healthy.
+///
+/// The seeker must also be the SOUND scan (single-page windows, no
+/// continuation token). A seeker that paged would re-create the very holes it
+/// is looking for and could report a clean mirror over blocks it never saw —
+/// hence the zero-token assertion and the subdivision vacuity guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r1_the_seeker_finds_every_missing_block_and_counts_it_exactly() {
+    ensure_built();
+    let pool = Felt::from(0x9401u64);
+    let (rpc, url, dir) = mirror_before_the_hole(
+        pool,
+        FaultSpec {
+            // publicnode's posture: no proofs at any height, so verify-root is
+            // UNAVAILABLE and cannot be the thing that finds the hole. The
+            // seeker is on its own — the production situation.
+            proofs_unsupported: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (clean, stdout, stderr, ok) = audit_coverage(dir.path(), &url, &pool, &[]);
+    assert!(ok, "audit-coverage failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        (gaps(&clean, "missing").len(), gaps(&clean, "undercounted").len()),
+        (0, 0),
+        "control: a mirror that has just backfilled this chain is complete, so anything \
+         the seeker reports below is the hole and not a false positive:\n{clean}"
+    );
+
+    open_the_hole(&rpc, true);
+    let tokens_before = rpc.tokens_presented();
+    let windows_before = rpc.event_windows().len();
+    let (report, stdout, stderr, ok) = audit_coverage(dir.path(), &url, &pool, &[]);
+    assert!(ok, "audit-coverage failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    assert_eq!(
+        gaps(&report, "missing"),
+        HOLE.iter().map(|b| (*b, 1, 0)).collect::<Vec<_>>(),
+        "the seeker must name every block the chain has and the mirror does not, with the \
+         chain's event count for each:\n{report}"
+    );
+    assert_eq!(
+        gaps(&report, "undercounted"),
+        vec![(UNDERCOUNT_BLOCK, 2, 1)],
+        "a block that is PRESENT but short of events is a hole too — it is what an \
+         events-first scan produces when it loses a page rather than a window:\n{report}"
+    );
+
+    let active = chain_counts(&rpc);
+    let chain_events: u64 = active.iter().map(|(_, c)| *c as u64).sum();
+    assert_eq!(
+        (
+            report["chain_blocks"].as_u64().unwrap(),
+            report["chain_events"].as_u64().unwrap()
+        ),
+        (active.len() as u64, chain_events),
+        "the seeker's own totals must be the chain's totals — this is the number the \
+         mainnet audit compared (120,135 events in 28,655 blocks):\n{report}"
+    );
+    assert_eq!(
+        (
+            report["mirror_blocks"].as_u64().unwrap(),
+            report["mirror_events"].as_u64().unwrap()
+        ),
+        (
+            active.len() as u64 - HOLE.len() as u64,
+            chain_events - HOLE.len() as u64 - 1
+        ),
+        "and the mirror's totals must be the mirror's:\n{report}"
+    );
+
+    assert_eq!(
+        rpc.tokens_presented(),
+        tokens_before,
+        "the seeker presented a continuation token. A token is node-local state (LIVE-8); \
+         a pass that follows one can silently skip the very blocks it was run to find, and \
+         would then certify a holed mirror as complete."
+    );
+    assert!(
+        rpc.event_windows().len() > windows_before + 1,
+        "vacuity guard: the seeker asked {} window(s) for a range that cannot be answered \
+         in one page at chunk 5, so it never subdivided",
+        rpc.event_windows().len() - windows_before
+    );
+}
+
+// ------------------------------------------------------------------- R2
+
+/// A2 — targeted re-ingest. The seeker names the blocks; re-ingesting exactly
+/// those must make the mirror's per-block event counts equal the chain's, with
+/// no full re-backfill (the 70-minute option this whole path exists to avoid).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r2_re_ingest_restores_only_the_blocks_the_seeker_named() {
+    ensure_built();
+    let pool = Felt::from(0x9402u64);
+    let (rpc, url, dir) = mirror_before_the_hole(
+        pool,
+        FaultSpec {
+            proofs_unsupported: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    open_the_hole(&rpc, true);
+
+    let (before, _, _, _) = audit_coverage(dir.path(), &url, &pool, &[]);
+    assert_eq!(gaps(&before, "missing").len(), HOLE.len(), "{before}");
+
+    let (after, stdout, stderr, ok) = audit_coverage(dir.path(), &url, &pool, &["--repair"]);
+    assert!(
+        ok,
+        "audit-coverage --repair failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        (
+            gaps(&after, "missing").len(),
+            gaps(&after, "undercounted").len(),
+            gaps(&after, "overcounted").len()
+        ),
+        (0, 0, 0),
+        "after the repair the seeker must find nothing left to repair:\n{after}\n{stdout}"
+    );
+
+    // The mirror, block for block and event for event, against the chain.
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let got: Vec<(u64, usize)> = db
+        .blocks_in_range(AUDIT_GENESIS, AUDIT_HEAD)
+        .unwrap()
+        .iter()
+        .map(|b| (b.number, db.events_of_block(b.number).unwrap().len()))
+        .collect();
+    assert_eq!(
+        got,
+        chain_counts(&rpc),
+        "the repaired mirror's per-block event counts must equal the chain's exactly"
+    );
+    for n in HOLE {
+        assert!(
+            !db.diffs_of_block(n).unwrap().is_empty(),
+            "block {n} came back without its pool storage writes — the mainnet hole was 6 \
+             events AND 4 slot writes, and a repair that recovers only events leaves the \
+             storage root wrong"
+        );
+    }
+}
+
+// ------------------------------------------------------------------- R3
+
+/// A3 — backward re-cut. Repairing a block deep in history changes its epoch's
+/// content, therefore that epoch's hash, therefore — through `prev` — every
+/// epoch hash above it. The forward-only cutter cannot express that: it starts
+/// at `last_epoch().idx + 1` and can only ever append. So a repaired database
+/// never reaches the published bytes, which is the second half of the repair
+/// and the half a production operator needs most.
+///
+/// Pinned here: the affected epoch's hash changes, EVERY epoch above it
+/// changes, the epoch BELOW is left alone, and the rewritten chain verifies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r3_a_backward_re_cut_rewrites_the_whole_chain_above_the_repair() {
+    ensure_built();
+    let pool = Felt::from(0x9403u64);
+    let (rpc, url, dir) = mirror_before_the_hole(
+        pool,
+        FaultSpec {
+            proofs_unsupported: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let before = epoch_hashes(dir.path());
+    let holed_epoch = HOLE[0] / 16;
+    assert!(
+        before.iter().any(|(i, _)| *i == holed_epoch)
+            && before.iter().any(|(i, _)| *i > holed_epoch),
+        "fixture precondition: epoch {holed_epoch} must be cut and have epochs above it, \
+         or hash propagation is never exercised. Cut: {before:?}"
+    );
+
+    open_the_hole(&rpc, false);
+    let (_, stdout, stderr, ok) = audit_coverage(dir.path(), &url, &pool, &["--repair"]);
+    assert!(ok, "repair failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // Starting too HIGH is the easy operator error, and it fails in the worst
+    // possible way if it is allowed: the epochs below keep publishing
+    // pre-repair bytes while everything above looks freshly repaired.
+    let (stdout, stderr, ok) = recut_epochs(
+        dir.path(),
+        &url,
+        &pool,
+        &["--from-epoch", &(holed_epoch + 1).to_string()],
+    );
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        !ok && out.contains(&format!("epoch {holed_epoch}")),
+        "a re-cut starting ABOVE the affected epoch must be refused and must name the \
+         epoch that actually changed ({holed_epoch}), or the operator republishes a chain \
+         that still contradicts its own database:\n{out}"
+    );
+
+    let (stdout, stderr, ok) = recut_epochs(
+        dir.path(),
+        &url,
+        &pool,
+        &["--from-block", &HOLE[0].to_string()],
+    );
+    assert!(
+        ok,
+        "recut-epochs failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let after = epoch_hashes(dir.path());
+    assert_eq!(
+        before.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        after.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        "a re-cut rewrites epochs, it does not add or drop them"
+    );
+    for ((idx, old), (_, new)) in before.iter().zip(after.iter()) {
+        if *idx < holed_epoch {
+            assert_eq!(
+                old, new,
+                "epoch {idx} is BELOW the repair and must not be rewritten: a re-cut that \
+                 touches history it had no reason to touch is indistinguishable from one \
+                 that rewrites it"
+            );
+        } else {
+            assert_ne!(
+                old, new,
+                "epoch {idx} kept its content hash across the re-cut. Epoch {holed_epoch} \
+                 gained a block, so its hash changes; every epoch above chains through \
+                 `prev` and changes with it. An unchanged hash above the repair means the \
+                 published chain no longer describes the database."
+            );
+        }
+    }
+
+    let (stdout, stderr, ok) = epoch_verify(dir.path(), &url, &pool);
+    assert!(
+        ok && stdout.contains("hash chain OK"),
+        "the rewritten epoch files must verify against the rewritten chain\nstdout:\n\
+         {stdout}\nstderr:\n{stderr}"
+    );
+
+    // The manifest is the file clients actually read; a re-cut that leaves it
+    // naming the old hashes has published nothing.
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("feed").join("manifest.json")).expect("manifest"),
+    )
+    .expect("manifest is JSON");
+    let published: Vec<(u64, String)> = manifest["epochs"]
+        .as_array()
+        .expect("manifest epochs")
+        .iter()
+        .map(|e| {
+            (
+                e["e"].as_u64().unwrap(),
+                e["hash"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(published, after, "the manifest must carry the re-cut hashes");
+}
+
+// ------------------------------------------------------------------- R4
+
+/// A4 — the guard. Rewriting published history is the most dangerous thing
+/// this binary can do, so it must be impossible to do by accident: a re-cut of
+/// an epoch whose content did NOT change is refused, loudly, with nothing
+/// written. Without this, a stray invocation (or a future automatic caller)
+/// could republish every epoch above an untouched one with new bytes and no
+/// reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r4_a_re_cut_is_refused_when_nothing_changed() {
+    ensure_built();
+    let pool = Felt::from(0x9404u64);
+    let (_rpc, url, dir) = mirror_before_the_hole(
+        pool,
+        FaultSpec {
+            proofs_unsupported: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let before = epoch_hashes(dir.path());
+    let target = HOLE[0] / 16;
+    let file = dir
+        .path()
+        .join("feed")
+        .join("epochs")
+        .join(format!("{target:08}.strk20e.zst"));
+    let bytes_before = std::fs::read(&file).expect("the target epoch file exists");
+
+    let (stdout, stderr, ok) = recut_epochs(
+        dir.path(),
+        &url,
+        &pool,
+        &["--from-epoch", &target.to_string()],
+    );
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        !ok,
+        "a re-cut of an unchanged epoch must FAIL: nothing below it moved, so rewriting \
+         it and everything above would be a history rewrite with no cause.\n{out}"
+    );
+    let lower = out.to_lowercase();
+    assert!(
+        lower.contains("refus") || lower.contains("unchanged") || lower.contains("identical"),
+        "the refusal must say why, so an operator knows the tool declined rather than \
+         broke:\n{out}"
+    );
+
+    assert_eq!(
+        epoch_hashes(dir.path()),
+        before,
+        "a refused re-cut must leave every epoch row exactly as it was"
+    );
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        bytes_before,
+        "a refused re-cut must not have rewritten a single published byte"
+    );
+}
+
+// ------------------------------------------------------------------- R5
+
+/// A5 — the whole causal chain, closed. Session 10 bisected the mainnet
+/// divergence to a single block: `verify-root --block 11263134` OK,
+/// `--block 11263135` MISMATCH, with our local root unchanged across the
+/// boundary because nothing was ingested there. This leg reproduces exactly
+/// that shape and then shows the repair CLEARS it — which is the acceptance
+/// criterion for the mainnet mirror.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r5_after_repair_verify_root_matches_where_it_previously_mismatched() {
+    ensure_built();
+    // Proofs served: this leg is about the root, not about provider capability.
+    let pool = Felt::from(0x9405u64);
+    let (rpc, url, dir) = mirror_before_the_hole(pool, FaultSpec::default()).await;
+    const ABOVE: u64 = 130;
+    let below = HOLE[0] - 1;
+
+    let (stdout, stderr, ok) = verify_root_at(dir.path(), &url, &pool, ABOVE);
+    assert!(
+        ok && stdout.contains("verify-root OK"),
+        "control: before the hole, the mirror reproduces the chain's storage root at \
+         block {ABOVE}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    open_the_hole(&rpc, false);
+
+    let (stdout, _, ok) = verify_root_at(dir.path(), &url, &pool, below);
+    assert!(
+        ok && stdout.contains("verify-root OK"),
+        "block {below} is BELOW the first lost block, so the mirror is still exactly \
+         right there — the divergence must begin at the hole and not before it:\n{stdout}"
+    );
+    let (stdout, stderr, ok) = verify_root_at(dir.path(), &url, &pool, ABOVE);
+    let out = format!("{stdout}\n{stderr}");
+    assert!(
+        !ok && out.contains("VERIFY-ROOT MISMATCH"),
+        "with {} pool-active blocks missing below it, the recomputed root at block \
+         {ABOVE} cannot equal the chain's. A green verify-root here would mean the check \
+         that found the mainnet loss cannot see this one:\n{out}",
+        HOLE.len()
+    );
+
+    let (_, stdout, stderr, ok) = audit_coverage(dir.path(), &url, &pool, &["--repair"]);
+    assert!(ok, "repair failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let (stdout, stderr, ok) = verify_root_at(dir.path(), &url, &pool, ABOVE);
+    assert!(
+        ok && stdout.contains("verify-root OK"),
+        "after the targeted repair, the mirror must reproduce the chain's root at block \
+         {ABOVE} — the same statement the mainnet mirror has to be able to make, without \
+         a 70-minute re-backfill\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }

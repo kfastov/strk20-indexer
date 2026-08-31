@@ -51,6 +51,20 @@ pub enum VerifyOutcome {
     Unavailable(String),
 }
 
+/// What a backward re-cut rewrote.
+#[derive(Debug)]
+pub struct RecutOutcome {
+    pub first_epoch: u64,
+    /// (epoch, old content hash, new content hash), ascending.
+    pub rewritten: Vec<(u64, [u8; 32], [u8; 32])>,
+    /// Epochs at the bottom of the named range whose published bytes already
+    /// described this database, so they were left alone. Non-empty exactly when
+    /// an earlier re-cut of this range died part-way and this one resumed it.
+    pub already_current: Vec<u64>,
+    /// Snapshots withdrawn because the epoch they name was re-cut.
+    pub snapshots_dropped: Vec<u64>,
+}
+
 pub struct Cutter<'a> {
     pub db: &'a Db,
     pub rpc: &'a RpcClient,
@@ -490,6 +504,246 @@ impl<'a> Cutter<'a> {
         // that cut something would publish nothing, ever.
         self.maybe_publish_snapshot().await?;
         Ok(cut)
+    }
+
+    /// Re-cut every published epoch from `first_idx` upward, from the DB as it
+    /// stands now. Local work only — DB → NDJSON → zstd → manifest, not one RPC
+    /// call.
+    ///
+    /// Why this has to exist at all: `cut_ready_epochs` starts at
+    /// `last_epoch().idx + 1` and can only append. Repairing a block deep in
+    /// history changes its epoch's content, therefore that epoch's content
+    /// hash, therefore — through the `prev` field in every header above it —
+    /// every epoch hash in the chain above. Without a backward re-cut a
+    /// repaired database can never reach the published bytes, and an operator
+    /// who finds a hole in production has no path from "the DB is fixed" to
+    /// "the feed is fixed" short of deleting the feed and re-cutting 515
+    /// epochs.
+    ///
+    /// The GUARD is the other half. Rewriting published history is the most
+    /// dangerous thing this binary does, so it is refused unless SOME epoch at
+    /// or above the one named actually rebuilds to something different from
+    /// what was published. That makes the operation impossible to trigger by
+    /// accident (nothing calls it automatically, and a stray invocation on a
+    /// healthy DB fails) while leaving the legitimate case — content really did
+    /// change underneath — free to proceed. Epochs above the first rewritten
+    /// one are rewritten unconditionally and correctly: their content changed
+    /// by definition, because their `prev` did.
+    ///
+    /// The guard deliberately asks about the whole range and not just its first
+    /// epoch. Asking only about the first makes a re-cut that died part-way
+    /// UNRESUMABLE: the epochs it already rewrote now rebuild identically, so
+    /// re-running the documented command hits the refusal — with a message
+    /// ("nothing below it changed") that is false in exactly that state, while
+    /// every epoch above is still stale. Whole-range means a resumed re-cut
+    /// skips the finished prefix and carries on from the first epoch that is
+    /// genuinely stale.
+    ///
+    /// CRASH SAFETY: each epoch's `.zst`, its DB row, AND the manifest are
+    /// committed together, inside the loop. The manifest is what every client
+    /// hashes against (ring 1), so leaving it for the end means any abort
+    /// part-way publishes post-repair bytes under a pre-repair manifest —
+    /// fail-closed for every client at once, i.e. a total feed outage. Rewriting
+    /// it per epoch costs one small file write per epoch and makes every
+    /// intermediate state a consistent, servable feed that is simply not yet
+    /// fully repaired.
+    pub fn recut_epochs_from(&self, first_idx: u64) -> Result<RecutOutcome> {
+        self.ensure_layout()?;
+        let rows = self.db.epoch_rows()?;
+        let Some(pos) = rows.iter().position(|r| r.idx == first_idx) else {
+            let cut = match (rows.first(), rows.last()) {
+                (Some(f), Some(l)) => format!("{}..{}", f.idx, l.idx),
+                _ => "none".to_owned(),
+            };
+            bail!(
+                "epoch {first_idx} has not been cut in this database (cut epochs: {cut}), so \
+                 there is nothing published to re-cut there. Epochs that were never cut are \
+                 produced by the ordinary forward cut, not by this command."
+            );
+        };
+        // The chain below `first_idx` is untouched, so the re-cut inherits its
+        // last link rather than recomputing it — but only after checking that
+        // it IS untouched. Naming an epoch above the first affected one is the
+        // easy mistake (a repair that touched two epochs, an off-by-one on the
+        // block), and it fails silently in the worst possible way: the epochs
+        // below keep publishing bytes that no longer describe the database,
+        // while everything above is rewritten and looks freshly repaired.
+        //
+        // The scan runs all the way to epoch 0 rather than stopping at the
+        // first epoch that still matches. Stopping there only ever reports the
+        // CONTIGUOUS stale run directly beneath `first_idx`, and a repair that
+        // touched two distant blocks produces a non-contiguous one: the
+        // operator follows the guard's advice once, and a lower stale epoch
+        // stays published indefinitely under a hash chain `epoch-verify` calls
+        // OK, because nothing else in the system compares feed bytes against
+        // the database. The cost is one `build_epoch` per epoch below the named
+        // one — the same work the re-cut itself does, on a command that is run
+        // by hand after a repair.
+        let mut stale_below: Option<u64> = None;
+        for below in (0..pos).rev() {
+            if self.rebuilt_hash(&rows, below)? != rows[below].content_hash {
+                stale_below = Some(rows[below].idx);
+            }
+        }
+        if let Some(lowest) = stale_below {
+            bail!(
+                "REFUSING TO RE-CUT: epoch {lowest} is BELOW {first_idx} and no longer matches \
+                 this database either, so re-cutting from {first_idx} would leave every epoch \
+                 from {lowest} up publishing bytes that describe the pre-repair mirror. \
+                 Re-cut from epoch {lowest} instead."
+            );
+        }
+        let mut prev: Option<[u8; 32]> = if pos == 0 {
+            None
+        } else {
+            Some(rows[pos - 1].content_hash)
+        };
+        let cut_at: u64 = self
+            .db
+            .meta_get("head_number")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut out = RecutOutcome {
+            first_epoch: first_idx,
+            rewritten: Vec::new(),
+            already_current: Vec::new(),
+            snapshots_dropped: Vec::new(),
+        };
+        // Nothing is written until an epoch is found that genuinely disagrees
+        // with the database, so the refusal below can still abort with the feed
+        // untouched. Once one has been found, every epoch above it MUST be
+        // rewritten: its `prev` changed, therefore its content did.
+        let mut diverged = false;
+        for row in rows[pos..].iter() {
+            let (from, to) = self.cfg.epoch_range(row.idx);
+            let epoch = self.build_epoch(row.idx, prev)?;
+            let payload = codec::encode_epoch(&epoch);
+            let content_hash = payload_sha256(&payload);
+            if !diverged {
+                if content_hash == row.content_hash {
+                    // Published bytes still describe this database, and the
+                    // chain below is intact (checked above), so this epoch is
+                    // already what a re-cut would produce. Skipping it keeps a
+                    // resumed re-cut from re-emitting bytes clients already
+                    // hold, and keeps the WARN log honest about what changed.
+                    out.already_current.push(row.idx);
+                    prev = Some(content_hash);
+                    continue;
+                }
+                diverged = true;
+                // BEFORE the first byte is replaced, for the same reason the
+                // manifest is written inside the loop: a snapshot describes a
+                // slot set folded from the pre-repair mirror, and it is stale
+                // from the moment the first re-cut epoch lands, not from the
+                // moment the batch finishes.
+                self.withdraw_snapshots_from(first_idx, &mut out)?;
+            }
+            let compressed = strk20_feed::compress(&payload);
+            let zst_hash = payload_sha256(&compressed);
+            let file = self.epochs_dir().join(format!("{:08}.strk20e.zst", row.idx));
+            atomic_write(&file, &compressed)?;
+            // The anchor is a CHAIN fact about the epoch's end block — a proof
+            // this instance obtained and published — and a re-cut of our own
+            // bytes says nothing about it, so it is carried over verbatim
+            // rather than dropped or re-fetched.
+            let anchor = row.anchor_block.map(|block| Anchor {
+                block,
+                block_hash: row.anchor_block_hash.unwrap_or(Felt::ZERO),
+                storage_root: row.anchor_storage_root.unwrap_or(Felt::ZERO),
+                class_hash: row.anchor_class_hash.unwrap_or(Felt::ZERO),
+            });
+            self.db.insert_epoch(
+                row.idx,
+                from,
+                to,
+                &content_hash,
+                &zst_hash,
+                compressed.len() as u64,
+                prev.as_ref(),
+                anchor.as_ref(),
+                cut_at,
+            )?;
+            tracing::warn!(
+                epoch = row.idx,
+                from,
+                to,
+                blocks = epoch.blocks.len(),
+                old_hash = hex::encode(row.content_hash),
+                hash = hex::encode(content_hash),
+                "epoch RE-CUT (published bytes replaced)"
+            );
+            out.rewritten
+                .push((row.idx, row.content_hash, content_hash));
+            prev = Some(content_hash);
+            // Committed WITH the epoch, not after the batch. The manifest is
+            // ring 1 for every client, so a manifest that lags the files it
+            // names is a feed outage; rewriting it here means an abort at any
+            // point leaves a consistent feed whose repair is simply
+            // incomplete, and re-running the same command finishes the job.
+            self.rewrite_manifest()?;
+        }
+        if !diverged {
+            bail!(
+                "REFUSING TO RE-CUT: every published epoch from {first_idx} up ({} epoch(s), \
+                 through {}) rebuilds from this database byte-for-byte, so the feed already \
+                 describes it. A re-cut would rewrite all of them — every client's hash chain — \
+                 for no reason. Re-cut only after a repair that actually changed an epoch's \
+                 blocks (`strk20 audit-coverage --repair`), and name the epoch the repair \
+                 touched. (If an earlier re-cut of this range was interrupted, this message \
+                 means it finished: confirm with `strk20 epoch-verify`.)",
+                rows.len() - pos,
+                rows.last().map(|r| r.idx).unwrap_or(first_idx)
+            );
+        }
+        self.rewrite_manifest()?;
+        Ok(out)
+    }
+
+    /// Withdraw every published snapshot at or above `first_idx`.
+    ///
+    /// A published snapshot names its epoch's content hash and carries the slot
+    /// set as of that epoch's end block. Both are stale for every re-cut epoch,
+    /// and a client that fetched the manifest would reject the snapshot (ring
+    /// 4) or, worse, fold a slot set built from the holed mirror — so the
+    /// affected ones are dropped here and republished by the next cut, once the
+    /// §11.3 gate is met again.
+    ///
+    /// The bound is `first_idx` and not the first epoch actually rewritten: an
+    /// interrupted earlier re-cut may already have replaced an epoch that this
+    /// run now skips as current, and the snapshot it grounds is stale all the
+    /// same.
+    fn withdraw_snapshots_from(&self, first_idx: u64, out: &mut RecutOutcome) -> Result<()> {
+        for snap in self.db.snapshot_rows()? {
+            if snap.e < first_idx {
+                continue;
+            }
+            for name in [
+                snap.file.clone(),
+                strk20_feed::manifest::snapshot_anchor_file_name(snap.e),
+            ] {
+                let path = self.feed_dir.join(&name);
+                if path.exists() {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("remove {}", path.display()))?;
+                }
+            }
+            self.db.delete_snapshot(snap.e)?;
+            out.snapshots_dropped.push(snap.e);
+        }
+        Ok(())
+    }
+
+    /// The content hash epoch `rows[pos]` would have if it were cut from the
+    /// database as it stands now, keeping its PUBLISHED `prev`. Equal to the
+    /// stored hash exactly when the published bytes still describe the DB.
+    fn rebuilt_hash(&self, rows: &[crate::db::EpochRowFull], pos: usize) -> Result<[u8; 32]> {
+        let prev = if pos == 0 {
+            None
+        } else {
+            Some(rows[pos - 1].content_hash)
+        };
+        let epoch = self.build_epoch(rows[pos].idx, prev)?;
+        Ok(payload_sha256(&codec::encode_epoch(&epoch)))
     }
 
     /// Publish a snapshot at the newest cut epoch's end block.

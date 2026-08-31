@@ -1,34 +1,20 @@
-//! FeedTransport (spec §7.2) — the type-system privacy boundary.
+//! Native `FeedTransport` implementations (spec §7.2).
+//!
+//! The trait itself lives in `strk20-consumer` — Block B is written against
+//! it, and an HTTP transport, a directory transport and a browser `fetch`
+//! transport are three hosts for one state machine. It is re-exported here so
+//! the crate's privacy locks (see the compile-fail suite in `lib.rs`) keep
+//! pointing at one path.
 //!
 //! NO method accepts an address, key, slot, or any user-derived value: a
 //! feed-mode client physically cannot ask the server anything about itself.
-//! The compile-fail suite in e2e-tests locks this signature.
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use strk20_feed::manifest::{Genesis, Manifest};
 
-#[async_trait]
-pub trait FeedTransport: Send + Sync {
-    async fn fetch_genesis(&self) -> Result<Genesis>;
-    async fn fetch_manifest(&self) -> Result<Manifest>;
-    /// Compressed epoch bytes.
-    async fn fetch_epoch(&self, idx: u64) -> Result<Vec<u8>>;
-    /// Compressed snapshot bytes for epoch `e`. `e` comes from the manifest —
-    /// feed progress, never anything derived from a user.
-    async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>>;
-    async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>>;
-    /// The stored `getStorageProof` response for snapshot `e`'s basis block
-    /// (§1.3, reinstated by §12 point 1); `None` when the feed publishes none.
-    /// `e` is a manifest-supplied epoch index — feed progress, never anything
-    /// derived from a user.
-    async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>>;
-    /// The append-only anchor log; `None` when the feed publishes none.
-    async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>>;
-    /// `None` = unchanged (ETag matched). Returns (payload, new_etag).
-    async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>>;
-}
+pub use strk20_consumer::transport::FeedTransport;
 
 /// HTTP transport against a `/feed` base URL. Emits only parameterless GETs.
 pub struct HttpTransport {
@@ -157,6 +143,12 @@ impl FeedTransport for HttpTransport {
         };
         Ok(Some((bytes, etag)))
     }
+
+    /// Native hosts have zstd; Block B deliberately does not (§3.4), so the
+    /// cap and the artifact name travel with the call.
+    fn decompress(&self, bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>> {
+        Ok(strk20_feed::decompress_capped(bytes, cap, artifact)?)
+    }
 }
 
 /// Local directory transport (mirror dir, air-gap, tests).
@@ -228,6 +220,12 @@ impl FeedTransport for DirTransport {
             return Ok(None);
         }
         Ok(Some((bytes, tag)))
+    }
+
+    /// Native hosts have zstd; Block B deliberately does not (§3.4), so the
+    /// cap and the artifact name travel with the call.
+    fn decompress(&self, bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>> {
+        Ok(strk20_feed::decompress_capped(bytes, cap, artifact)?)
     }
 }
 
