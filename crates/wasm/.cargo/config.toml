@@ -1,0 +1,16 @@
+# Size flags for the wasm module.
+#
+# These belong in `[profile.release]`, but cargo honours `[profile]` only in the
+# WORKSPACE ROOT manifest, and the root's release profile is shared with the
+# native binaries (where `opt-level = "z"` would be the wrong trade). A
+# directory-scoped cargo config is the one lever a member crate has, and it is
+# scoped to the wasm target so `cargo run --example make_fixture` from this
+# directory is unaffected.
+#
+#   opt-level=z   the module is I/O-free folding over small payloads; code size
+#                 dominates the download, and the fold is microseconds either way
+#   panic=abort   no unwind tables. A panic here is a programming error that
+#                 `set_panic_hook` reports and the tab cannot continue past
+#   strip=symbols drops the symbol table wasm-opt keeps
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "opt-level=z", "-C", "panic=abort", "-C", "strip=symbols"]

@@ -1,0 +1,39 @@
+[package]
+name = "strk20-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen facade over Block B (strk20-consumer): a pure synchronous computer — feed bytes in, notes out. No network, no storage, no async in Rust."
+
+[lib]
+# `cdylib` is what wasm-pack links; `rlib` lets the fixture generator (a native
+# example) link the same code, so the golden report and the module's report come
+# from one crate rather than two.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+strk20-consumer = { path = "../consumer" }
+# NOT feature "compress": zstd-sys shells out to clang and has no wasm32
+# backend. TypeScript inflates; §3.4.
+strk20-feed = { path = "../feed", default-features = false, features = ["mpt"] }
+discovery-core = { workspace = true }
+starknet-types-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+zeroize = { workspace = true }
+wasm-bindgen = "0.2"
+
+# Only the fixture generator needs these. Dev-dependencies are NOT resolved into
+# a `--lib` build, so `zstd` (and its C toolchain) never enters the wasm graph.
+[dev-dependencies]
+strk20-feed = { path = "../feed", features = ["compress", "mpt"] }
+tokio = { workspace = true }
+
+# A `[profile]` section in a workspace MEMBER is ignored by cargo (profiles are
+# root-only), so size comes from wasm-opt instead — which is where most of it
+# was going to come from anyway.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
