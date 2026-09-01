@@ -869,12 +869,25 @@ fn progress_lines(stderr: &str) -> Vec<&str> {
 
 // ------------------------------------------------------------------ T11
 
-/// LIVE-4 moved the verification block from `min(l1_accepted, frontier)` to
-/// `min(frontier, rpc_head)`; the §5.6 recovery rescan has to move with it. A
-/// pool write that rides a block with no pool event ABOVE l1_accepted is
-/// exactly what that rescan exists to recover, and a rescan still capped at
-/// l1_accepted cannot reach it — the mismatch would then reproduce on every
-/// retry, latching DEGRADED and stopping epoch publication forever.
+/// A pool write that rides a block with NO pool event, above l1_accepted.
+///
+/// The scenario is unchanged; what recovers it is not. This test used to
+/// require that the write produce a `VERIFY-ROOT MISMATCH` first, because the
+/// §5.6 recovery rescan was the only code that ever asked the chain about a
+/// block `getEvents` cannot name — and the point being guarded was that the
+/// rescan's range moved with LIVE-4's verification block (`min(frontier,
+/// rpc_head)`, not `min(l1_accepted, frontier)`), since a rescan still capped
+/// at l1_accepted could not reach this block and the mismatch would reproduce
+/// on every retry, latching DEGRADED forever.
+///
+/// `run_cycle` now sweeps state diffs across the blocks a cycle moves past
+/// (`TAIL_STATE_DIFF_SPAN`), so on a chain this short the write is ingested
+/// before verify-root ever runs and the mismatch does not happen. Requiring
+/// one would now assert the bug rather than the fix. The consequences are what
+/// this test pins, and all three still hold whichever layer got there first:
+/// the block is in the mirror, both ready epochs are cut, and health is not
+/// latched. The §5.6 rescan remains the backstop for a divergence older than
+/// the sweep's span, where it is still the only path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t11_a_divergence_above_l1_accepted_is_recovered_not_latched() {
     ensure_built();
@@ -902,16 +915,15 @@ async fn t11_a_divergence_above_l1_accepted_is_recovered_not_latched() {
 
     let (stdout, stderr, ok) = backfill(dir.path(), &url, &url, &pool_hex);
     assert!(ok, "backfill failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stderr.contains("VERIFY-ROOT MISMATCH"),
-        "vacuous test: the silent write never produced a mismatch:\n{stderr}"
-    );
 
     let db = Db::open(&dir.path().join("strk20.db")).unwrap();
     assert!(
         db.blocks_in_range(silent, silent).unwrap().len() == 1,
-        "the §5.6 rescan must reach block {silent}: it is above l1_accepted but at \
-         or below the frontier, which is where verify-root now checks"
+        "block {silent} must reach the mirror: it writes pool storage, emits no pool \
+         event, and sits above l1_accepted but at or below the frontier — which is \
+         where verify-root checks. Either the tail state-diff sweep ingests it or the \
+         §5.6 rescan recovers it; neither doing so is a permanent root divergence.\
+         \nstderr:\n{stderr}"
     );
     assert_eq!(
         db.epoch_rows().unwrap().len(),

@@ -25,6 +25,17 @@ const MAX_SCAN_WINDOW: u64 = 100_000;
 /// at the old frontier. Segmenting bounds both to one segment.
 const SCAN_SEGMENT: u64 = MAX_SCAN_WINDOW;
 
+/// How far behind head a cycle may be and still afford the state-diff sweep
+/// that catches pool writes emitting no pool event (`run_cycle` step 5).
+///
+/// The number is a price, not a policy: the sweep costs one `getStateUpdate`
+/// per block, so it is affordable exactly while the mirror is following the
+/// chain. A follower is 1–10 blocks behind per poll; 256 leaves room for a
+/// restart after a short outage and still bounds one cycle at 256 calls. Above
+/// it — a backfill, a long outage — the sweep is skipped and completeness for
+/// that stretch is the auditor's job, not the poll loop's.
+const TAIL_STATE_DIFF_SPAN: u64 = 256;
+
 /// Next window length, predicted from what the last one answered: aim at three
 /// quarters of a page. Prediction, not dogma — an overshoot comes back with a
 /// continuation token and costs exactly one call to halve.
@@ -122,6 +133,41 @@ impl<'a> Ingestor<'a> {
                 "scan segment ingested; frontier checkpointed"
             );
             seg_from = seg_to + 1;
+        }
+
+        // 5. The events-first scan is INCOMPLETE, and measurably so: a block can
+        //    carry pool storage writes and emit no pool event, and `getEvents`
+        //    cannot name such a block, so nothing above ever asks the chain about
+        //    it. Measured 2026-09-01 on Sepolia — 23 blocks between 8,271,125 and
+        //    14,358,219 write pool storage with zero pool events (8,472,101: 17
+        //    writes; 12,715,446: 10; 13,702,347: 20), 221 slots the mirror had
+        //    never seen — and reproduced on mainnet at 11,721,848 (7 writes, 0
+        //    events). Every one of them is a permanent root divergence, which is
+        //    what `verify-root` was reporting on both networks.
+        //
+        //    The tail closes the hole where it is affordable: one
+        //    `getStateUpdate` per block, over the blocks this cycle just moved
+        //    past. A live follower moves a handful of blocks per poll, so this is
+        //    a handful of calls; a backfill moves millions and is skipped
+        //    entirely, because one call per block over 6M blocks is not a poll
+        //    interval's worth of work. History therefore still needs the
+        //    out-of-band audit (`strk20 rescan`), and this only guarantees that a
+        //    mirror already verified at its frontier stays verified.
+        let tail_from = frontier + 1;
+        if tail_from <= latest.block_number
+            && latest.block_number - frontier <= TAIL_STATE_DIFF_SPAN
+        {
+            let recovered = self.rescan_range(tail_from, latest.block_number).await?;
+            if recovered > 0 {
+                tracing::info!(
+                    from = tail_from,
+                    to = latest.block_number,
+                    recovered,
+                    "tail state-diff sweep ingested block(s) that write pool storage \
+                     without emitting a pool event"
+                );
+                out.blocks_ingested += recovered;
+            }
         }
 
         // update head meta last (a crash before this point just rescans)
