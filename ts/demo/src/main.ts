@@ -298,6 +298,11 @@ function fillCard(card: RunCard, feed: FeedState, totalMs: number, c: KeylessCli
   card.cacheRequests = recs.length - network.length;
   card.bytes = recs.reduce((n, r) => n + r.bytes, 0);
   card.epochs = recs.filter((r) => r.artifact === 'epoch').length;
+  // The engine's own counter. It is NOT the request count: a warm start folds
+  // every epoch the state blob carries and fetches none of them, so reporting
+  // the request count as "epochs applied" showed 0 for a run that folded 607
+  // and made the fold time next to it look unexplained.
+  card.epochsApplied = feed.epochsApplied;
   card.bootMs = c.bootMs();
 }
 

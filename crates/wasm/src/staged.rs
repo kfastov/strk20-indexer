@@ -32,24 +32,30 @@
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use strk20_consumer::transport::FeedTransport;
 use strk20_feed::manifest::{Genesis, Manifest};
+
+/// A staged payload. `Arc` because every epoch is reachable under two keys —
+/// its index and its content hash — and holding two `Vec`s meant the module
+/// carried the whole feed twice (20 MB of wasm heap for the 10 MB Sepolia
+/// history) and paid a full copy at stage time and another at export time.
+type Bytes = Arc<Vec<u8>>;
 
 #[derive(Default)]
 struct Staged {
     genesis: Option<Genesis>,
     manifest: Option<Manifest>,
     /// epoch index -> raw payload
-    epochs: BTreeMap<u64, Vec<u8>>,
+    epochs: BTreeMap<u64, Bytes>,
     /// epoch index -> compressed snapshot bytes (ring 1 is checked over these)
-    snapshots: BTreeMap<u64, Vec<u8>>,
+    snapshots: BTreeMap<u64, Bytes>,
     /// epoch index -> basis-block proof sidecar
-    snapshot_anchors: BTreeMap<u64, Vec<u8>>,
-    anchors: Option<Vec<u8>>,
+    snapshot_anchors: BTreeMap<u64, Bytes>,
+    anchors: Option<Bytes>,
     head: Option<(Vec<u8>, String)>,
     /// `sha256(bytes as Block B will see them) -> inflated payload`
-    inflated: BTreeMap<[u8; 32], Vec<u8>>,
+    inflated: BTreeMap<[u8; 32], Bytes>,
 }
 
 /// Push-side handle. Cheap to share; every method locks for the duration of one
@@ -97,8 +103,9 @@ impl StagedFeed {
     /// Raw (already-inflated) epoch payload. Block B checks its sha256 against
     /// the manifest entry, so staging the wrong bytes fails loudly.
     pub fn put_epoch(&self, e: u64, payload: Vec<u8>) {
+        let payload: Bytes = Arc::new(payload);
         let mut g = self.lock();
-        g.inflated.insert(h(&payload), payload.clone());
+        g.inflated.insert(h(&payload), Arc::clone(&payload));
         g.epochs.insert(e, payload);
     }
 
@@ -106,16 +113,16 @@ impl StagedFeed {
     /// Both are needed: ring 1 hashes the former, rings 2-5 parse the latter.
     pub fn put_snapshot(&self, e: u64, zst: Vec<u8>, payload: Vec<u8>) {
         let mut g = self.lock();
-        g.inflated.insert(h(&zst), payload);
-        g.snapshots.insert(e, zst);
+        g.inflated.insert(h(&zst), Arc::new(payload));
+        g.snapshots.insert(e, Arc::new(zst));
     }
 
     pub fn put_snapshot_anchor(&self, e: u64, json: Vec<u8>) {
-        self.lock().snapshot_anchors.insert(e, json);
+        self.lock().snapshot_anchors.insert(e, Arc::new(json));
     }
 
     pub fn put_anchors(&self, payload: Vec<u8>) {
-        self.lock().anchors = Some(payload);
+        self.lock().anchors = Some(Arc::new(payload));
     }
 
     /// `head.ndjson` plus the ETag it was served with. Block B skips the tail
@@ -132,13 +139,19 @@ impl StagedFeed {
         StagedExport {
             genesis: g.genesis.clone(),
             manifest: g.manifest.clone(),
+            // `Arc` clones: the export borrows the staged bytes rather than
+            // duplicating the whole feed a second time on its way out.
             epochs: g.epochs.clone(),
             snapshots: g
                 .snapshots
                 .iter()
                 .map(|(e, zst)| {
-                    let raw = g.inflated.get(&h(zst)).cloned().unwrap_or_default();
-                    (*e, (zst.clone(), raw))
+                    let raw = g
+                        .inflated
+                        .get(&h(zst))
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(Vec::new()));
+                    (*e, (Arc::clone(zst), raw))
                 })
                 .collect(),
             snapshot_anchors: g.snapshot_anchors.clone(),
@@ -151,11 +164,11 @@ impl StagedFeed {
 pub struct StagedExport {
     pub genesis: Option<Genesis>,
     pub manifest: Option<Manifest>,
-    pub epochs: BTreeMap<u64, Vec<u8>>,
+    pub epochs: BTreeMap<u64, Bytes>,
     /// epoch index -> (compressed, inflated)
-    pub snapshots: BTreeMap<u64, (Vec<u8>, Vec<u8>)>,
-    pub snapshot_anchors: BTreeMap<u64, Vec<u8>>,
-    pub anchors: Option<Vec<u8>>,
+    pub snapshots: BTreeMap<u64, (Bytes, Bytes)>,
+    pub snapshot_anchors: BTreeMap<u64, Bytes>,
+    pub anchors: Option<Bytes>,
 }
 
 #[async_trait]
@@ -178,7 +191,7 @@ impl FeedTransport for StagedFeed {
         self.lock()
             .epochs
             .get(&idx)
-            .cloned()
+            .map(|b| b.as_ref().clone())
             .ok_or_else(|| anyhow!("NOT_STAGED: epoch {idx} was never staged"))
     }
 
@@ -186,7 +199,7 @@ impl FeedTransport for StagedFeed {
         self.lock()
             .snapshots
             .get(&e)
-            .cloned()
+            .map(|b| b.as_ref().clone())
             .ok_or_else(|| anyhow!("NOT_STAGED: snapshot for epoch {e} was never staged"))
     }
 
@@ -195,11 +208,11 @@ impl FeedTransport for StagedFeed {
     }
 
     async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>> {
-        Ok(self.lock().snapshot_anchors.get(&e).cloned())
+        Ok(self.lock().snapshot_anchors.get(&e).map(|b| b.as_ref().clone()))
     }
 
     async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {
-        Ok(self.lock().anchors.clone())
+        Ok(self.lock().anchors.as_ref().map(|b| b.as_ref().clone()))
     }
 
     async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>> {
@@ -229,6 +242,6 @@ impl FeedTransport for StagedFeed {
                 raw.len()
             );
         }
-        Ok(raw.clone())
+        Ok(raw.as_ref().clone())
     }
 }

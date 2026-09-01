@@ -94,7 +94,8 @@ export function renderCard(c: RunCard, title: string, subtitle: string): HTMLEle
       ),
     );
     body.push(cardRow('bytes', bytes(c.bytes)));
-    body.push(cardRow('epochs applied', num(c.epochs)));
+    body.push(cardRow('epochs fetched', num(c.epochs)));
+    body.push(cardRow('epochs folded', num(c.epochsApplied)));
     body.push(
       cardRow('engine boot', c.bootMs === null ? 'not measured' : ms(c.bootMs), {
         note: bootInTotal ? 'in total' : 'not in total',

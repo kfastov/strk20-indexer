@@ -56,7 +56,10 @@ export interface RunCard {
   networkRequests: number | null;
   cacheRequests: number | null;
   bytes: number | null;
+  /** Epoch artifacts this run REQUESTED. Zero on a warm start. */
   epochs: number | null;
+  /** Epochs the engine FOLDED. 607 on both a cold and a warm start here. */
+  epochsApplied: number | null;
   bootMs: number | null;
   /** Set when the column could not be measured, with the reason. */
   unavailable: string | null;
@@ -80,6 +83,7 @@ export function emptyCard(kind: RunCard['kind']): RunCard {
     cacheRequests: null,
     bytes: null,
     epochs: null,
+    epochsApplied: null,
     bootMs: null,
     unavailable: null,
     bytesSaved: null,

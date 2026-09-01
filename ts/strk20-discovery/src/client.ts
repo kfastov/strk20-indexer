@@ -298,6 +298,7 @@ export class KeylessClient implements DiscoveryClient {
           verified: done.verified,
           staleness: done.staleness,
           changed: done.outcome.epochs_applied > 0 || done.outcome.tail_changed,
+          epochsApplied: done.outcome.epochs_applied,
           cold,
           timing,
           network: this.#summaryFrom(this.#records.slice(before), engine),

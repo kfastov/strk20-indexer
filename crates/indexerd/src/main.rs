@@ -159,6 +159,31 @@ enum Command {
         #[arg(long)]
         json: Option<PathBuf>,
     },
+    /// §5.6 slow path, as an operator command: re-ingest blocks straight from
+    /// their state updates rather than events-first.
+    ///
+    /// This is the only way to recover a pool write that rode a block with NO
+    /// pool event. `audit-coverage` cannot see those blocks — it compares
+    /// event counts, and their event count is zero on both sides — and neither
+    /// can the scanner, which asks `getEvents` what to ingest. Measured on
+    /// Sepolia 2026-09-01: blocks 8,472,101 / 12,715,446 / 13,702,347 carry 17
+    /// / 10 / 20 pool storage writes and zero pool events, and the mirror had
+    /// no row for any of them, which is exactly what `verify-root` reported as
+    /// a root divergence.
+    Rescan {
+        #[command(flatten)]
+        common: CommonOpts,
+        /// Walk [from..to] with one getStateUpdate per block. Complete, and
+        /// priced accordingly — one call per block, so bound the range.
+        #[arg(long, requires = "to")]
+        from: Option<u64>,
+        #[arg(long, requires = "from")]
+        to: Option<u64>,
+        /// Re-ingest exactly these blocks (comma-separated). Cheap, for when a
+        /// diff has already named them.
+        #[arg(long, value_delimiter = ',', conflicts_with = "from")]
+        blocks: Vec<u64>,
+    },
     /// Re-cut published epochs from one epoch upward after a repair changed
     /// blocks below the epoch floor (rewrites history; never automatic)
     RecutEpochs {
@@ -214,6 +239,12 @@ async fn main() -> Result<()> {
             repair,
             json,
         } => audit_coverage(common, from, to, repair, json).await,
+        Command::Rescan {
+            common,
+            from,
+            to,
+            blocks,
+        } => rescan(common, from, to, blocks).await,
         Command::RecutEpochs {
             common,
             from_block,
@@ -655,6 +686,70 @@ async fn audit_coverage(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// §5.6 slow path on demand. Two shapes, same ingest path: a bounded range
+/// walked one `getStateUpdate` at a time, or an explicit block list.
+///
+/// Why this exists as a command: the mismatch recovery inside `run` rescans
+/// only `[last_epoch.to + 1 .. frontier]`, and when the missing write is older
+/// than that it prints "re-run with --full-resync" — a flag that does not
+/// exist, for a rebuild that costs a full backfill. A divergence localized to
+/// a handful of blocks deserves a repair the size of the divergence.
+async fn rescan(
+    common: CommonOpts,
+    from: Option<u64>,
+    to: Option<u64>,
+    blocks: Vec<u64>,
+) -> Result<()> {
+    let cfg = common.chain_config();
+    let rpc = common.rpc();
+    let mut db = Db::open(&common.db)?;
+    init_checks(&db, &rpc, &cfg).await?;
+    let mut ingestor = Ingestor {
+        db: &mut db,
+        rpc: &rpc,
+        cfg: &cfg,
+        chunk_size: common.chunk_size,
+        progress_secs: common.progress_secs,
+    };
+    let (touched, lowest) = match (from, to) {
+        (Some(f), Some(t)) => {
+            anyhow::ensure!(f <= t, "empty range [{f}..{t}]");
+            println!("rescanning [{f}..{t}] from per-block state updates...");
+            (ingestor.rescan_range(f, t).await?, f)
+        }
+        _ => {
+            anyhow::ensure!(
+                !blocks.is_empty(),
+                "nothing to do: pass --from/--to for a range, or --blocks for a list"
+            );
+            let mut list = blocks;
+            list.sort_unstable();
+            list.dedup();
+            let lowest = list[0];
+            println!("re-ingesting {} named block(s)...", list.len());
+            (ingestor.reingest_blocks(&list).await?, lowest)
+        }
+    };
+    println!("rescan touched {touched} block(s) that write pool storage");
+    if touched == 0 {
+        return Ok(());
+    }
+    match db.last_epoch()? {
+        Some((_, _, epoch_to)) if lowest <= epoch_to => println!(
+            "\nBlock {lowest} is inside already-cut epoch {}, so the published feed still \
+             carries the pre-repair bytes. Republish with \
+             `strk20 recut-epochs --from-block {lowest}`, then `strk20 epoch-verify`, then \
+             re-check with `verify-root`.",
+            cfg.epoch_of(lowest)
+        ),
+        _ => println!(
+            "\nEvery touched block is above the epoch floor, so no published epoch changed; \
+             the next `strk20 run` cycle regenerates head.ndjson from the repaired database."
+        ),
     }
     Ok(())
 }

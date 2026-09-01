@@ -144,6 +144,14 @@ export interface FeedState {
   verified: 'anchored' | 'server-asserted' | 'replayed';
   staleness: 'ok' | 'behind' | 'diverged';
   changed: boolean;
+  /**
+   * Epochs the ENGINE folded in this sync — its own counter, not a count of
+   * epoch requests. The two are equal on a cold start and wildly different on a
+   * warm one, where the epochs come out of the state blob and are folded
+   * without a single GET. Reporting the request count under this name is how a
+   * warm run that re-folds 607 epochs reads as "0 epochs applied".
+   */
+  epochsApplied: number;
   cold: boolean;
   timing: SyncTiming;
   network: NetworkSummary;

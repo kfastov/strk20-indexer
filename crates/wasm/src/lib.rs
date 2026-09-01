@@ -107,7 +107,44 @@ mod engine {
         /// the TypeScript side. Cleared by every `apply`, because a new head
         /// moves the candidate blocks and an old verdict does not survive it.
         grade: std::sync::Mutex<Option<String>>,
+        /// The exportable state as it stands in the caller's STORE, if the
+        /// caller has one. Set by `load` (from the blob it just decoded) and by
+        /// `export_state` (from the blob it just wrote).
+        ///
+        /// This exists because `state_changed` has to answer "does this mirror
+        /// differ from what is persisted?", and the obvious implementation —
+        /// did this `apply` move the store — answers a different question. A
+        /// restored engine holds the BYTES but an empty mirror (see `load`), so
+        /// its first `apply` always moves the store from "nothing folded" to
+        /// "epoch N folded" and always reported `state_changed: true`. The
+        /// client believed it and rewrote a byte-identical 10 MB blob to
+        /// IndexedDB on every warm start.
+        ///
+        /// The optimism is deliberate and bounded: `export_state` marks the
+        /// state persisted before the caller has actually stored it, so a
+        /// failed write leaves this session declining to re-export. That is the
+        /// same exposure the previous rule had (it also went quiet once
+        /// `before == after`), and a caller that cares can re-`export_state`
+        /// unconditionally — the method never refuses.
+        persisted: std::sync::Mutex<Option<Stamp>>,
+        /// Memoised `full_slot_set_as_of(head).len()`, the one field of
+        /// `info()` that costs a full scan of the storage log (22 934 slots and
+        /// ~12 ms on the Sepolia feed). `info()` is called several times per
+        /// sync by any wrapper, so the scan was being paid ~10 times for a
+        /// number that only changes when the mirror does.
+        ///
+        /// Invalidated by every ABI call that can write a storage row —
+        /// `apply`, `apply_head`, `discover` (which runs `apply_feed` itself)
+        /// and `load`. Nothing else on this boundary can reach the store, so
+        /// the cache cannot go stale behind the caller's back.
+        slots: std::sync::Mutex<Option<usize>>,
     }
+
+    /// The exportable state, reduced to something comparable: what a state blob
+    /// carries and `apply` can move. Deliberately NOT the head tail — the tail
+    /// is never exported (see [`crate::blob`]), so a tail-only change is not a
+    /// state change and must not trigger a rewrite.
+    type Stamp = (Option<u64>, Option<String>, Option<u64>);
 
     fn felt(hex: &str, what: &str) -> Result<Felt> {
         strk20_feed::felt_from_hex(hex)
@@ -147,11 +184,32 @@ mod engine {
                 proofs: Arc::new(StagedProofs::new()),
                 genesis,
                 grade: std::sync::Mutex::new(None),
+                persisted: std::sync::Mutex::new(None),
+                slots: std::sync::Mutex::new(None),
             })
         }
 
         fn set_grade(&self, grade: Option<String>) {
             *self.grade.lock().expect("grade poisoned") = grade;
+        }
+
+        /// What `export_state` would write, as a comparable value.
+        fn stamp(&self) -> Result<Stamp> {
+            Ok((
+                meta_u64(&self.store, "last_epoch_applied"),
+                self.store.meta_get("last_epoch_hash")?,
+                meta_u64(&self.store, "snapshot_basis"),
+            ))
+        }
+
+        fn set_persisted(&self, stamp: Stamp) {
+            *self.persisted.lock().expect("persisted poisoned") = Some(stamp);
+        }
+
+        /// Drop the memoised slot count. Called by every entry point that can
+        /// write a storage row.
+        fn invalidate_slots(&self) {
+            *self.slots.lock().expect("slots poisoned") = None;
         }
 
         /// The grade this mirror has earned, by the module's own rule. The
@@ -315,22 +373,23 @@ mod engine {
             // A fold moves the mirror; a grade established against the old one
             // does not carry over.
             self.set_grade(None);
-            let before = (
-                meta_u64(&self.store, "last_epoch_applied"),
-                meta_u64(&self.store, "snapshot_basis"),
-            );
+            self.invalidate_slots();
             let out = drive(strk20_consumer::apply::apply_feed(
                 &self.store,
                 &self.feed,
                 mode,
             ))?;
-            let after = (
-                meta_u64(&self.store, "last_epoch_applied"),
-                meta_u64(&self.store, "snapshot_basis"),
-            );
+            // §4.3's export rule, asked the right way round: not "did this call
+            // move the store" but "is the store now something other than what
+            // has been persisted". On the warm path those differ — see the
+            // `persisted` field.
+            let state_changed = {
+                let persisted = self.persisted.lock().expect("persisted poisoned");
+                persisted.as_ref() != Some(&self.stamp()?)
+            };
             Ok(json!({
                 "epochs_applied": out.epochs_applied,
-                "last_epoch": after.0,
+                "last_epoch": meta_u64(&self.store, "last_epoch_applied"),
                 "last_epoch_to": out.last_epoch_to,
                 "head": out.head,
                 "l1_accepted": out.l1_accepted,
@@ -340,7 +399,7 @@ mod engine {
                 "snapshot_rejected": out.snapshot_rejected,
                 // The field §4.3's export rule reads: only epoch-derived state
                 // is exportable, so a tail-only change is NOT a state change.
-                "state_changed": before != after,
+                "state_changed": state_changed,
             })
             .to_string())
         }
@@ -350,6 +409,7 @@ mod engine {
         pub fn apply_head(&self, payload: &[u8], etag: &str) -> Result<String, JsError> {
             to_js((|| {
                 self.set_grade(None);
+                self.invalidate_slots();
                 self.feed.put_head(payload.to_vec(), etag.to_owned());
                 let out = drive(strk20_consumer::apply::apply_feed(
                     &self.store,
@@ -380,7 +440,19 @@ mod engine {
 
         fn info_inner(&self) -> Result<String> {
             let head = meta_u64(&self.store, "head_number").unwrap_or(0);
-            let slots = self.store.full_slot_set_as_of(head)?.len();
+            // The one expensive field: a full scan of the storage log. Computed
+            // once per mirror state, not once per `info()` — see `slots`.
+            let slots = {
+                let mut cached = self.slots.lock().expect("slots poisoned");
+                match *cached {
+                    Some(n) => n,
+                    None => {
+                        let n = self.store.full_slot_set_as_of(head)?.len();
+                        *cached = Some(n);
+                        n
+                    }
+                }
+            };
             Ok(json!({
                 "chain_id": self.genesis.chain_id,
                 "pool": self.genesis.pool,
@@ -466,7 +538,17 @@ mod engine {
                 history_floor: meta_u64(&self.store, "history_floor").unwrap_or(0),
                 snapshot_basis: meta_u64(&self.store, "snapshot_basis"),
             };
-            blob::encode(&header, &self.feed.snapshot_of_staged())
+            let stamp = (
+                header.last_epoch,
+                header.last_epoch_hash.clone(),
+                header.snapshot_basis,
+            );
+            let out = blob::encode(&header, &self.feed.snapshot_of_staged())?;
+            // What the caller now holds. The next `apply` that reproduces this
+            // exact state reports `state_changed: false` and the caller does not
+            // rewrite bytes it already has.
+            self.set_persisted(stamp);
+            Ok(out)
         }
 
         /// Restore from a state blob: verify the trailer hash and the identity
@@ -487,7 +569,16 @@ mod engine {
         pub fn load(blob_bytes: &[u8], genesis_json: &str) -> Result<Engine, JsError> {
             to_js((|| {
                 let engine = Engine::build(genesis_json)?;
-                blob::decode_into(blob_bytes, &engine.genesis, &engine.feed)?;
+                let header = blob::decode_into(blob_bytes, &engine.genesis, &engine.feed)?;
+                // These bytes ARE the persisted state. The first `apply` after a
+                // restore folds them into the mirror and lands exactly here, so
+                // it must report `state_changed: false` — the alternative is a
+                // rewrite of a byte-identical blob on every warm start.
+                engine.set_persisted((
+                    header.last_epoch,
+                    header.last_epoch_hash,
+                    header.snapshot_basis,
+                ));
                 Ok(engine)
             })())
         }
@@ -523,6 +614,9 @@ mod engine {
         }
 
         fn discover_inner(&self, owner_hex: &str, key: &mut [u8]) -> Result<String> {
+            // `sync_once` runs `apply_feed` itself, so this entry point can move
+            // the storage log too.
+            self.invalidate_slots();
             if key.len() != 32 {
                 return Err(anyhow!(
                     "KEY_INVALID: the viewing key must be exactly 32 big-endian bytes, got {}",
@@ -611,5 +705,94 @@ mod engine {
                 wasm_bindgen::throw_str(&msg);
             }));
         });
+    }
+}
+
+/// Regression guards for the persistence rule that decides whether a client
+/// rewrites its state blob. These run on the HOST (`cargo test -p
+/// strk20-engine`); nothing here touches JS.
+#[cfg(test)]
+mod persistence_tests {
+    use crate::Engine;
+
+    fn fx(rel: &str) -> Vec<u8> {
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/").to_owned() + rel)
+            .unwrap_or_else(|e| panic!("fixture {rel}: {e}"))
+    }
+    fn fx_str(rel: &str) -> String {
+        String::from_utf8(fx(rel)).expect("fixture is utf-8")
+    }
+    fn ok<T>(r: Result<T, wasm_bindgen::JsError>, what: &str) -> T {
+        match r {
+            Ok(v) => v,
+            Err(_) => panic!("{what} failed"),
+        }
+    }
+
+    fn staged(genesis: &str) -> Engine {
+        let e = ok(Engine::new(genesis), "Engine::new");
+        ok(e.stage_manifest(&fx_str("manifest.json")), "stage_manifest");
+        e.stage_epoch(0, &fx("epochs/0.ndjson"));
+        e.stage_snapshot(0, &fx("snapshots/0.zst"), &fx("snapshots/0.ndjson"));
+        e.stage_anchors(&fx("anchors.ndjson"));
+        e.stage_head(&fx("head.ndjson"), "fixture-etag");
+        e
+    }
+
+    /// A restored engine folds the blob's epochs again — that is the design —
+    /// but the state it lands on IS the state it was handed, so it must not ask
+    /// the caller to write those bytes back. The old rule ("did this apply move
+    /// the store") could only ever answer yes here, because `load` restores
+    /// bytes and leaves the mirror empty, and every warm start rewrote a
+    /// byte-identical 10 MB blob to IndexedDB.
+    #[test]
+    fn a_restored_mirror_that_refolds_to_the_same_state_is_not_dirty() {
+        let genesis = fx_str("genesis.json");
+        let cold = staged(&genesis);
+        let first: serde_json::Value =
+            serde_json::from_str(&ok(cold.apply("epochs"), "cold apply")).unwrap();
+        assert_eq!(first["state_changed"], true, "a fresh fold is unpersisted");
+        assert!(first["epochs_applied"].as_u64().unwrap() > 0);
+        let blob = ok(cold.export_state(), "export_state");
+        // Exporting is what makes the state persisted: a second apply that
+        // changes nothing must now be clean.
+        let again: serde_json::Value =
+            serde_json::from_str(&ok(cold.apply("epochs"), "cold re-apply")).unwrap();
+        assert_eq!(again["state_changed"], false, "nothing moved since the export");
+
+        let warm = ok(Engine::load(&blob, &genesis), "Engine::load");
+        ok(warm.stage_manifest(&fx_str("manifest.json")), "stage_manifest");
+        warm.stage_head(&fx("head.ndjson"), "fixture-etag");
+        let out: serde_json::Value =
+            serde_json::from_str(&ok(warm.apply("epochs"), "warm apply")).unwrap();
+        assert!(
+            out["epochs_applied"].as_u64().unwrap() > 0,
+            "the restored engine really does re-fold the epochs the blob carries"
+        );
+        assert_eq!(
+            out["state_changed"], false,
+            "a fold that reproduces the loaded blob is not a state change"
+        );
+        assert_eq!(out["last_epoch"], first["last_epoch"]);
+    }
+
+    /// `info()` memoises the storage-log scan behind `slots`. The cache must
+    /// follow the mirror, so a fold that adds rows has to be visible in the very
+    /// next `info()`.
+    #[test]
+    fn the_slot_count_follows_the_mirror_across_a_fold() {
+        let genesis = fx_str("genesis.json");
+        let e = staged(&genesis);
+        let before: serde_json::Value = serde_json::from_str(&ok(e.info(), "info")).unwrap();
+        assert_eq!(before["slots"], 0, "nothing folded yet");
+        ok(e.apply("epochs"), "apply");
+        let after: serde_json::Value = serde_json::from_str(&ok(e.info(), "info")).unwrap();
+        assert!(
+            after["slots"].as_u64().unwrap() > 0,
+            "the fold's rows must be visible to the next info(), cache or no cache"
+        );
+        // Repeated reads are served from the cache and must not drift.
+        let again: serde_json::Value = serde_json::from_str(&ok(e.info(), "info")).unwrap();
+        assert_eq!(after["slots"], again["slots"]);
     }
 }

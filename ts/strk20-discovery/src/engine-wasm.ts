@@ -304,7 +304,11 @@ class WasmEngineAdapter implements Engine {
   // ------------------------------------------------------------------ info
 
   info(): string {
+    // ONE module round trip. This used to parse `info()` twice — once here and
+    // once inside `#grade()` — and each parse made the module recompute the
+    // `slots` field, which is a full scan of the storage log.
     const raw = this.#info();
+    const verified = raw?.verified ?? 'replayed';
     // `last_epoch` is `null` in the module when nothing is folded. The client
     // tests `last_epoch < 0` for coldness, and `null < 0` is false in JS —
     // which would report a cold engine as warm. Normalised here, once.
@@ -327,7 +331,7 @@ class WasmEngineAdapter implements Engine {
       // "unmeasured", never a zero passed off as a measurement.
       blocks: -1,
       events: -1,
-      verified: this.#grade(),
+      verified,
       engine_version: raw?.engine_version ?? '',
       state_dirty: this.#applied?.state_changed ?? false,
     };

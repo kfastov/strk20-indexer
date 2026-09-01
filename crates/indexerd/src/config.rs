@@ -31,8 +31,27 @@ pub const MAINNET_CLASS_V2: &str =
 pub const SEPOLIA_POOL: &str =
     "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
 pub const SEPOLIA_GENESIS_BLOCK: u64 = 8_271_125;
-pub const SEPOLIA_RPC_PRIMARY: &str = "https://starknet-sepolia-rpc.publicnode.com";
-pub const SEPOLIA_RPC_FALLBACK: &str = "https://rpc.starknet-testnet.lava.build";
+/// Endpoint capability is part of the model (§11.5), and on Sepolia the two
+/// endpoints this profile used to name could not serve a storage proof at ANY
+/// height, so no anchor was ever captured, `verify-root` was permanently
+/// UNAVAILABLE and no snapshot could clear the §11.3 publication gate.
+/// Measured 2026-09-01, retried per the §12 method note (never a single call):
+///
+/// | endpoint | `starknet_getStorageProof` |
+/// |---|---|
+/// | `starknet-sepolia-rpc.publicnode.com` | code 42 at head−1 … head−16000, 5/5 attempts — implements no proofs at any height (LIVE-6) |
+/// | `rpc.starknet-testnet.lava.build` | dead: `No pairings available`, not a JSON-RPC answer at all |
+/// | `starknet-sepolia.drpc.org` | `-32601 method is not available` |
+/// | `starknet-sepolia.public.blastapi.io` | discontinued |
+/// | `api.cartridge.gg/x/starknet/sepolia` | **serves proofs**, deterministic window: OK at head−16, code 42 at head−20 |
+///
+/// So the primary is the one endpoint that can answer the request kind the
+/// publication gate depends on. Its window is ~16 blocks (~4 min at Sepolia's
+/// pace), which is exactly where `verify_root_at_target` aims: the live
+/// frontier. publicnode stays as the transport fallback — it serves blocks and
+/// events fine, and a proof refusal never moves the active endpoint (§12 B4).
+pub const SEPOLIA_RPC_PRIMARY: &str = "https://api.cartridge.gg/x/starknet/sepolia";
+pub const SEPOLIA_RPC_FALLBACK: &str = "https://starknet-sepolia-rpc.publicnode.com";
 pub const SEPOLIA_CLASSES: [&str; 6] = [
     "0x715b22abfb60815623f4127ba64bd2f93613d8a5c1e519841eaab444659d2af",
     "0x30b8c540cf04d8ef0f4db2a9098d9cc0e35e83af1cb3325f5a4f40144b4b30b",

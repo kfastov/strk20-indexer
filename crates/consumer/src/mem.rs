@@ -64,9 +64,27 @@ struct Inner {
     /// `(slot, write_block) -> value`, exactly the shape of the SQLite
     /// `storage_log` table: history is kept, reads are as-of.
     storage: BTreeMap<(Key, u64), Felt>,
+    /// Highest write block any `storage` row carries, ever. Only ever raised,
+    /// so it is an upper bound and never lets a clear skip work it owed.
+    ///
+    /// `storage` is keyed `(slot, block)`, so a clear BY BLOCK cannot be a
+    /// range query and has to scan. During a from-genesis replay every epoch's
+    /// range lies strictly above everything already folded, and that scan found
+    /// nothing 607 times over a map that was growing under it. This is the
+    /// cheap proof that there is nothing to find.
+    storage_max_block: u64,
     /// `(block, event_index) -> event`
     events: BTreeMap<(u64, u64), EventRec>,
     notes: BTreeMap<Key, NoteRow>,
+}
+
+/// `Range` as a pair of inclusive block bounds, so the `BTreeMap`s keyed by
+/// block can answer with a range query instead of a full scan.
+fn bounds(range: Range) -> (u64, u64) {
+    match range {
+        Range::Inclusive { from, to } => (from, to),
+        Range::Above { floor } => (floor.saturating_add(1), u64::MAX),
+    }
 }
 
 impl Inner {
@@ -86,17 +104,25 @@ impl Inner {
     }
 
     fn clear_range(&mut self, range: Range) {
-        let victims: Vec<u64> = self
-            .blocks
-            .keys()
-            .copied()
-            .filter(|n| range.contains(*n))
-            .collect();
+        let (lo, hi) = bounds(range);
+        let victims: Vec<u64> = self.blocks.range(lo..=hi).map(|(n, _)| *n).collect();
         for n in &victims {
             self.blocks.remove(n);
         }
-        self.storage.retain(|(_, b), _| !range.contains(*b));
-        self.events.retain(|(b, _), _| !range.contains(*b));
+        // Keyed by block, so this is a range query.
+        let dead: Vec<(u64, u64)> = self
+            .events
+            .range((lo, 0)..=(hi, u64::MAX))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &dead {
+            self.events.remove(k);
+        }
+        // Keyed by (slot, block), so this one cannot be. Scan only when a row
+        // in range can actually exist.
+        if lo <= self.storage_max_block {
+            self.storage.retain(|(_, b), _| !range.contains(*b));
+        }
     }
 
     fn apply_block_line(&mut self, b: &BlockLine, l1_final: bool) {
@@ -111,6 +137,9 @@ impl Inner {
         );
         for (slot, value) in &b.diffs {
             self.storage.insert((k(slot), b.number), *value);
+        }
+        if !b.diffs.is_empty() {
+            self.storage_max_block = self.storage_max_block.max(b.number);
         }
         for e in &b.events {
             self.events.insert(
@@ -168,11 +197,11 @@ impl ConsumerStore for MemStore {
     }
 
     fn block_hashes(&self, range: Range) -> Result<Vec<(u64, Felt)>> {
+        let (lo, hi) = bounds(range);
         Ok(self
             .lock()
             .blocks
-            .iter()
-            .filter(|(n, _)| range.contains(**n))
+            .range(lo..=hi)
             .map(|(n, b)| (*n, b.hash))
             .collect())
     }
@@ -207,6 +236,7 @@ impl ConsumerStore for MemStore {
         let mut g = self.lock();
         g.blocks.clear();
         g.storage.clear();
+        g.storage_max_block = 0;
         g.events.clear();
         g.notes.clear();
         for key in [
@@ -230,6 +260,7 @@ impl ConsumerStore for MemStore {
         let mut g = self.lock();
         for s in slots {
             g.storage.insert((k(&s.k), s.w), s.v);
+            g.storage_max_block = g.storage_max_block.max(s.w);
         }
         for (key, value) in meta {
             g.meta.insert((*key).to_owned(), value.clone());
