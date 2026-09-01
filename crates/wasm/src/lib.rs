@@ -708,14 +708,50 @@ mod engine {
     }
 }
 
+/// The fixture generator, compiled into the test build from the example's own
+/// source rather than copied.
+///
+/// `fixture/` is gitignored generated data: `crates/wasm/build.sh` produces it
+/// with `cargo run --example make_fixture`, and nothing else did. So on a fresh
+/// checkout — CI's, or a contributor's before their first wasm build — the tests
+/// below found no `genesis.json` and panicked. Making them skip instead would
+/// have been the worse repair twice over: it hides the two guards this crate's
+/// persistence rule rests on, and a suite that reports green having run nothing
+/// is a defect this repository has already been bitten by once.
+///
+/// Including the file keeps ONE generator. A committed fixture would be a second
+/// copy of what this code produces, with nothing checking the two still agree
+/// and a stale golden ready to be mistaken for an assertion.
+///
+/// `dead_code` because the file's `fn main` is the example's entry point and no
+/// test calls it; the tests call `generate`.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../examples/make_fixture.rs"]
+mod make_fixture;
+
 /// Regression guards for the persistence rule that decides whether a client
 /// rewrites its state blob. These run on the HOST (`cargo test -p
 /// strk20-engine`); nothing here touches JS.
 #[cfg(test)]
 mod persistence_tests {
     use crate::Engine;
+    use std::sync::Once;
+
+    /// Generate the feed these tests read, once per test binary and before the
+    /// first read. Regenerating rather than reusing is the point: it costs
+    /// milliseconds, and it means the bytes under test always come from the
+    /// codec in this working tree instead of from whatever a `build.sh` run left
+    /// behind weeks ago.
+    fn ensure_fixture() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            crate::make_fixture::generate().expect("generate crates/wasm/fixture/");
+        });
+    }
 
     fn fx(rel: &str) -> Vec<u8> {
+        ensure_fixture();
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/").to_owned() + rel)
             .unwrap_or_else(|e| panic!("fixture {rel}: {e}"))
     }

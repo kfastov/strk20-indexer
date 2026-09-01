@@ -216,8 +216,14 @@ script exits nonzero.
 **Failure scenario.** `ts/demo/dist/` was committed. The bundle inlines the demo fixture identities:
 
 ```
-address:"0x04f2…0a9b", viewingKey:"5f1c3a9d24e7b08163d5a2c47f9e0b6d38a1c5e79024b6d8f1a3c5e70924b6d8"
+address:"0x04f2…0a9b", viewingKey:"<64 hex>"
 ```
+
+The key is elided above and that elision is part of the point: check 4 reads *this* file too, and its
+shape rule is `viewingKey:` followed by 40-plus hex characters, whoever wrote them and for whatever
+reason. Quoting the value in full — which this section did until CI started running the check on
+every push — made the review of a permanently-red gate the thing keeping it red. The literal itself
+lives, on purpose and with a comment saying why, in `ts/demo/fixtures/replay-identities.json`.
 
 These are fixture keys, not real key material, so there is no disclosure. The defect is the gate:
 `scripts/check-invariants.py` now fails on every run, and a check that is always red stops being

@@ -16,6 +16,15 @@
 //! the browser is running the engine, not a simulation of it.
 //!
 //! Run: `cargo run -p strk20-engine --example make_fixture`
+//!
+//! TWO CALLERS, ONE FILE. `crates/wasm/build.sh` runs this as an example before
+//! the wasm build; `crates/wasm/src/lib.rs` includes this same source into its
+//! test build (`#[path = "../examples/make_fixture.rs"]`) and calls [`generate`]
+//! before the first fixture read. That is deliberate: `fixture/` is gitignored
+//! generated data, so on a fresh checkout the tests have nothing to read, and a
+//! suite that only runs after somebody remembers to run a build script is a
+//! suite that does not run. Keep the entry point below callable — do not move
+//! the body back into `main`.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -143,8 +152,25 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+/// Build the fixture feed under `crates/wasm/fixture/` and the native goldens
+/// beside it. Synchronous so a `#[test]` can call it without a runtime of its
+/// own; it drives the async fold on a private current-thread runtime, exactly
+/// as `#[tokio::main(flavor = "current_thread")]` did when this was `main`.
+///
+/// Overwrites unconditionally. A fixture left over from an older codec that
+/// still parses is worse than an absent one: the tests would agree with it.
+pub fn generate() -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(generate_inner())
+}
+
+fn main() -> Result<()> {
+    generate()
+}
+
+async fn generate_inner() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = root.join("fixture");
     let fixture: DevnetFixture = serde_json::from_str(&std::fs::read_to_string(
