@@ -233,7 +233,7 @@ B1 backfill wall-clock · B2 ingest lag p95 · B3 RPC reads per user sync (ours:
 - Scoring is machine-checked every 30 min: demo URL (repo Website field is the most reliable source), any video URL, ≥3 mainnet txs each existing/SUCCEEDED/emitting a pool event. **A read-only project must NOT declare a `contracts` field** in `strk20.json` — then any pool-event tx counts, and app-made txs are explicitly sanctioned ("a project that deploys nothing is judged on the pool alone").
 - Judge weights: 30% integration depth / 30% working mainnet product / 25% innovation / 15% docs+open-source; explicit bonus if other teams depend on what you publish — and issues #121/#221 show teams literally asking for a hosted `INDEXER_URL`.
 - **No competing IDEA-23 project exists** among 174 registered entries (nearest neighbors inventoried; none do discovery-as-a-service). Registration for this repo is already merged (category Infra, `inspired_by: IDEA-23`).
-- Practicalities: mainnet proving-service URL still unpublished (every pool write needs a proof; the official app / Ready wallet reach a prover themselves — Braavos does not implement the STRK20 wallet API); pool fee = 6 STRK per private tx; demo sequence and cut-lines detailed in [research/q4-q19-q20-value-demo.md](research/q4-q19-q20-value-demo.md).
+- Practicalities: mainnet proving-service URL still unpublished (every pool write needs a proof; the official app / Ready wallet reach a prover themselves — Braavos does not implement the STRK20 wallet API); pool fee = 6 STRK per private tx; demo sequence and cut-lines detailed in `docs/research/q4-q19-q20-value-demo.md` (git history, removed 2026-09-02).
 
 ---
 

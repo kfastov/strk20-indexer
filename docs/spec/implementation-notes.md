@@ -14,7 +14,8 @@ implemented as specified.
    `total_n_notes`) dropped, every progress position kept. The engine then
    re-probes only boundary slots. This is the concrete form of the
    "watch-set grows" caveat from the research
-   (docs/research/verify-discovery-trace.md §3), and it is covered by
+   (git history: docs/research/verify-discovery-trace.md §3, removed
+   2026-09-02), and it is covered by
    acceptance legs f/g/k. Cursors still round-trip byte-compatibly with the
    reference schema (conformance test).
 

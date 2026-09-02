@@ -135,7 +135,8 @@ endpoints are sanctioned for external use. **VERIFIED (absence, as of today).**
   deployment has (`SCREENING_PARTNER_NAME`/`SECRET`), and without `SCREENING_URL` the
   sidecar is a no-op that returns no signature — the deposit then reverts on-chain.
   REPORTED/INFERRED (interceptor README + contract behavior; consistent with
-  `docs/notes/2026-08-30-consumer-path-discussion.md` §3).
+  `docs/notes/2026-08-30-consumer-path-discussion.md` §3, git history, removed
+  2026-09-02).
 - Given the hosted Sepolia prover is live and mints attestations, self-hosting is **not
   needed** for the goal of this report. It remains the fallback for everything except
   shield if the alpha endpoints get gated.

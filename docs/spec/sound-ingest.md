@@ -5,9 +5,9 @@ Status: FINAL for implementation. Replaces the ingest-soundness reasoning in
 path) and closes LIVE-8's open end. Deltas of the shipped build live in
 [implementation-notes.md](implementation-notes.md).
 
-Council input: one proposal survived phase Propose —
-[s2-pragmatic](../research/council/sound-ingest/s2-pragmatic.md). Both upstream
-measurement phases (MECHANISM/PREVALENCE, INDEX COSTS) failed, and S2
+Council input: one proposal survived phase Propose — s2-pragmatic
+(`docs/research/council/sound-ingest/s2-pragmatic.md` in git history, removed
+2026-09-02). Both upstream measurement phases (MECHANISM/PREVALENCE, INDEX COSTS) failed, and S2
 re-established them itself. **An unopposed proposal resting on
 self-supplied measurements is exactly the shape of the failure this exercise
 exists to prevent**, so instead of grafting from losers, this document
@@ -40,7 +40,8 @@ events, confirmed on three independent surfaces (`getStateUpdate`,
 `traceBlockTransactions` naming the entrypoint **[M]**. The written slots have
 the shape of channel establishment (`recipient_channels`,
 `subchannel_tokens`, plus `*_exists` boolean singletons), which
-[verify-classifiability.md](../research/verify-classifiability.md) had already
+`verify-classifiability.md` (git history:
+`docs/research/verify-classifiability.md`, removed 2026-09-02) had already
 predicted has no events, and which nobody acted on.
 
 **This hole class is structural and permanent.** No amount of paging
@@ -104,13 +105,21 @@ The LIVE-8 single-page subdivision is also already shipped (`ingest.rs:198`,
 
 > `cutter.rs:269` — `"VERIFY-ROOT MISMATCH at block {block}: … Recover with a full-range rescan of recent epochs."`
 
-and `rescan_lower_bound` (`cutter.rs:1112`) then **parses that block number out
-of the message** and widens only to the epoch containing it, floored at
+and `rescan_lower_bound` (`cutter.rs:1112`) then **parsed that block number out
+of the message** and widened only to the epoch containing it, floored at
 `last_epoch.to + 1` (`main.rs:380`) **[V]**. The probe block is by construction
-near the frontier. So the recovery range is derived from *where we looked*,
-never from *where the divergence is*. The message's word "recent" is not
-advice; it is the bug, and it is load-bearing in code. That is why every round
-in `catchup3.log` rescanned 14.14M+ while the divergence sits at 11.72M.
+near the frontier. So the recovery range was derived from *where we looked*,
+never from *where the divergence is*. The message's word "recent" was not
+advice; it was the bug, and it was load-bearing in code. That is why every
+round in `catchup3.log` rescanned 14.14M+ while the divergence sits at 11.72M.
+
+Both are now gone: `rescan_lower_bound` has been deleted and the mismatch
+travels as data rather than as a sentence to be re-parsed. Recovery now lives
+in `recovery.rs` as one bounded closure loop per divergence — trie walk at the
+mismatch block, slot→block bisection, rescan of exactly those blocks, one retry
+of the cut — attempted at most once for a given divergence, while ingest keeps
+running and `/health` serves the mismatch block and a reason until a later
+MATCH clears the record.
 
 ### 2.4 Downgraded — cost claims that are not measurements
 
@@ -431,12 +440,15 @@ Ordered by what fixes a system that today cannot converge, then by speed.
 **8.1 `audit-root --repair` — new; replaces the recent-window rescan.**
 The closure loop of §4.2 as a first-class command, and as the recovery path
 `cut_epochs_with_recovery` calls. Concretely: delete the dependence on
-`rescan_lower_bound` parsing a block number out of an error message
+`rescan_lower_bound`, which parsed a block number out of an error message
 (`cutter.rs:1112`, `main.rs:380`), and change the MISMATCH text at
-`cutter.rs:269` to stop saying "recent epochs" — it is advice that is wrong in
+`cutter.rs:269` to stop saying "recent epochs" — it was advice that is wrong in
 every case observed so far. The mismatch message should name the probe block
 *and* say the divergence may be arbitrarily far below it. This is the only item
-that fixes a system which today cannot converge at all.
+that fixes a system which today cannot converge at all. Both have since
+shipped: `rescan_lower_bound` is deleted, the mismatch travels with the error
+as three numbers, and the closure loop `cut_epochs_with_recovery` calls now
+lives in `recovery.rs`, bounded to one attempt per divergence.
 
 **8.2 `audit-coverage` — keep, and stop letting it imply completeness.**
 It compares event counts to event counts and is blind to the entire hole class

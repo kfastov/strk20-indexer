@@ -86,7 +86,8 @@ Order: 1 -> 2 -> 3 -> 4, with 5/6/7 parallel.
 - **OHTTP** for the delegated/compat mode (hides who is asking). Not needed in
   keyless mode — every client fetches identical bytes. Trigger: delegated mode
   gets non-self-hosted users.
-- **Prefix-bucket endpoint, then PIR.** See `docs/research/q9-pir.md`. Trigger:
+- **Prefix-bucket endpoint, then PIR.** See `docs/research/q9-pir.md` (git
+  history, removed 2026-09-02). Trigger:
   snapshot exceeds ~50 MB, i.e. roughly 8x10^5 records.
 - **Write path in our binary.** Cut deliberately. Signing, key custody and a
   prover are exactly the surface this project exists to avoid. We are instead

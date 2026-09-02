@@ -7,9 +7,8 @@ deltas of the shipped build are in
 not around.
 
 Synthesis of the three council proposals
-([p1-verification](../research/council/consumer-path/p1-verification.md),
-[p2-simplicity](../research/council/consumer-path/p2-simplicity.md),
-[p3-dx](../research/council/consumer-path/p3-dx.md)) under three judge
+(p1-verification, p2-simplicity, p3-dx — `docs/research/council/consumer-path/`
+in git history, removed 2026-09-02) under three judge
 verdicts (auditor / maintainer / integrator). Backbone: **P2's data plane**
 (slots-only snapshots at every cut with an honest history floor; a poke-only
 notification stream; stateless-where-keyed serve; checkpoint-only per-key

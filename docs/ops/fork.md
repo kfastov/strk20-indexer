@@ -107,11 +107,20 @@ Reproduce the graph check with:
 cargo metadata --format-version 1 | jq -r '.packages[] | "\(.name)|\(.version)|\(.source // "local")"' | sort
 ```
 
-## The upstream PR — drafted, not submitted
+## The upstream PR
 
-**Status: not opened. It needs a human decision first, for two reasons.**
+**Status as of 2026-09-02: OPEN, not merged.**
+[starkware-libs/starknet-privacy#984](https://github.com/starkware-libs/starknet-privacy/pull/984),
+"discovery-core: make unused starknet-providers optional behind a default-on feature".
+The `[patch]` in the root `Cargo.toml` stays until it merges.
 
-*It needs your explicit go-ahead.* Opening a PR posts publicly on a third
+The rest of this section is the record of how it was drafted, kept because the
+reasoning about what the PR may and may not claim still binds anything written
+about the fork.
+
+**Before it was opened: not opened, needing a human decision first, for two reasons.**
+
+*It needed your explicit go-ahead.* Opening a PR posts publicly on a third
 party's tracker under your name. That is not something an automated track
 should do on its own say-so.
 
