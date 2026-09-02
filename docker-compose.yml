@@ -62,10 +62,18 @@ services:
     # carries the Sepolia pool, its genesis block 8_271_125 and all six class
     # hashes the pool has run, each verified on-chain
     # (docs/research/live/sepolia-abi-compat.md).
+    #
+    # These two default to the profile's own endpoints and must stay equal to
+    # SEPOLIA_RPC_PRIMARY/FALLBACK in crates/indexerd/src/config.rs. The order
+    # is load-bearing rather than cosmetic: on Sepolia, Cartridge is the only
+    # endpoint that answers `starknet_getStorageProof` at all, so demoting it
+    # costs the instance every anchor, every snapshot and verify-root, while
+    # ingest keeps looking healthy. publicnode is the transport fallback --
+    # blocks and events only, no proofs at any height (LIVE-6).
     environment:
       STRK20_NETWORK: sepolia
-      STRK20_RPC_URL: ${SEPOLIA_RPC_URL:-https://starknet-sepolia-rpc.publicnode.com}
-      STRK20_RPC_FALLBACK: ${SEPOLIA_RPC_FALLBACK:-https://rpc.starknet-testnet.lava.build}
+      STRK20_RPC_URL: ${SEPOLIA_RPC_URL:-https://api.cartridge.gg/x/starknet/sepolia}
+      STRK20_RPC_FALLBACK: ${SEPOLIA_RPC_FALLBACK:-https://starknet-sepolia-rpc.publicnode.com}
       RUST_LOG: ${RUST_LOG:-info}
     command: run --listen 0.0.0.0:8080 ${SEPOLIA_ALLOW_CLASS:-}
     ports:
