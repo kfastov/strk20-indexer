@@ -122,7 +122,7 @@ path.
 Mainnet mirror as of 2026-09-02: complete and chain-verified, verify-root MATCH at block 14,260,184, 528 epochs cut, 13 anchors, one snapshot (epoch 1424, block 14,249,999).
 
 <!-- HOSTED-STATUS -->
-Hosted instance as of 2026-09-02: <https://strk20.nullref.cc> serves Sepolia (feed, `/health` and `/v1/stats` only) and reports DEGRADED with `verify_root_failed` set, pending the repair the mainnet mirror has had.
+Hosted instance as of 2026-09-02: <https://strk20.nullref.cc> serves Sepolia and <https://strk20.nullref.cc/mainnet> serves mainnet, each exposing the same three paths (`/feed/*`, `/health`, `/v1/stats`) and each reporting OK with `verify_root_failed` false. For mainnet, pass `--feed https://strk20.nullref.cc/mainnet/feed` to `strk20-sync`.
 
 ## Honest limits
 
