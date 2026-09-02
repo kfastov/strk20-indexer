@@ -34,8 +34,19 @@ function mainnetFeed(): Plugin {
   };
 }
 
-export default defineConfig({
+/**
+ * The built site is deployed under a sub-path (`https://…/demo/`), so `base`
+ * defaults to `/demo/` for a build and every in-page URL that has to survive
+ * that move is derived from `import.meta.env.BASE_URL` rather than written as
+ * an absolute `/…` path. `DEMO_BASE` overrides it for a root deployment.
+ *
+ * `serve` keeps `/` so `npm run dev` is still http://localhost:5190/ and the
+ * `/mainnet-feed` middleware above (which is not under the app base) is
+ * reachable at the URL the LIVE/MAINNET lanes build for it.
+ */
+export default defineConfig(({ command }) => ({
+  base: process.env.DEMO_BASE ?? (command === 'serve' ? '/' : '/demo/'),
   plugins: [mainnetFeed()],
   server: { port: 5190, strictPort: false, open: false, headers: { 'Timing-Allow-Origin': '*' } },
   build: { target: 'es2022', outDir: 'dist' },
-});
+}));

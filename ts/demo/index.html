@@ -12,17 +12,29 @@
         can only ever run on the mock. It permits wasm compilation and NOTHING
         else — it is not `'unsafe-eval'`, so `eval` and `new Function` stay
         blocked.
-      - the loopback origins in connect-src. The REPLAY and MAINNET lanes are
-        served from this origin, but the LIVE lane points at a locally running
-        indexer on another port, which is a different origin to the browser.
-        Only loopback is named: point the LIVE lane at a public host and the
-        browser blocks it until this line names that host, which is the
-        behaviour we want to keep.
+      - the two feed origins in connect-src. The REPLAY lane is served from this
+        origin, but the LIVE lane points at an indexer that is a different
+        origin to the browser: the loopback ports for a local `strk20 run`, and
+        `https://strk20.nullref.cc` for the two public feeds this page defaults
+        to when it is not served from loopback (`/feed` is Sepolia,
+        `/mainnet/feed` is mainnet, both on that one origin).
+
+        The list stays an allowlist of named hosts: point the LIVE lane at any
+        other host and the browser blocks it until this line names that host,
+        which is the behaviour we want to keep. Nothing else widens — no
+        wildcard scheme, no `*`, and every other directive is untouched.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; connect-src 'self' https://strk20.nullref.cc http://127.0.0.1:* http://localhost:*; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
+    <!--
+      An empty data: icon, so the browser does not go asking the site root for
+      /favicon.ico. Hosted under /demo/ that request lands on an origin whose
+      allowlist is exactly the feed, and its 404 was the page's only console
+      error. `img-src 'self' data:` already covers this; nothing widens.
+    -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>

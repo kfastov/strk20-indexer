@@ -25,7 +25,7 @@ import {
   type NotesResult,
   type Subscription,
 } from 'strk20-discovery';
-import { ENGINE } from './engine-binding.ts';
+import { engineFor } from './engine-binding.ts';
 import { ALLOW_PASTE, generatedIdentity, identityA, identityB, type DemoIdentity } from './identities.ts';
 import {
   armOp,
@@ -53,7 +53,27 @@ interface LaneConfig {
   base(stage: 't0' | 't1' | 't2'): string;
   advanceable: boolean;
   writable: boolean;
+  /** False hides the lane from the selector: it has no feed on this origin. */
+  offered: boolean;
+  /** Which engine this lane's FEED requires. `?engine=` overrides it. */
+  engine: 'wasm' | 'mock';
 }
+
+/**
+ * True when this page is served from a developer's own machine. The two
+ * defaults below fork on it, and nothing else does: it decides which feed a
+ * lane points at, never what the page is allowed to do.
+ */
+const LOOPBACK = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(location.hostname);
+
+/**
+ * Where this build is mounted — `/` under `npm run dev`, `/demo/` for the
+ * hosted build (vite.config.ts). Vite rewrites the asset URLs it emits, but
+ * `public/replay/**` is fetched by the client at runtime from a URL this file
+ * builds, so that URL has to carry the base too or the REPLAY lane 404s the
+ * moment the site is not at the root.
+ */
+const APP_BASE = new URL(import.meta.env.BASE_URL, location.origin).href.replace(/\/+$/, '');
 
 const LANES: Record<Lane, LaneConfig> = {
   replay: {
@@ -61,9 +81,15 @@ const LANES: Record<Lane, LaneConfig> = {
     label: 'REPLAY',
     chip: 'synthetic',
     network: SEPOLIA,
-    base: (stage) => `${location.origin}/replay/${stage}`,
+    base: (stage) => `${APP_BASE}/replay/${stage}`,
     advanceable: true,
     writable: false,
+    offered: true,
+    // Not a preference: `scripts/gen-replay-feed.mjs` emits the mock's document
+    // shape, and the real codec rejects it (engine-binding.ts). The lane keeps
+    // the MOCK ENGINE badge and the `synthetic` chip so no number from it is
+    // ever read as a wasm measurement.
+    engine: 'mock',
   },
   'mainnet-local': {
     id: 'mainnet-local',
@@ -73,6 +99,12 @@ const LANES: Record<Lane, LaneConfig> = {
     base: () => `${location.origin}/mainnet-feed`,
     advanceable: false,
     writable: false,
+    engine: 'wasm',
+    // Served by the dev server's middleware out of this repository's own
+    // `data/mainnet/feed`. There is no such directory behind the hosted build,
+    // so offering the lane there would be offering a lane that only 404s; the
+    // LIVE lane covers mainnet on the public feed instead.
+    offered: LOOPBACK,
   },
   live: {
     id: 'live',
@@ -84,32 +116,58 @@ const LANES: Record<Lane, LaneConfig> = {
     base: () => liveUrl,
     advanceable: false,
     writable: true,
+    offered: true,
+    engine: 'wasm',
   },
 };
 
 /**
- * The live lane points at a running indexer. The default is this repository's
- * Sepolia mirror:
+ * The live lane points at a running indexer, and which one is the default
+ * depends on where this page came from.
+ *
+ * On loopback it is this repository's own Sepolia mirror, because a developer
+ * running the demo is running the server beside it:
  *
  *   ./target/release/strk20 run --db data/sepolia/idx/strk20.db \
  *       --feed-dir data/sepolia/idx/feed --listen 127.0.0.1:8901 --network sepolia
+ *
+ * Anywhere else there is no server on the reader's machine, so the default is
+ * the public mainnet feed — a real feed, over CORS, with the origin named in
+ * the CSP of index.html.
  *
  * `?feed=` and `?network=` override both, so a run is a shareable URL. Every
  * URL parameter this page reads names a PUBLIC feed; none of them can carry a
  * secret, and there is no URL position that accepts one.
  */
-let liveUrl = new URLSearchParams(location.search).get('feed')?.replace(/\/$/, '') ?? 'http://127.0.0.1:8901/feed';
-let liveNetwork: ChainProfile =
-  new URLSearchParams(location.search).get('network') === 'mainnet' ? MAINNET : SEPOLIA;
+const PUBLIC_MAINNET_FEED = 'https://strk20.nullref.cc/mainnet/feed';
+const params = new URLSearchParams(location.search);
+let liveUrl =
+  params.get('feed')?.replace(/\/$/, '') ?? (LOOPBACK ? 'http://127.0.0.1:8901/feed' : PUBLIC_MAINNET_FEED);
+/**
+ * `?network=` decides when it is given. Otherwise the chain is read off the
+ * feed URL exactly as the lane prompt reads it, so `?feed=` alone still lands
+ * on the right profile — and the module would catch a wrong guess anyway: it
+ * pins identity from the fetched `genesis.json` and throws CHAIN_MISMATCH.
+ */
+let liveNetwork: ChainProfile = params.has('network')
+  ? params.get('network') === 'mainnet'
+    ? MAINNET
+    : SEPOLIA
+  : /mainnet/i.test(liveUrl)
+    ? MAINNET
+    : SEPOLIA;
 
 // -------------------------------------------------------------- app state
 
-// The badge reads ENGINE.kind directly, so a mock number can never be
-// screenshotted without the MOCK ENGINE chip beside it.
-let state: DemoState = initialState('replay', LANES.replay.base('t0'), {
-  kind: ENGINE.kind,
-  provenance: ENGINE.provenance,
-});
+// The badge reads the LIVE engine object, so a mock number can never be
+// screenshotted without the MOCK ENGINE chip beside it. It is re-read on every
+// lane change, because the engine is a property of the lane (engine-binding.ts).
+let state: DemoState = initialState('replay', LANES.replay.base('t0'), engineBadge('replay'));
+
+function engineBadge(lane: Lane): DemoState['engine'] {
+  const e = engineFor(LANES[lane].engine);
+  return { kind: e.kind, provenance: e.provenance };
+}
 
 let client: KeylessClient | null = null;
 let identity: DemoIdentity | null = null;
@@ -132,10 +190,16 @@ function feedUrl(): string {
 // ------------------------------------------------------------ the client
 
 function makeClient(suffix = ''): KeylessClient {
+  const engine = engineFor(laneCfg().engine);
+  // The database is named for the chain and the pool, so two lanes on the same
+  // chain share it. The two engines do NOT share a frame format, so the mock
+  // gets its own database: a wasm start must never load a mirror the mock
+  // wrote, and vice versa.
+  const db = [engine.kind === 'mock' ? 'mock' : '', suffix].filter(Boolean).join(':');
   return new KeylessClient({
     feedUrl: feedUrl(),
     network: laneCfg().network,
-    engine: ENGINE,
+    engine,
     worker: false,
     live: true,
     pollIntervalMs: POLL_MS,
@@ -146,7 +210,7 @@ function makeClient(suffix = ''): KeylessClient {
     // exactly what that costs. Set it to 1 for strict wire order.
     prefetchConcurrency: 16,
     requestPersistentStorage: false,
-    ...(suffix ? { databaseSuffix: suffix } : {}),
+    ...(db ? { databaseSuffix: db } : {}),
     // The panel is the SESSION's record, appended to as requests happen — never
     // recomputed from whichever client happens to be current, and never
     // cleared. §9.1: never hide a request from the panel.
@@ -726,6 +790,7 @@ function render(): void {
 function renderHeader(): HTMLElement {
   const laneSel = el('select', { class: 'lane' });
   for (const l of Object.values(LANES)) {
+    if (!l.offered && l.id !== state.lane) continue;
     const o = el('option', { value: l.id }, l.label);
     if (l.id === state.lane) o.setAttribute('selected', 'selected');
     laneSel.append(o);
@@ -745,6 +810,7 @@ function renderHeader(): HTMLElement {
       liveNetwork = /mainnet/i.test(liveUrl) ? MAINNET : SEPOLIA;
     }
     state.lane = id;
+    state.engine = engineBadge(id);
     state.replayStage = 't0';
     state.feedUrl = feedUrl();
     state.cold = emptyCard('cold');
@@ -1045,6 +1111,7 @@ async function boot(): Promise<void> {
   const wanted = new URLSearchParams(location.search).get('lane');
   if (wanted && wanted in LANES) {
     state.lane = wanted as Lane;
+    state.engine = engineBadge(state.lane);
     state.feedUrl = feedUrl();
   }
   client = makeClient();
@@ -1060,6 +1127,7 @@ async function boot(): Promise<void> {
   if (flag) {
     const saved = JSON.parse(flag) as { lane: Lane; stage: 't0' | 't1' | 't2' };
     state.lane = saved.lane;
+    state.engine = engineBadge(state.lane);
     state.replayStage = saved.stage;
     state.feedUrl = feedUrl();
     state.stage1Done = true;

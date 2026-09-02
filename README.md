@@ -49,7 +49,7 @@ transport trait has no method that could carry an address or a key.
 **The browser path.** `crates/wasm` compiles the same engine to WebAssembly (892 KB raw,
 411 KB gzip). `ts/strk20-discovery` wraps it as an npm package with two clients,
 `KeylessClient` (feed only, key never leaves the page) and `DelegatedClient`. `ts/demo`
-has three lanes: REPLAY (a recorded Sepolia capture, regenerated at build time), MAINNET (a
+has three lanes: REPLAY (a synthetic feed for the mock engine, regenerated at build time), MAINNET (a
 local feed) and LIVE (any running indexer). It measures cold and warm start in-page and
 shows every URL it fetched. The npm package is not published yet.
 
