@@ -11,5 +11,6 @@ pub mod proxy;
 pub mod rpc_server;
 pub mod scanner;
 pub mod snapshot_fmt;
+pub mod storage_proof;
 pub mod sse;
 pub mod tcp_proxy;

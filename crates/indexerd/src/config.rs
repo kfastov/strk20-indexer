@@ -10,7 +10,8 @@ pub const MAINNET_GENESIS_BLOCK: u64 = 8_978_970;
 pub const MAINNET_EPOCH_SIZE: u64 = 10_000;
 pub const MAINNET_RPC_PRIMARY: &str = "https://rpc.starknet.lava.build";
 pub const MAINNET_RPC_FALLBACK: &str = "https://starknet.publicnode.com";
-/// Verified on-chain (docs/research/q1-version-pin.md).
+/// Verified on-chain (git history: docs/research/q1-version-pin.md, removed
+/// 2026-09-02).
 pub const MAINNET_CLASS_V1: &str =
     "0x30b8c540cf04d8ef0f4db2a9098d9cc0e35e83af1cb3325f5a4f40144b4b30b";
 pub const MAINNET_CLASS_V2: &str =

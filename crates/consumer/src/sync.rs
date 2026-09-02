@@ -115,7 +115,8 @@ fn keys(kind: &str, owner: &Felt) -> CursorKeys {
 /// cached totals dropped, while every progress position (last channel /
 /// subchannel / note index) is kept — the engine then re-probes only the
 /// boundary slots and discovers anything new (the "watch-set grows" property
-/// from the research, docs/research/verify-discovery-trace.md §3).
+/// from the research; git history: docs/research/verify-discovery-trace.md §3,
+/// removed 2026-09-02).
 pub fn reopen_cursor(cursor: &mut DiscoveryCursor) {
     cursor.channel_discovery_complete = false;
     cursor.total_n_channels = None;

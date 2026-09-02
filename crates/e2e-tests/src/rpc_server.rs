@@ -571,6 +571,25 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
             } else {
                 chain.block_hash(n)
             };
+            // The node set for the keys asked about, computed from the same
+            // slot set the root above folds from. A real endpoint returns the
+            // whole root→key path for every requested key, which is what lets
+            // the §4.2 closure loop descend into a subtree it cannot explain;
+            // answering `[[]]` (as this fixture used to) makes every walk stall
+            // and reports the endpoint as faulty.
+            let requested: Vec<Felt> = params
+                .get(3)
+                .and_then(Value::as_array)
+                .map(|cs| {
+                    cs.iter()
+                        .filter_map(|c| c.get("storage_keys").and_then(Value::as_array))
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter_map(|s| Felt::from_hex(s).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let storage_proof = crate::storage_proof::nodes_for(&set, &requested);
             ok(
                 id,
                 json!({
@@ -583,7 +602,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
                             "storage_root": felt_hex(&root),
                         }]
                     },
-                    "contracts_storage_proofs": [[]],
+                    "contracts_storage_proofs": [storage_proof],
                     "global_roots": {
                         "contracts_tree_root": "0x0",
                         "classes_tree_root": "0x0",

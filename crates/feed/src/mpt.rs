@@ -101,17 +101,7 @@ fn subtree(entries: &[(Vec<bool>, Felt)], depth: usize) -> Option<SubNode> {
 /// Zero-valued entries must be excluded by the caller (a zero write never
 /// occurs in the pool: all discovery slots are write-once non-zero).
 pub fn storage_root(entries: &[(Felt, Felt)]) -> Felt {
-    let mut with_bits: Vec<(Vec<bool>, Felt)> = entries
-        .iter()
-        .filter(|(_, v)| *v != Felt::ZERO)
-        .map(|(k, v)| (key_bits(k), *v))
-        .collect();
-    with_bits.sort_by(|a, b| a.0.cmp(&b.0));
-    with_bits.dedup_by(|a, b| a.0 == b.0);
-    match subtree(&with_bits, 0) {
-        None => Felt::ZERO,
-        Some(n) => resolve(&n),
-    }
+    subtree_hash_at(&bit_entries(entries), &[])
 }
 
 // ------------------------------------------------------------- proof walk
@@ -219,6 +209,80 @@ pub fn verify_storage_proof(
         }
     }
     Ok(ProofOutcome::Member(cur))
+}
+
+// ------------------------------------------------- structural enumeration
+//
+// `verify_storage_proof` above answers "is THIS key in the chain's trie",
+// which presupposes you can name the key. The hole class in sound-ingest.md §1
+// is precisely the one where you cannot: a block with pool storage writes and
+// zero pool events is invisible to `getEvents` and to `audit-coverage` alike,
+// so the mirror has never heard of the slots it wrote and has no key to ask
+// about.
+//
+// What the chain will still tell you is STRUCTURE. A storage proof returns
+// nodes keyed by their own hash, and every node names its children by hash, so
+// the child hash for a given bit-prefix is a commitment to the entire subtree
+// under that prefix. The same quantity is computable from the mirror. Where
+// the two agree the subtrees are identical and neither side needs to be
+// fetched; where they disagree the walk descends, and it terminates on leaves
+// the mirror does not have — the missing slots, named without ever having
+// guessed them.
+//
+// These three functions are that comparison unit. The walk itself is
+// `strk20_indexerd::trie_walk`.
+
+/// The 251-bit MSB-first key path of `f`.
+pub fn key_path(f: &Felt) -> Vec<bool> {
+    key_bits(f)
+}
+
+/// Rebuild a felt from a bit path (MSB-first). Padding a shorter prefix out to
+/// [`TREE_HEIGHT`] yields a key that routes into that prefix's subtree, which
+/// is how the walk asks the chain to reveal a subtree it cannot yet explain.
+pub fn path_to_key(bits: &[bool]) -> Felt {
+    bits_to_felt(bits)
+}
+
+/// Sort a slot set into the bit-keyed, zero-free form the walk compares
+/// against. [`storage_root`] is defined as `subtree_hash_at` over this at the
+/// empty prefix, so the mirror's root and the quantity the walk compares
+/// against chain child hashes cannot drift apart by construction.
+pub fn bit_entries(entries: &[(Felt, Felt)]) -> Vec<(Vec<bool>, Felt)> {
+    let mut with_bits: Vec<(Vec<bool>, Felt)> = entries
+        .iter()
+        .filter(|(_, v)| *v != Felt::ZERO)
+        .map(|(k, v)| (key_bits(k), *v))
+        .collect();
+    with_bits.sort_by(|a, b| a.0.cmp(&b.0));
+    with_bits.dedup_by(|a, b| a.0 == b.0);
+    with_bits
+}
+
+/// The entries of `sorted` whose key begins with `prefix` (a contiguous run,
+/// because `sorted` is in bit-lexicographic order).
+pub fn entries_with_prefix<'a>(
+    sorted: &'a [(Vec<bool>, Felt)],
+    prefix: &[bool],
+) -> &'a [(Vec<bool>, Felt)] {
+    let d = prefix.len();
+    let lo = sorted.partition_point(|(bits, _)| bits[..d] < *prefix);
+    let hi = sorted.partition_point(|(bits, _)| bits[..d] <= *prefix);
+    &sorted[lo..hi]
+}
+
+/// The hash a parent node stores for the child covering every key beginning
+/// with `prefix` — `0` when this set holds no such key (the empty subtree).
+///
+/// Directly comparable with the child hash a chain proof node names for the
+/// same prefix, which is the whole point: equality proves the two subtrees are
+/// identical, so the walk can prune without a single extra request.
+pub fn subtree_hash_at(sorted: &[(Vec<bool>, Felt)], prefix: &[bool]) -> Felt {
+    let slice = entries_with_prefix(sorted, prefix);
+    match subtree(slice, prefix.len()) {
+        None => Felt::ZERO,
+        Some(n) => resolve(&n),
+    }
 }
 
 #[cfg(test)]

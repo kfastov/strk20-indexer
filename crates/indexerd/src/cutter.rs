@@ -44,11 +44,57 @@ pub struct Anchor {
 /// Result of a completeness check that was allowed to not happen.
 /// `Unavailable` is a statement about the PROVIDER, never about the mirror:
 /// it must never latch `verify_root_failed` or degrade health (LIVE-4/6).
-/// A real divergence is an `Err` carrying `VERIFY-ROOT MISMATCH`.
+/// A real divergence is an `Err` carrying [`RootMismatch`].
 #[derive(Debug)]
 pub enum VerifyOutcome {
     Verified(Anchor),
     Unavailable(String),
+}
+
+/// A verify-root divergence as DATA rather than as a sentence.
+///
+/// The shipped build re-derived the mismatch block by parsing it back out of
+/// the error message (`rescan_lower_bound`, deleted with this type), which is
+/// how "recover with a full-range rescan of recent epochs" — advice that was
+/// wrong in every case ever observed — became load-bearing in code
+/// (sound-ingest.md §2.3 and §8.1). The three numbers the recovery path
+/// actually needs now travel with the error, and the sentence is only a
+/// sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootMismatch {
+    /// The block the PROBE asked about. Not where the divergence is.
+    pub block: u64,
+    pub local_root: Felt,
+    pub chain_root: Felt,
+}
+
+impl std::fmt::Display for RootMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "VERIFY-ROOT MISMATCH at block {}: local {} != chain {} — the mirror is \
+             missing writes and publication stays blocked until a verify-root passes. \
+             Block {} is where we LOOKED, not where the divergence is: pool slots are \
+             write-once, so the missing write may sit arbitrarily far below it \
+             (sound-ingest.md §2.3). Recovery localises it by walking the storage trie \
+             (`strk20 enumerate-slots --attribute`), never by rescanning a recent window.",
+            self.block,
+            felt_hex(&self.local_root),
+            felt_hex(&self.chain_root),
+            self.block
+        )
+    }
+}
+
+impl std::error::Error for RootMismatch {}
+
+/// The structured divergence `err` carries, if it carries one. Looks through
+/// the whole context chain, so a mismatch stays recognisable however many
+/// `.context()` layers it picked up on the way up.
+pub fn root_mismatch_of(err: &anyhow::Error) -> Option<RootMismatch> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<RootMismatch>())
+        .copied()
 }
 
 /// What a backward re-cut rewrote.
@@ -265,13 +311,11 @@ impl<'a> Cutter<'a> {
         let remote_root = crate::rpc::parse_felt(&leaf.storage_root)?;
         let class_hash = crate::rpc::parse_felt(&leaf.class_hash)?;
         if local_root != remote_root {
-            bail!(
-                "VERIFY-ROOT MISMATCH at block {block}: local {} != chain {} — \
-                 the mirror is missing writes; refusing to publish. \
-                 Recover with a full-range rescan of recent epochs.",
-                felt_hex(&local_root),
-                felt_hex(&remote_root)
-            );
+            return Err(anyhow::Error::new(RootMismatch {
+                block,
+                local_root,
+                chain_root: remote_root,
+            }));
         }
         Ok(Anchor {
             block,
@@ -374,7 +418,13 @@ impl<'a> Cutter<'a> {
         }
         match self.verify_root_at_target(frontier).await {
             Ok(VerifyOutcome::Verified(anchor)) => {
+                // The proof says the mirror holds every pool slot as of this
+                // block, so whatever divergence was being tracked is over —
+                // whether the closure loop repaired it or an operator did.
+                // Clearing both together is what keeps /health's reason from
+                // outliving the condition it describes.
                 self.db.meta_set("verify_root_failed", "")?;
+                crate::recovery::clear(self.db)?;
                 self.record_anchor(&anchor)?;
             }
             Ok(VerifyOutcome::Unavailable(why)) => {
@@ -386,9 +436,10 @@ impl<'a> Cutter<'a> {
                     "verify-root UNAVAILABLE: every endpoint spent its proof retry budget"
                 );
             }
-            Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") => {
-                // Surfaced in /health; the caller runs the §5.6 rescan slow
-                // path and retries.
+            Err(e) if root_mismatch_of(&e).is_some() => {
+                // Surfaced in /health; the caller decides whether this
+                // divergence has already had its one recovery attempt
+                // (`recovery::decide`) and, if not, runs the §4.2 closure loop.
                 self.db.meta_set("verify_root_failed", "1")?;
                 return Err(e);
             }
@@ -881,14 +932,17 @@ impl<'a> Cutter<'a> {
                 // recovery path is entered and /health goes DEGRADED. The latch
                 // is cleared only by a verify-root that passes.
                 self.db.meta_set("verify_root_failed", "1")?;
-                bail!(
-                    "VERIFY-ROOT MISMATCH at block {basis}: the snapshot's slot set folds \
-                     to {} but the chain's proof for that block says {} — refusing to \
-                     publish a snapshot for epoch {epoch}. \
-                     Recover with a full-range rescan of recent epochs.",
-                    felt_hex(&snap.header.storage_root),
-                    felt_hex(&chain_root)
+                tracing::error!(
+                    epoch,
+                    block = basis,
+                    "the slot set this snapshot would carry does not fold to the chain's \
+                     root at its basis block; refusing to publish the snapshot"
                 );
+                return Err(anyhow::Error::new(RootMismatch {
+                    block: basis,
+                    local_root: snap.header.storage_root,
+                    chain_root,
+                }));
             }
             anchor = Some(Anchor {
                 block: basis,
@@ -1094,42 +1148,6 @@ impl<'a> Cutter<'a> {
     }
 }
 
-/// Where the §5.6 recovery rescan must START to have any chance of repairing
-/// the divergence named in `mismatch`.
-///
-/// The obvious lower bound — one block above the newest cut epoch — is wrong
-/// for a mismatch reported AT a basis block, which is that epoch's end block:
-/// `last_epoch.to + 1` is one block ABOVE the divergence, so the rescan cannot
-/// touch it and reports "recovered 0 blocks" for a range that never contained
-/// the problem. Pool slots are write-once, so a root mismatch at B means a
-/// write at or below B was never learned; the rescan therefore starts at the
-/// beginning of the epoch containing B whenever B is below the default bound,
-/// and keeps the default (the un-cut tail) otherwise.
-///
-/// It is a bounded widening, not a proof of repair: the missing write can be
-/// older than B's own epoch, and a mismatch that survives the rescan needs a
-/// full resync. The caller says so when the retry fails.
-pub fn rescan_lower_bound(mismatch: &str, last_epoch_to: Option<u64>, cfg: &ChainConfig) -> u64 {
-    let default_from = last_epoch_to
-        .map(|to| to.saturating_add(1))
-        .unwrap_or(cfg.genesis_block);
-    let named = mismatch
-        .split("MISMATCH at block ")
-        .nth(1)
-        .and_then(|rest| {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<u64>().ok()
-        });
-    match named {
-        Some(b) if b < default_from => cfg
-            .epoch_range(cfg.epoch_of(b))
-            .0
-            .max(cfg.genesis_block)
-            .min(default_from),
-        _ => default_from,
-    }
-}
-
 /// The block hash a §12 B2-bound proof was verified against. Only reachable
 /// after `bound_proof` has already established that it is present and equal to
 /// the chain's.
@@ -1156,68 +1174,43 @@ fn footer_for(blocks: &[BlockLine], class: Felt) -> Footer {
 mod tests {
     use super::*;
 
-    fn test_cfg(genesis: u64, epoch_size: u64) -> ChainConfig {
-        let mut c = ChainConfig::mainnet();
-        c.genesis_block = genesis;
-        c.epoch_size = epoch_size;
-        c
+    fn mismatch() -> RootMismatch {
+        RootMismatch {
+            block: 14_448_522,
+            local_root: Felt::from(0xabcu64),
+            chain_root: Felt::from(0xdefu64),
+        }
     }
 
-    /// The §5.6 recovery rescan must be able to REACH the block the mismatch
-    /// names. A basis-block mismatch is reported AT the newest cut epoch's end
-    /// block, and the obvious lower bound (`last_epoch.to + 1`) is one block
-    /// above it: the rescan then covers a range that provably cannot contain
-    /// the divergence, recovers nothing, and the operator sees "rescan
-    /// complete" for a repair that never had a chance to happen.
+    /// The recovery path reads the divergence off the error by DOWNCAST, and
+    /// the error reaches it through `cut_ready_epochs`, which is free to add
+    /// context on the way. If a context layer hid the type, recovery would
+    /// silently degrade into "epoch cutting halted" and the closure loop would
+    /// never run — the same silence, differently caused.
     #[test]
-    fn the_rescan_range_covers_the_block_the_mismatch_names() {
-        let cfg = test_cfg(0, 16);
-        // Epoch 1 = [16, 31]; a snapshot's basis is 31, the same block
-        // `last_epoch.to` names.
-        let basis_mismatch = "VERIFY-ROOT MISMATCH at block 31: the snapshot's slot set folds \
-                              to 0x1 but the chain's proof for that block says 0x2";
-        let from = rescan_lower_bound(basis_mismatch, Some(31), &cfg);
-        assert!(
-            from <= 31,
-            "a rescan starting at {from} cannot re-ingest block 31, which is the block the \
-             mismatch is about"
+    fn a_mismatch_survives_the_context_layers_it_collects_on_the_way_up() {
+        let m = mismatch();
+        let err = anyhow::Error::new(m)
+            .context("getStorageProof for verify-root")
+            .context("cutting epoch 1172");
+        assert_eq!(root_mismatch_of(&err), Some(m));
+        assert_eq!(
+            root_mismatch_of(&anyhow::anyhow!("some other failure entirely")),
+            None
         );
-        assert_eq!(from, 16, "the widening is to the containing epoch, not to genesis");
-
-        // A pool write below the basis is the actual cause of such a mismatch
-        // (slots are write-once), so the range has to include the whole epoch.
-        assert!(from <= 20, "block 20 is in the same epoch and must be rescanned too");
     }
 
-    /// The head-side case is unchanged: the mismatch is reported ABOVE the
-    /// newest cut epoch, and rescanning the un-cut tail is both sufficient and
-    /// the cheapest thing that can work.
+    /// §8.1: the mismatch text used to end with "recover with a full-range
+    /// rescan of recent epochs", and `rescan_lower_bound` parsed the block
+    /// number back out of it to build exactly that window. Both are gone. What
+    /// the sentence must now say is that the probe block is where we LOOKED,
+    /// because a reader who believes otherwise reaches for the wrong tool.
     #[test]
-    fn a_mismatch_above_the_epoch_floor_still_rescans_only_the_tail() {
-        let cfg = test_cfg(0, 16);
-        let from = rescan_lower_bound("VERIFY-ROOT MISMATCH at block 40: ...", Some(31), &cfg);
-        assert_eq!(from, 32, "the tail starts one block above the newest cut epoch");
-    }
-
-    /// Degenerate inputs must not widen the range by accident: no epoch cut
-    /// yet means genesis, and an error that names no block leaves the default
-    /// bound alone.
-    #[test]
-    fn an_unparseable_or_absent_bound_falls_back_to_the_default() {
-        let cfg = test_cfg(1000, 16);
-        assert_eq!(
-            rescan_lower_bound("VERIFY-ROOT MISMATCH at block 1008: ...", None, &cfg),
-            1000,
-            "with no epoch cut the rescan starts at the pool's genesis block"
-        );
-        assert_eq!(
-            rescan_lower_bound("some other failure entirely", Some(1031), &cfg),
-            1032
-        );
-        // Never below the pool's genesis: there is nothing to ingest there.
-        assert_eq!(
-            rescan_lower_bound("VERIFY-ROOT MISMATCH at block 1000: ...", Some(1000), &cfg),
-            1000
-        );
+    fn the_mismatch_text_no_longer_advises_a_recent_window_rescan() {
+        let text = mismatch().to_string();
+        assert!(text.starts_with("VERIFY-ROOT MISMATCH at block 14448522:"), "{text}");
+        assert!(!text.to_lowercase().contains("recent epochs"), "{text}");
+        assert!(text.contains("arbitrarily far below"), "{text}");
+        assert!(text.contains("enumerate-slots --attribute"), "{text}");
     }
 }

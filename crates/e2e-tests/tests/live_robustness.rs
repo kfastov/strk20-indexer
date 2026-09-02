@@ -35,7 +35,7 @@
 //! R4 repair  a re-cut with nothing changed is refused, nothing written
 //! R5 repair  verify-root MATCHes where it previously MISMATCHed
 
-use e2e_tests::bins::{bin, ensure_built, run_capture};
+use e2e_tests::bins::{bin, ensure_built, pick_free_port, run_capture, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{ActiveBlock, FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR};
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::rpc_server::{FaultSpec, FixtureRpc};
@@ -2446,5 +2446,342 @@ async fn r5_after_repair_verify_root_matches_where_it_previously_mismatched() {
         "after the targeted repair, the mirror must reproduce the chain's root at block \
          {ABOVE} — the same statement the mainnet mirror has to be able to make, without \
          a 70-minute re-backfill\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+// ------------------------------------------------------------- T22 / T23
+//
+// The starvation defect, observed on the hosted Sepolia instance
+// (sound-ingest.md §2.3 and §8.1). Each `run` cycle ended in an epoch cut, a
+// cut began with verify-root, and a MISMATCH sent the cut into a §5.6 rescan
+// of a window derived from the PROBE block — which is at the frontier, while
+// the divergence can sit arbitrarily far below it. So the rescan could not
+// converge (measured: 4 rounds, 2.46 hours, 0 blocks repaired), and nothing
+// remembered that it had been tried: the next cycle's head move re-entered it.
+// What an operator saw was a frozen head, a silent log, and `/health` DEGRADED
+// with no statement of what to do about it.
+//
+// T22 the closure loop repairs an eventless divergence in ONE attempt, and the
+//     latch clears itself
+// T23 a divergence the loop cannot repair is attempted ONCE; ingest keeps
+//     advancing, `/health` stays DEGRADED and names the commands that repair it
+
+/// Where both legs put the silent write: above the epoch floor (31) and below
+/// the frontier, so no published epoch has to be re-cut, and the `run_cycle`
+/// tail sweep — which only ever looks ABOVE the frontier — cannot be what
+/// finds it.
+const SILENT_WRITE_BLOCK: u64 = 35;
+const SILENT_SLOT: u64 = 0x5100_0000;
+
+fn spawn_run(dir: &Path, url: &str, pool_hex: &str, port: u16, tag: &str) -> ChildGuard {
+    let mut cmd = Command::new(bin("strk20"));
+    let mut args = base_args(dir, url, url, pool_hex);
+    args.extend(["--listen".into(), format!("127.0.0.1:{port}")]);
+    args.extend(["--poll-ms".into(), "150".into()]);
+    cmd.arg("run").args(args);
+    spawn_with_logs(cmd, dir, tag)
+}
+
+async fn health(client: &reqwest::Client, port: u16) -> Option<Value> {
+    client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
+        .await
+        .ok()?
+        .json::<Value>()
+        .await
+        .ok()
+}
+
+fn log_of(guard: &ChildGuard) -> String {
+    let out = std::fs::read_to_string(&guard.stdout_path).unwrap_or_default();
+    let err = std::fs::read_to_string(&guard.stderr_path).unwrap_or_default();
+    format!("{out}\n{err}")
+}
+
+fn count_lines(log: &str, needle: &str) -> usize {
+    log.lines().filter(|l| l.contains(needle)).count()
+}
+
+/// Poll `/health` for `ticks` cycles, moving the chain head as it goes, and
+/// stop early once `done` holds over (health, log).
+///
+/// Moving the head is not decoration: `verify_and_capture` skips the proof
+/// when the frontier has not moved since the last completed probe, so a still
+/// chain never re-checks. It is also the exact condition under which the
+/// shipped build re-entered its rescan — one head move per cycle was all it
+/// took to lose the next half hour.
+async fn poll_health(
+    client: &reqwest::Client,
+    port: u16,
+    rpc: &FixtureRpc,
+    indexer: &ChildGuard,
+    ticks: usize,
+    mut done: impl FnMut(&Value, &str) -> bool,
+) -> (Option<Value>, Vec<u64>) {
+    let mut heads: Vec<u64> = Vec::new();
+    let mut last = None;
+    for i in 0..ticks {
+        if i % 3 == 0 {
+            rpc.chain.write().unwrap().head += 1;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let Some(v) = health(client, port).await else {
+            continue;
+        };
+        if let Some(h) = v["head"]["number"].as_u64() {
+            if heads.last() != Some(&h) {
+                heads.push(h);
+            }
+        }
+        let stop = done(&v, &log_of(indexer));
+        last = Some(v);
+        if stop {
+            break;
+        }
+    }
+    (last, heads)
+}
+
+/// A pool write on a block with NO pool event, injected BELOW the frontier of
+/// an already-verified mirror — the eventless class of sound-ingest.md §1, in
+/// the one position where every heuristic index is blind to it and the tail
+/// state-diff sweep has already gone past.
+///
+/// One closure-loop attempt has to be enough: the storage-trie walk names the
+/// slot the chain holds and the mirror does not, the bisection attributes it
+/// to block 35, the targeted rescan re-ingests exactly that block, and the
+/// retried cut verifies. The MATCH then clears `verify_root_failed` AND the
+/// recorded divergence, with no operator in the loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t22_one_closure_loop_attempt_repairs_an_eventless_divergence() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let rpc = FixtureRpc::new(FixtureChain::build(&fixture), CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "backfill failed\nstdout:\n{so}\nstderr:\n{se}");
+    assert_ne!(
+        meta(dir.path(), "verify_root_failed").as_deref(),
+        Some("1"),
+        "fixture sanity: the mirror starts verified, so the mismatch below is the \
+         injected write and nothing else"
+    );
+
+    rpc.chain.write().unwrap().active.insert(
+        SILENT_WRITE_BLOCK,
+        ActiveBlock {
+            diffs: vec![(Felt::from(SILENT_SLOT), Felt::from(0x99u64))],
+            events: vec![],
+            deployed_class: None,
+            replaced_class: None,
+        },
+    );
+
+    let port = pick_free_port();
+    let indexer = spawn_run(dir.path(), &url, &pool_hex, port, "t22-indexer");
+    let client = reqwest::Client::new();
+    // Both halves must be observed: the loop RAN, and health came back. Waiting
+    // on health alone would pass on the first poll, before the moved frontier
+    // has given verify-root anything to disagree about.
+    let (last, heads) = poll_health(&client, port, &rpc, &indexer, 150, |v, log| {
+        count_lines(log, "closure loop finished") >= 1 && v["status"] == "OK"
+    })
+    .await;
+
+    let log = log_of(&indexer);
+    let last = last.unwrap_or_else(|| panic!("/health never answered\n{log}"));
+    assert_eq!(
+        count_lines(&log, "entering the §4.2 closure loop"),
+        1,
+        "recovery runs at most once per divergence — and once was enough here.\n\
+         heads seen: {heads:?}\n{log}"
+    );
+    assert_eq!(
+        last["status"], "OK",
+        "the divergence must heal with no operator action: {last}\n{log}"
+    );
+    assert_eq!(last["mismatch_block"], Value::Null, "{last}");
+    assert_eq!(last["reason"], Value::Null, "{last}");
+    assert_eq!(
+        count_lines(&log, "rescanning range"),
+        0,
+        "the blind window rescan is gone; localisation is the trie walk's job\n{log}"
+    );
+
+    drop(indexer);
+    assert_eq!(
+        Db::open(&dir.path().join("strk20.db"))
+            .unwrap()
+            .blocks_in_range(SILENT_WRITE_BLOCK, SILENT_WRITE_BLOCK)
+            .unwrap()
+            .len(),
+        1,
+        "the walk attributed the missing slot to block {SILENT_WRITE_BLOCK} and the \
+         targeted rescan re-ingested exactly it\n{log}"
+    );
+    for key in ["recovery_divergence", "recovery_reason"] {
+        assert!(
+            meta(dir.path(), key).unwrap_or_default().is_empty(),
+            "a verify-root MATCH must retire the recorded divergence ({key} still set)\n{log}"
+        );
+    }
+}
+
+/// The same eventless class, made UNREPAIRABLE: the slot is in the chain's
+/// storage root but no state update ever names it (`FaultSpec::hidden_slot`),
+/// so the walk finds it and the bisection cannot attribute it to any block.
+/// This is the shape that used to cost tens of minutes of starved ingest per
+/// poll cycle, indefinitely.
+///
+/// Three properties, in the order they matter: ingest keeps advancing,
+/// recovery is attempted exactly once, and `/health` says what to run rather
+/// than only that something is wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t23_an_unrepairable_divergence_is_attempted_once_while_ingest_keeps_running() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let rpc = FixtureRpc::with_faults(
+        FixtureChain::build(&fixture),
+        CHAIN_ID,
+        FaultSpec {
+            hidden_slot: Some((Felt::from(SILENT_SLOT), Felt::from(0x99u64))),
+            ..Default::default()
+        },
+    );
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let port = pick_free_port();
+    let indexer = spawn_run(dir.path(), &url, &pool_hex, port, "t23-indexer");
+    let client = reqwest::Client::new();
+    // Well past the three cycles the property is stated over. The predicate
+    // never stops early: what is being measured is what happens when the loop
+    // keeps going, which is where the old build lost its afternoons.
+    let (last, heads) = poll_health(&client, port, &rpc, &indexer, 60, |_, _| false).await;
+
+    let log = log_of(&indexer);
+    let last = last.unwrap_or_else(|| panic!("/health never answered\n{log}"));
+    assert_eq!(
+        last["status"], "DEGRADED",
+        "an unrepaired divergence stays DEGRADED: {last}\n{log}"
+    );
+    assert_eq!(last["verify_root_failed"], Value::Bool(true), "{last}");
+    assert!(
+        last["mismatch_block"].as_u64().is_some(),
+        "/health must name the block the mismatch was seen at: {last}"
+    );
+    let reason = last["reason"].as_str().unwrap_or_default();
+    for fragment in [
+        "mismatch at",
+        "recovery attempted once",
+        "enumerate-slots --attribute",
+        "rescan --blocks",
+        "recut-epochs",
+    ] {
+        assert!(
+            reason.contains(fragment),
+            "/health reason must name {fragment:?}, got {reason:?}"
+        );
+    }
+    assert!(
+        heads.len() >= 4,
+        "ingest must keep running while DEGRADED: the head only moved through {heads:?} \
+         over 60 poll cycles, which is the starved loop this leg exists to catch\n{log}"
+    );
+    assert!(
+        log.contains("storage-trie walk finished") && log.contains("missing_slots=1"),
+        "non-vacuity: the one attempt really did run the walk and really did enumerate \
+         the hidden slot — the leg would otherwise pass on a recovery that never \
+         started\n{log}"
+    );
+    assert_eq!(
+        count_lines(&log, "entering the §4.2 closure loop"),
+        1,
+        "recovery must be attempted ONCE per divergence, not once per cycle\n{log}"
+    );
+    assert_eq!(
+        count_lines(&log, "skipping recovery and continuing to ingest"),
+        1,
+        "and the skip is announced once, not on every one of the dozens of cycles \
+         this test ran — a line repeated per cycle is the same silence\n{log}"
+    );
+    // The reason a fingerprint comparison cannot be the decision, demonstrated
+    // rather than argued: the probe block is min(frontier, head) and both roots
+    // move with it, so by the very next cycle the "same" divergence has three
+    // different numbers. A guard keyed on equality would have called that a new
+    // divergence and re-entered recovery — which is the defect.
+    assert!(
+        log.contains("identical=false"),
+        "the divergence's identity moved between cycles and the guard held anyway\n{log}"
+    );
+
+    drop(indexer);
+    assert_eq!(
+        meta(dir.path(), "recovery_attempts").as_deref(),
+        Some("1"),
+        "the persisted attempt count is what makes the guard survive a restart"
+    );
+}
+
+// ---------------------------------------------------------------- T24
+
+/// A verify-root MISMATCH during a reorg is the mirror holding the abandoned
+/// branch, not a hole — and telling the two apart is what keeps the one
+/// recovery attempt for the case that needs it.
+///
+/// This is not hypothetical: with the closure loop taking seconds, a fork
+/// landing between the probe and the walk had the walk enumerate against the
+/// NEW branch and re-ingest a block from it into a mirror that had not rolled
+/// back. The canonicity walkback then stopped at a block that only looked
+/// canonical because recovery had just fetched it, the rewind was too shallow,
+/// and blocks on the new branch below it were never scanned (acceptance leg g,
+/// intermittently).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t24_a_mismatch_while_the_tail_is_forking_is_a_reorg_not_a_hole() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let rpc = FixtureRpc::new(FixtureChain::build(&fixture), CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "backfill failed\nstdout:\n{so}\nstderr:\n{se}");
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let client = strk20_indexerd::rpc::RpcClient::new(url.clone(), None);
+    assert!(
+        !strk20_indexerd::recovery::reorg_in_flight(&db, &client)
+            .await
+            .unwrap(),
+        "a settled chain must not read as a reorg, or every real divergence would be \
+         waved through as one"
+    );
+
+    // The stored head is gone from the chain entirely.
+    rpc.chain.write().unwrap().fork_tail(45);
+    assert!(
+        strk20_indexerd::recovery::reorg_in_flight(&db, &client)
+            .await
+            .unwrap(),
+        "the mirror's head no longer exists on this chain"
+    );
+
+    // ...and the case that matters more, because it answers rather than
+    // erroring: the height is still there, carrying a different block.
+    rpc.chain.write().unwrap().head = 46;
+    assert!(
+        strk20_indexerd::recovery::reorg_in_flight(&db, &client)
+            .await
+            .unwrap(),
+        "the height is populated again, but by a different block than the mirror holds"
     );
 }

@@ -410,6 +410,12 @@ async fn health(State(s): State<AppState>) -> Response {
             .meta_get("verify_root_failed")?
             .map(|v| v == "1")
             .unwrap_or(false);
+        // DEGRADED on its own tells an operator that something is wrong and
+        // nothing about what to do, which is how a frozen head with a silent
+        // log stayed unexplained for tens of minutes at a time. These two say
+        // WHERE the divergence was seen and what the next action is.
+        let mismatch_block = crate::recovery::mismatch_block(db)?;
+        let reason = crate::recovery::reason(db)?;
         let latest_epoch = db.last_epoch()?.map(|(i, _, _)| i);
         let ts = head_number
             .and_then(|n| db.block(n).ok().flatten())
@@ -430,6 +436,8 @@ async fn health(State(s): State<AppState>) -> Response {
             "class_hash": class,
             "decode_state": decode_state,
             "verify_root_failed": verify_root_failed,
+            "mismatch_block": mismatch_block,
+            "reason": reason,
         }))
     });
     match result {

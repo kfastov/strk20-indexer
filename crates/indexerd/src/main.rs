@@ -6,9 +6,10 @@ use starknet_types_core::felt::Felt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use strk20_indexerd::config::{self, ChainConfig};
-use strk20_indexerd::cutter::{Cutter, VerifyOutcome};
+use strk20_indexerd::cutter::{self, Cutter, VerifyOutcome};
 use strk20_indexerd::db::Db;
 use strk20_indexerd::ingest::{init_checks, Ingestor};
+use strk20_indexerd::recovery;
 use strk20_indexerd::rpc::RpcClient;
 
 #[derive(Parser)]
@@ -203,6 +204,35 @@ enum Command {
         /// Source feed base URL (e.g. https://host/feed)
         url: String,
     },
+    /// Enumerate the chain's pool storage trie by structure and name every
+    /// slot this mirror is missing — the hole class nothing else can see.
+    ///
+    /// `audit-coverage` compares event counts, so a block with pool storage
+    /// writes and ZERO pool events is invisible to it by construction, and
+    /// `getEvents` cannot name that block either. `verify-root` proves such a
+    /// hole exists but not where it is. This walks the chain's trie from a
+    /// bound storage proof: nodes are keyed by their own hash and name their
+    /// children by hash, so a child hash commits to a whole subtree and can be
+    /// compared against the same quantity computed from the mirror. Equal
+    /// prunes, unequal descends, and a full-depth disagreement is a missing
+    /// slot. Cost scales with the divergence, not with the block range.
+    ///
+    /// Read-only. It names the blocks; `strk20 rescan --blocks` repairs them.
+    EnumerateSlots {
+        #[command(flatten)]
+        common: CommonOpts,
+        /// Block to walk at; must be provable. Default: the ingest frontier.
+        #[arg(long)]
+        block: Option<u64>,
+        /// Also bisect each missing slot to the block that wrote it, so the
+        /// output is a `rescan --blocks` list. Costs ~⌈log₂ range⌉
+        /// `getStorageAt` calls per CLUSTER, not per slot.
+        #[arg(long)]
+        attribute: bool,
+        /// Write the full diff as JSON to this path
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -251,6 +281,12 @@ async fn main() -> Result<()> {
             from_epoch,
         } => recut_epochs(common, from_block, from_epoch),
         Command::MirrorPull { common, url } => mirror_pull(common, url).await,
+        Command::EnumerateSlots {
+            common,
+            block,
+            attribute,
+            json,
+        } => enumerate_slots(common, block, attribute, json).await,
     }
 }
 
@@ -358,10 +394,22 @@ async fn run(
     }
 }
 
-/// Cut ready epochs; on a verify-root mismatch run the §5.6 slow-path rescan
-/// (per-block state updates over the unverified range — catches pool writes
-/// that rode blocks with no pool event) and retry once. A second failure
-/// leaves verify_root_failed=1 in meta, which /health surfaces as DEGRADED.
+/// Cut ready epochs. A verify-root mismatch gets ONE bounded recovery attempt
+/// — the sound-ingest.md §4.2 closure loop — and then the divergence is on
+/// record; every later cycle that meets it again returns immediately so ingest
+/// keeps running, with `verify_root_failed` latched and `/health` DEGRADED.
+///
+/// The two properties this function exists to hold, in order of importance:
+///
+/// 1. **Ingest is never blocked for longer than one attempt.** The old path
+///    re-entered a non-convergent window rescan on every cycle whose head had
+///    moved — tens of minutes each, forever. Recovery now happens at most once
+///    per divergence and is additionally capped by `ATTEMPT_DEADLINE`.
+/// 2. **The attempt localises the divergence instead of guessing at it.** The
+///    window rescan was derived from the PROBE block and provably could not
+///    reach a divergence below it (§2.3). The walk asks the chain's trie which
+///    slots are missing and bisects them to their writing blocks, so its cost
+///    tracks the size of the hole rather than the distance to the frontier.
 async fn cut_epochs_with_recovery(
     db: &mut Db,
     rpc: &RpcClient,
@@ -377,61 +425,179 @@ async fn cut_epochs_with_recovery(
             cfg,
             feed_dir: common.feed_dir.clone(),
         };
-        match cutter.cut_ready_epochs(l1_accepted, frontier).await {
+        let err = match cutter.cut_ready_epochs(l1_accepted, frontier).await {
             Ok(n) => return n,
-            Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") && attempt == 0 => {
-                // The lower bound must COVER the block the mismatch names: a
-                // basis-block mismatch is reported at the newest cut epoch's
-                // end block, which `last_epoch.to + 1` sits above.
-                let from = strk20_indexerd::cutter::rescan_lower_bound(
-                    &format!("{e:#}"),
-                    db.last_epoch().ok().flatten().map(|(_, _, to)| to),
-                    cfg,
-                );
-                // Up to the FRONTIER, not to l1_accepted: verify-root now
-                // checks at min(frontier, rpc_head) (LIVE-4), and l1_accepted
-                // lags head by ~5000 blocks on mainnet, so a rescan capped at
-                // l1_accepted would not contain the block that mismatched —
-                // every retry would reproduce it and epoch cutting would stop
-                // forever with /health latched DEGRADED.
-                let to = frontier;
-                tracing::error!(error = %e, from, to, "verify-root mismatch: rescanning range");
-                let mut ingestor = Ingestor {
-                    db,
-                    rpc,
-                    cfg,
-                    chunk_size: common.chunk_size,
-                    progress_secs: common.progress_secs,
-                };
-                match ingestor.rescan_range(from, to).await {
-                    Ok(n) => tracing::warn!(recovered_blocks = n, "rescan complete; retrying cut"),
-                    Err(re) => {
-                        tracing::error!(error = %re, "rescan failed");
-                        return 0;
-                    }
+            Err(e) => e,
+        };
+        let Some(mismatch) = cutter::root_mismatch_of(&err) else {
+            tracing::error!(error = %err, "epoch cutting halted");
+            // A retry that dies for an unrelated reason must not leave
+            // `/health` serving "recovery in progress" forever.
+            if attempt > 0 {
+                if let Some(d) = recovery::recorded(db)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(recovery::Divergence::parse)
+                {
+                    log_and_record(
+                        db,
+                        &d,
+                        "recovery attempted once; the retried cut then failed for an \
+                         unrelated reason",
+                        &err,
+                    );
                 }
             }
-            Err(e) if e.to_string().contains("VERIFY-ROOT MISMATCH") => {
-                // The rescan widened to the epoch containing the divergence and
-                // the mirror still disagrees, so the missing write is older
-                // than that. Nothing short of a full resync will find it, and
-                // saying so is the difference between an operator who acts and
-                // one who watches a line repeat.
-                tracing::error!(
-                    error = %e,
-                    "epoch cutting halted: the §5.6 rescan did not repair this divergence, so \
-                     the missing write is below the rescanned range — re-run with \
-                     --full-resync. Publication stays blocked until verify-root passes."
+            return 0;
+        };
+        let divergence = recovery::Divergence::from(mismatch);
+        if attempt > 0 {
+            // The one attempt has been spent inside this very call: the walk
+            // and the re-ingest ran and the chain still disagrees.
+            let detail = "recovery attempted once (storage-trie walk + targeted rescan) and \
+                          the mirror still disagrees";
+            log_and_record(db, &divergence, detail, &err);
+            return 0;
+        }
+        // A mismatch during a reorg is the mirror holding the abandoned
+        // branch, not a hole. The next cycle rolls it back; recovery would
+        // burn its one attempt on a branch that is about to be discarded.
+        match recovery::reorg_in_flight(db, rpc).await {
+            Ok(true) => {
+                tracing::warn!(
+                    block = divergence.block,
+                    "verify-root mismatched while a reorg is in flight; the canonicity \
+                     rollback owns this, so no recovery attempt is spent on it"
                 );
                 return 0;
             }
+            Ok(false) => {}
             Err(e) => {
-                tracing::error!(error = %e, "epoch cutting halted");
+                // Not knowing is not the same as knowing there is no reorg.
+                tracing::error!(error = %e, "cannot tell a reorg from a hole; not attempting");
+                return 0;
+            }
+        }
+        match recovery::decide(db, &divergence) {
+            Ok(recovery::Decision::Skip { recorded, same }) => {
+                // The whole fix, in one branch: no work, no starvation, and
+                // one line only when a line is due.
+                if recovery::should_log_repeat(db, recovery::now_secs(), recovery::REPEAT_LOG_SECS)
+                    .unwrap_or(true)
+                {
+                    tracing::warn!(
+                        block = divergence.block,
+                        recorded = %recorded,
+                        identical = same,
+                        reason = %recovery::reason(db).ok().flatten().unwrap_or_default(),
+                        "verify-root still MISMATCHes and this divergence has already had its \
+                         one recovery attempt; skipping recovery and continuing to ingest. \
+                         Publication stays blocked until verify-root passes. Repair by hand: \
+                         strk20 enumerate-slots --attribute, strk20 rescan --blocks <list>, \
+                         strk20 recut-epochs --from-block <lowest>."
+                    );
+                }
+                return 0;
+            }
+            Ok(recovery::Decision::Attempt) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "cannot read the recovery record; not attempting");
+                return 0;
+            }
+        }
+
+        tracing::error!(
+            error = %err,
+            block = divergence.block,
+            "verify-root mismatch: entering the §4.2 closure loop, once"
+        );
+        if let Err(e) = recovery::begin_attempt(db, &divergence) {
+            tracing::error!(error = %e, "cannot record the divergence; not attempting recovery");
+            return 0;
+        }
+        let closure = recovery::run_closure(
+            db,
+            rpc,
+            cfg,
+            common.feed_dir.clone(),
+            common.chunk_size,
+            common.progress_secs,
+            &divergence,
+        );
+        match tokio::time::timeout(recovery::ATTEMPT_DEADLINE, closure).await {
+            Ok(Ok(report)) => {
+                tracing::warn!(
+                    missing_slots = report.missing_slots,
+                    divergent_slots = report.divergent_slots,
+                    extra_slots = report.extra_slots,
+                    proof_calls = report.proof_calls,
+                    blocks = ?report.blocks,
+                    reingested = report.reingested,
+                    elapsed_secs = report.elapsed_secs,
+                    "closure loop finished; retrying the cut once"
+                );
+                if let Some(lowest) = report.blocks.first() {
+                    if let Ok(Some((_, _, epoch_to))) = db.last_epoch() {
+                        if *lowest <= epoch_to {
+                            tracing::warn!(
+                                block = lowest,
+                                epoch = cfg.epoch_of(*lowest),
+                                "the repair landed BELOW the epoch floor, so already-published \
+                                 epochs still carry their pre-repair bytes: run \
+                                 `strk20 recut-epochs --from-block {lowest}`, then \
+                                 `strk20 epoch-verify`. Consumers see the content hashes change."
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) if strk20_indexerd::rpc::is_proof_unavailable(&e) => {
+                // A capability gap, not a mirror defect: say so, keep the
+                // latch (verify-root DID mismatch), keep ingesting.
+                log_and_record(
+                    db,
+                    &divergence,
+                    "recovery attempted once and no endpoint served a storage proof for the \
+                     walk (UNAVAILABLE)",
+                    &e,
+                );
+                return 0;
+            }
+            Ok(Err(e)) => {
+                log_and_record(db, &divergence, "recovery attempted once and failed", &e);
+                return 0;
+            }
+            Err(_) => {
+                log_and_record(
+                    db,
+                    &divergence,
+                    &format!(
+                        "recovery attempted once and hit its {}s deadline",
+                        recovery::ATTEMPT_DEADLINE.as_secs()
+                    ),
+                    &anyhow::anyhow!("attempt deadline"),
+                );
                 return 0;
             }
         }
     }
     0
+}
+
+/// One error line and one persisted `reason`, so the operator reads the same
+/// sentence in the log and on `/health`.
+fn log_and_record(db: &Db, d: &recovery::Divergence, detail: &str, err: &anyhow::Error) {
+    if let Err(e) = recovery::record_outcome(db, d, detail) {
+        tracing::error!(error = %e, "cannot record the recovery outcome");
+    }
+    tracing::error!(
+        error = %format!("{err:#}"),
+        block = d.block,
+        reason = %recovery::reason(db).ok().flatten().unwrap_or_default(),
+        "epoch cutting halted and publication stays blocked, but INGEST CONTINUES. \
+         This divergence will not be retried automatically."
+    );
 }
 
 async fn backfill(common: CommonOpts) -> Result<()> {
@@ -561,6 +727,106 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
              retry budget refusing ({why}). This is a statement about the providers and says \
              nothing about mirror correctness."
         ),
+    }
+    Ok(())
+}
+
+/// Structural enumeration of the chain's storage trie (sound-ingest.md §1, the
+/// eventless-write hole class). Read-only: it names slots and, with
+/// `--attribute`, the blocks that wrote them. Repair is `rescan --blocks`.
+async fn enumerate_slots(
+    common: CommonOpts,
+    block: Option<u64>,
+    attribute: bool,
+    json: Option<PathBuf>,
+) -> Result<()> {
+    let cfg = common.chain_config();
+    let rpc = common.rpc();
+    let db = Db::open(&common.db)?;
+    let cutter = Cutter {
+        db: &db,
+        rpc: &rpc,
+        cfg: &cfg,
+        feed_dir: common.feed_dir.clone(),
+    };
+    let target = match block {
+        Some(b) => b,
+        None => db
+            .ingest_cursor()?
+            .ok_or_else(|| anyhow::anyhow!("no ingest cursor in db; run ingest first"))?,
+    };
+
+    let diff = strk20_indexerd::trie_walk::enumerate_missing_slots(&cutter, target).await?;
+
+    println!("enumerate-slots at block {}", diff.block);
+    println!("  chain storage_root {}", strk20_feed::felt_hex(&diff.chain_root));
+    println!("  local storage_root {}", strk20_feed::felt_hex(&diff.local_root));
+    println!("  mirror slots       {}", diff.local_leaves);
+    println!(
+        "  proof calls        {} over {} round(s)",
+        diff.proof_calls, diff.rounds
+    );
+    println!("  missing slots      {}", diff.missing.len());
+    println!("  divergent values   {}", diff.divergent.len());
+    println!("  slots not on chain {}", diff.extra.len());
+
+    let mut blocks: Vec<u64> = Vec::new();
+    if attribute && !diff.missing.is_empty() {
+        let slots: Vec<Felt> = diff.missing.iter().map(|(k, _)| *k).collect();
+        blocks = strk20_indexerd::trie_walk::attribute_to_blocks(
+            &cutter,
+            &slots,
+            cfg.genesis_block,
+            diff.block,
+        )
+        .await?;
+        println!(
+            "  blocks to rescan   {}: {}",
+            blocks.len(),
+            blocks
+                .iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
+    if let Some(path) = json {
+        let report = serde_json::json!({
+            "block": diff.block,
+            "chain_root": strk20_feed::felt_hex(&diff.chain_root),
+            "local_root": strk20_feed::felt_hex(&diff.local_root),
+            "mirror_slots": diff.local_leaves,
+            "proof_calls": diff.proof_calls,
+            "rounds": diff.rounds,
+            "missing": diff.missing.iter().map(|(k, v)| serde_json::json!({
+                "slot": strk20_feed::felt_hex(k),
+                "chain_value": strk20_feed::felt_hex(v),
+            })).collect::<Vec<_>>(),
+            "divergent": diff.divergent.iter().map(|(k, ours, theirs)| serde_json::json!({
+                "slot": strk20_feed::felt_hex(k),
+                "mirror_value": strk20_feed::felt_hex(ours),
+                "chain_value": strk20_feed::felt_hex(theirs),
+            })).collect::<Vec<_>>(),
+            "extra": diff.extra.iter().map(strk20_feed::felt_hex).collect::<Vec<_>>(),
+            "blocks": blocks,
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&report)?)
+            .with_context(|| format!("write {}", path.display()))?;
+        println!("  report written to  {}", path.display());
+    }
+
+    if diff.is_clean() {
+        println!(
+            "enumerate-slots CLEAN: the chain's trie at block {} holds no pool slot this \
+             mirror is missing.",
+            diff.block
+        );
+    } else {
+        println!(
+            "enumerate-slots INCOMPLETE: repair with `strk20 rescan --blocks <list>`, then \
+             re-run this command until it reports CLEAN."
+        );
     }
     Ok(())
 }

@@ -10,6 +10,8 @@ pub mod cutter;
 pub mod db;
 pub mod ingest;
 pub mod live;
+pub mod recovery;
 pub mod rpc;
 pub mod server;
 pub mod stats;
+pub mod trie_walk;
