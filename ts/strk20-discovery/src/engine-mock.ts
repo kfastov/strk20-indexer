@@ -44,6 +44,7 @@
  */
 
 import { Strk20Error } from './errors.ts';
+import { feltEq } from './felt.ts';
 import type {
   DiscoverOut,
   DiscoverStepOut,
@@ -744,7 +745,12 @@ export class MockEngine implements Engine {
     // §3.10 item 3: genesis is checked against the profile the CALLER expects,
     // not only against stored meta. This is what closes trust-on-first-use — an
     // empty mirror must not adopt whatever chain the feed declares.
-    if (g.chain_id !== this.#profile.chainId || g.pool !== this.#profile.pool) {
+    // `feltEq`, not `!==`. The profile spells Sepolia's pool padded to 64
+    // nibbles and the published feed spells it unpadded; they are the same
+    // felt, and comparing the strings rejected the real feed with the loudest
+    // error this package has. `engine-wasm.ts` already compared felts, so the
+    // two engines disagreed about the same bytes.
+    if (g.chain_id !== this.#profile.chainId || !feltEq(g.pool, this.#profile.pool)) {
       this.#run = null;
       throw err('CHAIN_MISMATCH', 'feed genesis does not match the expected chain profile', {
         expected_chain_id: this.#profile.chainId,
@@ -767,7 +773,11 @@ export class MockEngine implements Engine {
 
   #onManifest(run: Run, bytes: Uint8Array): Step {
     const m = JSON.parse(dec.decode(bytes)) as ManifestDoc;
-    if (m.chain_id !== this.#profile.chainId || m.pool !== this.#profile.pool) {
+    // Same rule as `#onGenesis`, and for the same reason: `manifest.json`
+    // carries the pool in the same unpadded spelling `genesis.json` does, so
+    // fixing only the genesis check would have moved the spurious rejection
+    // one step later rather than removing it.
+    if (m.chain_id !== this.#profile.chainId || !feltEq(m.pool, this.#profile.pool)) {
       this.#run = null;
       throw err('CHAIN_MISMATCH', 'manifest chain identity differs from the profile');
     }

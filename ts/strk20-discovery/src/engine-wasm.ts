@@ -49,6 +49,7 @@
  */
 
 import { Strk20Error } from './errors.ts';
+import { feltEq } from './felt.ts';
 import { sha256Hex } from './sha256.ts';
 import type {
   DiscoverOut,
@@ -144,7 +145,13 @@ interface Manifest {
   head: { number: number; hash: string; l1_accepted: number };
   latest_epoch: number | null;
   epochs: ManifestEpoch[];
-  snapshot: ManifestSnapshot | null;
+  /**
+   * OPTIONAL, not `| null`. A feed with no snapshot may write `null` or may
+   * omit the key entirely, and this said `snapshot: ManifestSnapshot | null`
+   * while the planner tested `!== null` — so the omitted case type-checked its
+   * way into dereferencing `undefined`.
+   */
+  snapshot?: ManifestSnapshot | null;
 }
 
 /** What `apply` returns. */
@@ -522,8 +529,15 @@ class WasmEngineAdapter implements Engine {
 
     const last = info.last_epoch ?? -1;
 
+    // `!m.snapshot`, not `m.snapshot !== null`. A feed that publishes no
+    // snapshot writes `"snapshot": null` OR simply omits the key, and both of
+    // ours have done both — `undefined !== null` is true, so the omitted case
+    // planned a snapshot fetch and then dereferenced `m.snapshot!.file` two
+    // statements later. That threw a bare TypeError out of the adapter, which
+    // is not a member of §4.2's error union and defeated every `catch`
+    // downstream. The line below already had the falsy check; this one did not.
     const wantSnapshot =
-      m.snapshot !== null && last < 0 && this.#coldStart !== 'epochs' && info.snapshot_basis === null;
+      !!m.snapshot && last < 0 && this.#coldStart !== 'epochs' && info.snapshot_basis === null;
 
     if (this.#coldStart === 'snapshot' && !m.snapshot) {
       throw new Strk20Error('SNAPSHOT_UNAVAILABLE', 'coldStart:"snapshot" was demanded but this feed publishes none');
@@ -889,16 +903,58 @@ export function checkGenesisAgainstProfile(genesisJson: string, profile: ChainPr
   }
 }
 
+// ------------------------------------------------------- the error boundary
+
 /**
- * Felt equality over hex strings. `0x040f…` and `0x40f…` are the same address
- * and the feed is under no obligation to pick the same spelling the profile
- * did — comparing the strings would reject an honest feed, and padding
- * differences are exactly how a real one differs.
+ * §4.2's error union is CLOSED, and a closed union is a promise about what
+ * comes OUT, not only about what this file chooses to throw. An integrator
+ * writes `catch (e) { if (isStrk20Error(e)) report(e.code) }` and there is no
+ * correct `else` branch to write — so a `TypeError` escaping from here is not
+ * an ugly message, it is a broken contract that lands in the branch the
+ * integrator was told could not happen.
+ *
+ * Two sources, one exit:
+ *   - the module throws canonical JSON (§3.7), which round-trips with its own
+ *     code and details;
+ *   - anything else is a fault in THIS file — a manifest field the planner
+ *     assumed was there, an arithmetic slip — and gets `INTERNAL`, carrying
+ *     the original message verbatim so it is still debuggable rather than
+ *     laundered into "something went wrong".
  */
-function feltEq(a: unknown, b: unknown): boolean {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const norm = (s: string) => s.trim().toLowerCase().replace(/^0x/, '').replace(/^0+/, '');
-  return /^0x[0-9a-fA-F]+$/.test(a.trim()) && /^0x[0-9a-fA-F]+$/.test(b.trim()) && norm(a) === norm(b);
+function asStrk20Error(e: unknown): Strk20Error {
+  if (e instanceof Strk20Error) return e;
+  const converted = Strk20Error.fromModuleJson(e);
+  if (converted.code !== 'INTERNAL') return converted;
+  return new Strk20Error('INTERNAL', converted.message, { thrown: e instanceof Error ? e.name : typeof e });
+}
+
+/**
+ * The boundary itself: every `Engine` method, converted on the way out.
+ *
+ * A Proxy rather than a try/catch repeated in each of the twenty methods,
+ * because the guarantee has to hold for the method somebody adds next year
+ * too, and a per-method wrapper is exactly the kind of list that gets one
+ * entry short. `apply(target, …)` keeps `this` bound to the real adapter, so
+ * its `#private` fields are untouched by the indirection.
+ *
+ * Every `Engine` method is synchronous by contract (`engine.ts`), so a
+ * try/catch really does see everything; there is no promise to also catch.
+ */
+function guarded(engine: Engine): Engine {
+  return new Proxy(engine, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop) as unknown;
+      if (typeof v !== 'function') return v;
+      const fn = v as (...a: unknown[]) => unknown;
+      return (...args: unknown[]): unknown => {
+        try {
+          return fn.apply(target, args);
+        } catch (e) {
+          throw asStrk20Error(e);
+        }
+      };
+    },
+  });
 }
 
 function capOf(p: Planned): number | null {
@@ -939,6 +995,46 @@ export function wasmEngineFactory(opts: WasmEngineOptions): EngineFactory {
     return booted;
   };
 
+  /**
+   * The body of `load`, so the boundary conversion below wraps it whole. The
+   * inner `catch`es here are policy — §4.5's "a bad cache row is a cache miss"
+   * — and they stay where they are; the outer one only ensures that whatever
+   * they re-throw, and whatever `JSON.parse` throws before them, leaves as a
+   * `Strk20Error`.
+   */
+  const loadFrames = async (profileJson: string, frames: readonly Uint8Array[]): Promise<Engine | null> => {
+    const profile = JSON.parse(profileJson) as ChainProfile;
+    const { glue, memory } = await boot();
+    if (frames.length < 2) return null;
+    const genesisJson = dec.decode(frames[0]!);
+    // A persisted blob is a cache, and a cache is not evidence. The genesis
+    // it carries is checked against the pinned profile exactly as a freshly
+    // fetched one would be — otherwise a poisoned or stale IndexedDB row
+    // reintroduces on reload the identity hole the network path closes.
+    try {
+      checkGenesisAgainstProfile(genesisJson, profile);
+    } catch {
+      return null; // §4.5: a foreign blob is a cache miss, and deleting it is safe.
+    }
+    const total = frames.slice(1).reduce((n, f) => n + f.length, 0);
+    const blob = new Uint8Array(total);
+    let off = 0;
+    for (const f of frames.slice(1)) {
+      blob.set(f, off);
+      off += f.length;
+    }
+    try {
+      const inner = glue.Engine.load(blob, genesisJson);
+      return guarded(new WasmEngineAdapter(glue, memory, inner, genesisJson, profile));
+    } catch (e) {
+      const err = Strk20Error.fromModuleJson(e);
+      // §4.5: a blob that will not load is a cache miss, and deleting it is
+      // always safe. Anything else is a real fault and must be seen.
+      if (err.code.startsWith('STATE_') || err.code === 'CHAIN_MISMATCH') return null;
+      throw err;
+    }
+  };
+
   return {
     kind: 'wasm',
     label: 'WASM ENGINE — crates/wasm (strk20-consumer compiled to wasm32)',
@@ -951,44 +1047,23 @@ export function wasmEngineFactory(opts: WasmEngineOptions): EngineFactory {
       'still key-blind, but asserted by the wrapper rather than proved by the module.',
 
     async create(profileJson: string): Promise<Engine> {
-      // No engine yet: `Engine::new` needs the FETCHED genesis.json, and this
-      // factory has no network. `sync_begin` fetches it as step 0 — and the
-      // adapter checks it against this profile before constructing anything.
-      const profile = JSON.parse(profileJson) as ChainProfile;
-      const { glue, memory } = await boot();
-      return new WasmEngineAdapter(glue, memory, null, null, profile);
+      try {
+        // No engine yet: `Engine::new` needs the FETCHED genesis.json, and this
+        // factory has no network. `sync_begin` fetches it as step 0 — and the
+        // adapter checks it against this profile before constructing anything.
+        const profile = JSON.parse(profileJson) as ChainProfile;
+        const { glue, memory } = await boot();
+        return guarded(new WasmEngineAdapter(glue, memory, null, null, profile));
+      } catch (e) {
+        throw asStrk20Error(e);
+      }
     },
 
     async load(profileJson: string, frames: readonly Uint8Array[]): Promise<Engine | null> {
-      const profile = JSON.parse(profileJson) as ChainProfile;
-      const { glue, memory } = await boot();
-      if (frames.length < 2) return null;
-      const genesisJson = dec.decode(frames[0]!);
-      // A persisted blob is a cache, and a cache is not evidence. The genesis
-      // it carries is checked against the pinned profile exactly as a freshly
-      // fetched one would be — otherwise a poisoned or stale IndexedDB row
-      // reintroduces on reload the identity hole the network path closes.
       try {
-        checkGenesisAgainstProfile(genesisJson, profile);
-      } catch {
-        return null; // §4.5: a foreign blob is a cache miss, and deleting it is safe.
-      }
-      const total = frames.slice(1).reduce((n, f) => n + f.length, 0);
-      const blob = new Uint8Array(total);
-      let off = 0;
-      for (const f of frames.slice(1)) {
-        blob.set(f, off);
-        off += f.length;
-      }
-      try {
-        const inner = glue.Engine.load(blob, genesisJson);
-        return new WasmEngineAdapter(glue, memory, inner, genesisJson, profile);
+        return await loadFrames(profileJson, frames);
       } catch (e) {
-        const err = Strk20Error.fromModuleJson(e);
-        // §4.5: a blob that will not load is a cache miss, and deleting it is
-        // always safe. Anything else is a real fault and must be seen.
-        if (err.code.startsWith('STATE_') || err.code === 'CHAIN_MISMATCH') return null;
-        throw err;
+        throw asStrk20Error(e);
       }
     },
   };

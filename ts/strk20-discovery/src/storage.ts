@@ -102,7 +102,13 @@ export class MemoryStorage implements StorageAdapter {
   async stateClear(): Promise<void> {
     this.#state = null;
   }
-  async cursorGet(keyId: string) {
+  // The return type is WRITTEN, not inferred. TypeScript 5.7 made
+  // `Uint8Array` generic, so an inferred `Uint8Array` is emitted into the .d.ts
+  // as `Uint8Array<ArrayBufferLike>` — syntax a consumer on 5.6 cannot parse
+  // (TS2315, "Type 'Uint8Array' is not generic") unless they set skipLibCheck.
+  // Declaration emit reuses the written type node, so annotating keeps the
+  // published typings spelled the way both versions understand.
+  async cursorGet(keyId: string): Promise<Uint8Array | null> {
     return this.#cursors.get(keyId) ?? null;
   }
   async cursorPut(keyId: string, sealed: Uint8Array): Promise<void> {
@@ -162,7 +168,9 @@ export class IdbStorage implements StorageAdapter {
   async metaSet(key: string, value: unknown): Promise<void> {
     await req(this.#tx('meta', 'readwrite').put(value as never, key));
   }
-  async artifactGet(key: string) {
+  // Annotated for the same reason `MemoryStorage.cursorGet` is: `new
+  // Uint8Array(ArrayBuffer)` infers as `Uint8Array<ArrayBuffer>` under 5.7+.
+  async artifactGet(key: string): Promise<{ hash: string; zbytes: Uint8Array } | null> {
     const v = (await req(this.#tx('artifacts', 'readonly').get(key))) as
       | { hash: string; zbytes: ArrayBuffer }
       | undefined;
