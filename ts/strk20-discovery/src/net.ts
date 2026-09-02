@@ -23,14 +23,24 @@ import type { RequestArtifact, RequestRecord } from './types.ts';
 /**
  * §2.8.1's closed whole-path allowlist, plus `/live`. Anchored at both ends, so
  * a query string is not merely forbidden, it is unmatched.
+ *
+ * These nine are the same nine the server enforces — `PATTERNS` in
+ * `crates/e2e-tests/src/feed_urls.rs`, minus the `/feed` mount point, which
+ * lives in the base URL here. Both snapshot artifacts are DIRECTORY + 8-digit
+ * epoch index: `snapshots/{e:08}.strk20s.zst` is what the manifest's
+ * `snapshot.file` names (consumer-path.md §C8/§706), what `cutter.rs` writes
+ * and what `engine-wasm.ts` asks for. The singular `/snapshot.strk20s.zst`
+ * spelling that stood here matched no artifact any server has ever published,
+ * so every cold start against a feed WITH a snapshot — which is every feed
+ * this repo publishes — died with SCOPE_VIOLATION before the first epoch.
  */
 export const FEED_PATH_ALLOWLIST: readonly RegExp[] = [
   /^\/genesis\.json$/,
   /^\/manifest\.json$/,
   /^\/epochs\/[0-9]{8}\.strk20e\.zst$/,
   /^\/epochs\/[0-9]{8}\.anchor\.json$/,
-  /^\/snapshot\.strk20s\.zst$/,
-  /^\/snapshot\.anchor\.json$/,
+  /^\/snapshots\/[0-9]{8}\.strk20s\.zst$/,
+  /^\/snapshots\/[0-9]{8}\.anchor\.json$/,
   /^\/anchors\.ndjson$/,
   /^\/head\.ndjson$/,
   /^\/live$/,
@@ -254,11 +264,38 @@ export function openLive(
   es.onopen = () => {
     record.status = 200;
   };
-  es.onmessage = (ev: MessageEvent<string>) => {
+  /**
+   * The stream's events are NAMED — `hello`, `head`, `epoch`, `snapshot`,
+   * `status` (consumer-path.md §2.2, written by crates/indexerd/src/live.rs) —
+   * and `EventSource` routes a named event to a listener registered for that
+   * name. `onmessage` sees only UNNAMED events. Hooking `onmessage` alone is
+   * why a subscription against this server opened, never poked and never
+   * errored either: no error means no fall back to polling, so the toggle read
+   * ON while nothing at all happened. Measured against the live mainnet stream
+   * over 70 s: onmessage 0, head 5, hello 1, error 0.
+   *
+   * `head`, `epoch` and `snapshot` announce bytes that changed and poke.
+   * `hello` (chain identity) and `status` (decode-state transition) announce
+   * no new artifact and do not. All of them are counted, because §6.2 rule 2
+   * hides no request from the panel, the SSE connection included.
+   */
+  const count = (ev: MessageEvent<string>): void => {
     record.bytes += typeof ev.data === 'string' ? ev.data.length : 0;
     record.ms = ctx.now() - record.at;
+  };
+  es.onmessage = (ev: MessageEvent<string>) => {
+    count(ev);
     handlers.onPoke();
   };
+  for (const name of ['head', 'epoch', 'snapshot'] as const) {
+    es.addEventListener(name, (ev: Event) => {
+      count(ev as MessageEvent<string>);
+      handlers.onPoke();
+    });
+  }
+  for (const name of ['hello', 'status'] as const) {
+    es.addEventListener(name, (ev: Event) => count(ev as MessageEvent<string>));
+  }
   es.onerror = () => {
     record.ms = ctx.now() - record.at;
     if (!closed) handlers.onError();
