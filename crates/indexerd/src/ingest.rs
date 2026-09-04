@@ -41,6 +41,13 @@ const TAIL_STATE_DIFF_SPAN: u64 = 256;
 /// anything else is not an answer to the question we asked.
 const STATUS_ACCEPTED_ON_L1: &str = "ACCEPTED_ON_L1";
 
+/// `meta` key counting finality answers this mirror refused. A warn line is
+/// not an operator signal on a box nobody tails; `/metrics` exports this as
+/// `strk20_l1_answer_rejected_total`, and the shape that matters is the
+/// counter climbing while `strk20_l1_accepted_block` stands still — a mirror
+/// whose recorded height has ratcheted past what its endpoints will confirm.
+pub const L1_REJECTED_META: &str = "l1_answer_rejected_total";
+
 /// Why the finality poll's answer may not be believed, or `None` when it may.
 ///
 /// `getBlockWithTxHashes("l1_accepted")` goes to the same endpoints as every
@@ -52,21 +59,43 @@ const STATUS_ACCEPTED_ON_L1: &str = "ACCEPTED_ON_L1";
 /// that row, so one wrong answer became the height four public artifacts
 /// asserted (#21).
 ///
-/// Three things an L1-accepted height cannot be, each checkable against what
+/// Four things an L1-accepted height cannot be, each checkable against what
 /// the same cycle already holds:
 ///
 /// * a block the answer itself labels unfinalized — the tier is the question;
 /// * a block above the chain's own `latest` — nothing is final above head;
 /// * a block below a height already recorded as final — L1 finality does not
 ///   walk backwards, and epochs at or under the recorded height are already
-///   published as immutable by construction.
+///   published as immutable by construction;
+/// * a block below the pool's own `genesis_block` — the mirror's first epoch
+///   starts there, so no answer under it can move the cut frontier by a single
+///   block. This is the FRESH-MIRROR floor, and it is the case #21 was actually
+///   reported as: a container whose first poll published 7,457,223 held no
+///   persisted height to compare against, and the check above had nothing to
+///   say. `genesis_block` is not an invented bound — `run_cycle` already uses
+///   it as the scan floor forty lines below — and refusing an answer under it
+///   costs nothing, because under it there is nothing to cut.
 ///
-/// The remaining window, `(persisted, latest]`, is exactly the range an honest
-/// answer lives in; this function does not pretend to rank answers inside it.
+/// The remaining window, `(max(persisted, genesis - 1), latest]`, is exactly
+/// the range an honest answer lives in; this function does not pretend to rank
+/// answers inside it.
+///
+/// **The floor only ever rises.** Once a height is persisted, every lower
+/// answer is refused forever, so an over-high answer that does get through
+/// (`<= latest` and self-labelled `ACCEPTED_ON_L1` — which is what an
+/// aggregator resolving the tag as a finalized-looking newer block produces)
+/// latches the mirror at that height: honest answers are rejected, and
+/// `cut_ready_epochs` keeps treating it as final. Before this check the value
+/// self-corrected on the next cycle, which is what #21 observed; it no longer
+/// can. The operator signal is the `strk20_l1_answer_rejected_total` counter
+/// climbing every cycle while `strk20_l1_accepted_block` stands still, and the
+/// repair is to set `meta.l1_accepted_number` back to a height the chain
+/// agrees with and re-run `strk20 recut-epochs`.
 fn l1_answer_rejection(
     answer: &BlockHeader,
     latest: u64,
     persisted: Option<u64>,
+    genesis: u64,
 ) -> Option<String> {
     let n = answer.block_number;
     match answer.status.as_deref() {
@@ -80,12 +109,19 @@ fn l1_answer_rejection(
     if n > latest {
         return Some(format!("block {n} is above latest {latest}"));
     }
-    match persisted {
-        Some(p) if n < p => Some(format!(
-            "block {n} is below {p}, already recorded as L1-accepted"
-        )),
-        _ => None,
+    if let Some(p) = persisted {
+        if n < p {
+            return Some(format!(
+                "block {n} is below {p}, already recorded as L1-accepted"
+            ));
+        }
     }
+    if n < genesis {
+        return Some(format!(
+            "block {n} is below the pool's genesis block {genesis}"
+        ));
+    }
+    None
 }
 
 /// Next window length, predicted from what the last one answered: aim at three
@@ -137,28 +173,41 @@ impl<'a> Ingestor<'a> {
             .db
             .meta_get("l1_accepted_number")?
             .and_then(|s| s.parse().ok());
-        match l1_answer_rejection(&l1, latest.block_number, persisted_l1) {
+        // The one height this cycle is willing to treat as final, and the ONLY
+        // one anything below may use: the answer when it survived the check,
+        // otherwise the last height a cycle actually produced. `None` means no
+        // cycle has ever produced one, so nothing is final and nothing is
+        // promoted — `promote_l1(0)` would still stamp the genesis block.
+        let final_height: Option<u64> = match l1_answer_rejection(
+            &l1,
+            latest.block_number,
+            persisted_l1,
+            self.cfg.genesis_block,
+        ) {
             None => {
-                out.l1_accepted = l1.block_number;
                 self.db.promote_l1(l1.block_number)?;
                 self.db
                     .meta_set("l1_accepted_number", &l1.block_number.to_string())?;
+                Some(l1.block_number)
             }
             Some(reason) => {
-                // Nothing is written and nothing is promoted: the cycle carries
-                // the last height a cycle actually produced (0 on a mirror that
-                // has never had one), so `/health` and the feed keep publishing
-                // that instead of an answer we can see is not one.
+                // Nothing is written and nothing is promoted: the cycle
+                // carries the last height a cycle actually produced, so
+                // `/health` and the feed keep publishing that instead of an
+                // answer we can see is not one.
+                let rejected = self.bump_l1_rejections()?;
                 tracing::warn!(
                     answered = l1.block_number,
                     latest = latest.block_number,
                     persisted = persisted_l1,
+                    rejected_total = rejected,
                     endpoint = %self.rpc.active_endpoint(),
                     "rejected l1_accepted answer: {reason}; keeping the last persisted height"
                 );
-                out.l1_accepted = persisted_l1.unwrap_or(0);
+                persisted_l1
             }
-        }
+        };
+        out.l1_accepted = final_height.unwrap_or(0);
 
         let prev_head_hash = self.db.meta_get("head_hash")?;
         let latest_hash_hex = normalize_hex(&latest.block_hash)?;
@@ -252,9 +301,34 @@ impl<'a> Ingestor<'a> {
             &crate::rpc::parse_felt(&latest.block_hash)?,
             latest.block_number,
         )?;
-        // Re-apply L1 promotion to rows ingested this cycle.
-        self.db.promote_l1(l1.block_number)?;
+        // Re-apply L1 promotion to rows ingested this cycle — to `final_height`,
+        // never to the raw answer. `blocks.status` is a second finality writer,
+        // and promoting it from an answer the cycle rejected would republish
+        // that answer anyway: `regen_head` stamps each tail line's `finality`
+        // from this column (cutter.rs `blocks_as_lines`), so head.ndjson would
+        // carry `"fin":"l1"` on blocks above the `l1_accepted` its own header
+        // reports, and `detect_reorg` would take a falsely promoted row
+        // as a place to stop the walkback.
+        if let Some(h) = final_height {
+            self.db.promote_l1(h)?;
+        }
         Ok(out)
+    }
+
+    /// Count one refused finality answer and return the new total. The count
+    /// is persisted rather than held in memory because the state it makes
+    /// visible outlives a process: a mirror whose recorded height has ratcheted
+    /// past what its endpoints will confirm rejects every answer, restart
+    /// included, and a counter that resets on boot would hide exactly that.
+    fn bump_l1_rejections(&self) -> Result<u64> {
+        let n = self
+            .db
+            .meta_get(L1_REJECTED_META)?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.db.meta_set(L1_REJECTED_META, &n.to_string())?;
+        Ok(n)
     }
 
     /// Highest stored block that is still canonical, if a reorg is detected.
@@ -280,9 +354,24 @@ impl<'a> Ingestor<'a> {
         // until one is still canonical; the epoch floor is never crossed
         // because epochs are cut at l1-final blocks only.
         let floor = self.db.last_epoch()?.map(|(_, _, to)| to).unwrap_or(0);
+        // `blocks.status` alone is NOT a licence to stop the walk. The column
+        // is set from each block's own header label as well as from
+        // `promote_l1`, and a wrong label — the same aggregator hazard the
+        // finality poll is guarded against — would end the walk ABOVE the true
+        // fork point: the divergence below it is then never rolled back, and
+        // surfaces hours later as a verify-root MISMATCH that latches
+        // publishing with nothing pointing back at the row that caused it.
+        // So a row is taken as final only up to the height a cycle actually
+        // produced; above it, the chain is asked, which is what the loop below
+        // does anyway.
+        let final_upto: u64 = self
+            .db
+            .meta_get("l1_accepted_number")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let stored = self.db.blocks_in_range(floor + 1, head_num)?;
         for b in stored.iter().rev() {
-            if b.l1_accepted {
+            if b.l1_accepted && b.number <= final_upto {
                 return Ok(Some(b.number));
             }
             match self.rpc.get_block(BlockRef::Number(b.number)).await {
@@ -943,6 +1032,11 @@ mod tests {
         }
     }
 
+    /// The pool's own first block on mainnet, which is where the mirror's
+    /// first epoch starts. Real, not a round number: #21's 7,457,223 is 1.5M
+    /// blocks UNDER it, so the reported case is inside the floor's reach.
+    const GENESIS: u64 = crate::config::MAINNET_GENESIS_BLOCK;
+
     /// #21, as observed: `/mainnet/health` published 7,457,223 while the feed
     /// head was 14,262,623 — a height ~6.8M blocks under one already recorded
     /// as final, and under the pool's own genesis block. No mirror state can
@@ -954,6 +1048,7 @@ mod tests {
             &answer(7_457_223, Some(STATUS_ACCEPTED_ON_L1)),
             14_262_623,
             Some(14_258_250),
+            GENESIS,
         )
         .expect("an L1-accepted height that walks backwards must be rejected");
         assert!(reason.contains("7457223"), "{reason}");
@@ -969,6 +1064,7 @@ mod tests {
             &answer(14_300_000, Some(STATUS_ACCEPTED_ON_L1)),
             14_262_623,
             Some(14_258_250),
+            GENESIS,
         )
         .is_some());
     }
@@ -982,12 +1078,14 @@ mod tests {
             &answer(14_262_623, Some("ACCEPTED_ON_L2")),
             14_262_623,
             Some(14_258_250),
+            GENESIS,
         )
         .is_some());
         assert!(l1_answer_rejection(
             &answer(14_262_623, Some("PRE_CONFIRMED")),
             14_262_623,
-            None
+            None,
+            GENESIS,
         )
         .is_some());
     }
@@ -1001,15 +1099,39 @@ mod tests {
             l1_answer_rejection(
                 &answer(14_258_250, Some(STATUS_ACCEPTED_ON_L1)),
                 14_262_623,
-                None
+                None,
+                GENESIS,
             ),
             None
         );
-        // Below genesis is NOT a rejection reason on its own: a fresh mirror
-        // holds no evidence about L1 that would rank one height over another,
-        // and inventing one here would be the same class of claim as #21.
+    }
+
+    /// The case #21 was REPORTED as, which the persisted-height check cannot
+    /// reach: a container's first poll, `meta` empty, an endpoint answering
+    /// 7,457,223. The floor that catches it is the pool's own genesis block —
+    /// evidence the cycle is already holding, since `run_cycle` uses it as the
+    /// scan floor — and the answer is refused without a persisted height to
+    /// compare against.
+    #[test]
+    fn a_first_answer_below_the_pools_genesis_is_rejected() {
+        let reason = l1_answer_rejection(
+            &answer(7_457_223, Some(STATUS_ACCEPTED_ON_L1)),
+            14_262_623,
+            None,
+            GENESIS,
+        )
+        .expect("a height under the pool's genesis block cannot move the cut frontier");
+        assert!(reason.contains("7457223"), "{reason}");
+        assert!(reason.contains(&GENESIS.to_string()), "{reason}");
+        // One block up from the floor is inside it, and stays accepted: the
+        // rule is a floor, not a preference for larger numbers.
         assert_eq!(
-            l1_answer_rejection(&answer(1, Some(STATUS_ACCEPTED_ON_L1)), 14_262_623, None),
+            l1_answer_rejection(
+                &answer(GENESIS, Some(STATUS_ACCEPTED_ON_L1)),
+                14_262_623,
+                None,
+                GENESIS
+            ),
             None
         );
     }
@@ -1023,7 +1145,8 @@ mod tests {
                 l1_answer_rejection(
                     &answer(n, Some(STATUS_ACCEPTED_ON_L1)),
                     14_262_623,
-                    Some(14_258_250)
+                    Some(14_258_250),
+                    GENESIS,
                 ),
                 None,
                 "height {n}"
@@ -1036,11 +1159,20 @@ mod tests {
     #[test]
     fn a_missing_status_leaves_the_range_checks_deciding() {
         assert_eq!(
-            l1_answer_rejection(&answer(14_258_400, None), 14_262_623, Some(14_258_250)),
+            l1_answer_rejection(
+                &answer(14_258_400, None),
+                14_262_623,
+                Some(14_258_250),
+                GENESIS
+            ),
             None
         );
-        assert!(
-            l1_answer_rejection(&answer(7_457_223, None), 14_262_623, Some(14_258_250)).is_some()
-        );
+        assert!(l1_answer_rejection(
+            &answer(7_457_223, None),
+            14_262_623,
+            Some(14_258_250),
+            GENESIS
+        )
+        .is_some());
     }
 }

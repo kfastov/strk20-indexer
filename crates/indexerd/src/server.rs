@@ -473,9 +473,21 @@ async fn metrics(State(s): State<AppState>) -> Response {
             .unwrap_or(0);
         let epochs = db.epoch_rows()?.len();
         let degraded = db.meta_get("decode_state")?.as_deref() == Some("degraded");
+        // Finality answers the ingest loop refused (#21). Rejecting is the safe
+        // outcome but not a free one — the recorded height is a one-way ratchet,
+        // so a mirror stuck above what its endpoints will confirm rejects every
+        // honest answer forever. That state is invisible in the two gauges
+        // above; it is exactly this counter climbing while
+        // `strk20_l1_accepted_block` stands still.
+        let l1_rejected: u64 = db
+            .meta_get(crate::ingest::L1_REJECTED_META)?
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0);
         Ok(format!(
             "# TYPE strk20_head_block gauge\nstrk20_head_block {head}\n\
              # TYPE strk20_l1_accepted_block gauge\nstrk20_l1_accepted_block {l1}\n\
+             # TYPE strk20_l1_answer_rejected_total counter\n\
+             strk20_l1_answer_rejected_total {l1_rejected}\n\
              # TYPE strk20_epochs_cut gauge\nstrk20_epochs_cut {epochs}\n\
              # TYPE strk20_decode_degraded gauge\nstrk20_decode_degraded {}\n\
              # TYPE strk20_sse_connections gauge\nstrk20_sse_connections {}\n",
@@ -688,6 +700,16 @@ mod tests {
         assert!(
             text.contains("strk20_l1_accepted_block 0\n"),
             "expected the unset gauge, got:\n{text}"
+        );
+        // And the counter that makes a mirror stuck ABOVE what its endpoints
+        // will confirm visible: zero here, but its exposition format is a
+        // scrape contract the moment an alert is written against it.
+        assert!(
+            text.contains(
+                "# TYPE strk20_l1_answer_rejected_total counter\n\
+                 strk20_l1_answer_rejected_total 0\n"
+            ),
+            "expected the rejection counter, got:\n{text}"
         );
     }
 

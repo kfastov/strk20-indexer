@@ -104,6 +104,14 @@ pub struct FaultSpec {
     /// answering for something other than the block we asked about. Only the
     /// §12 chain binding catches it.
     pub lying_proof: bool,
+    /// `getBlockWithTxHashes("l1_accepted")` is answered with the LATEST block
+    /// instead of the L1-accepted one (#21). This is LIVE-8 on the finality
+    /// poll: the tag names a finality tier, a backend that resolves it as
+    /// `latest` returns a real, current block, and the only thing separating it
+    /// from an answer is the `status` field the fixture already computes from
+    /// `chain.l1_accepted`. Nothing errors, so the mirror used to write the
+    /// wrong height into `meta` and promote `blocks.status` to it.
+    pub l1_tag_as_latest: bool,
 }
 
 #[derive(Debug)]
@@ -179,6 +187,11 @@ pub struct FixtureRpc {
     /// honestly and only then asked for a proof that does not belong to the
     /// block it names.
     lying_proof: Arc<AtomicBool>,
+    /// Runtime override of `FaultSpec::l1_tag_as_latest`, so a mirror can be
+    /// built against an honest endpoint and only then be handed a wrong
+    /// finality answer — which is the order the bug happens in, and the only
+    /// order in which "the mirror kept what it already had" means anything.
+    l1_tag_as_latest: Arc<AtomicBool>,
 }
 
 impl FixtureRpc {
@@ -190,6 +203,7 @@ impl FixtureRpc {
         let counters = FaultCounters::new(&faults);
         let proofs_supported = Arc::new(AtomicBool::new(!faults.proofs_unsupported));
         let lying_proof = Arc::new(AtomicBool::new(faults.lying_proof));
+        let l1_tag_as_latest = Arc::new(AtomicBool::new(faults.l1_tag_as_latest));
         Self {
             chain: Arc::new(RwLock::new(chain)),
             captured: Arc::new(Mutex::new(Vec::new())),
@@ -198,6 +212,7 @@ impl FixtureRpc {
             counters: Arc::new(counters),
             proofs_supported,
             lying_proof,
+            l1_tag_as_latest,
         }
     }
 
@@ -210,6 +225,11 @@ impl FixtureRpc {
     /// the requested block's.
     pub fn set_lying_proof(&self, on: bool) {
         self.lying_proof.store(on, Ordering::SeqCst);
+    }
+
+    /// Start (or stop) resolving the `l1_accepted` block tag as `latest`.
+    pub fn set_l1_tag_as_latest(&self, on: bool) {
+        self.l1_tag_as_latest.store(on, Ordering::SeqCst);
     }
 
     pub fn router(&self) -> Router {
@@ -333,7 +353,16 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
         "starknet_chainId" => ok(id, json!(felt_hex(&short_string_felt(&rpc.chain_id)))),
         "starknet_blockNumber" => ok(id, json!(chain.head)),
         "starknet_getBlockWithTxHashes" => {
-            let Some(n) = params.get(0).and_then(|v| block_id_number(&chain, v)) else {
+            // The fault lives HERE and not in `block_id_number` because the tag
+            // is a finality question, and only this method is asked it.
+            let l1_as_latest = rpc.l1_tag_as_latest.load(Ordering::SeqCst);
+            let Some(n) = params.get(0).and_then(|v| {
+                if l1_as_latest && v.as_str() == Some("l1_accepted") {
+                    Some(chain.head)
+                } else {
+                    block_id_number(&chain, v)
+                }
+            }) else {
                 return rpc_err(id, 24, "Block not found");
             };
             if n > chain.head {
