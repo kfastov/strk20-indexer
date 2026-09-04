@@ -286,6 +286,14 @@ def check_secrets():
 
 
 # --- 5. upstream consumed unmodified --------------------------------------
+# Scope, deliberately narrow (#17): this check answers only what the working
+# tree can answer offline — does Cargo.toml still point discovery-core at OUR
+# fork at a 40-hex pin, and is the checked-in patch still exactly one commit.
+# Whether that commit's TREE equals upstream is
+# .github/workflows/fork-delta-check.yml's job; it fetches both repos and
+# diffs them, which is strictly stronger than re-deriving the same verdict
+# from the patch text. Asserting it in both places only meant two places to
+# update when the pin moved.
 def check_fork():
     bad, pin = [], None
     sect = re.search(r'^\[patch\."[^"]+"\]\s*$(.*?)(?=^\[|\Z)', read(R("Cargo.toml"), ""), re.S | re.M)
@@ -308,22 +316,8 @@ def check_fork():
     if len(commits) != 1:
         bad.append("patch carries %d commits; the claim is exactly one dependency-gating commit"
                    % len(commits))
-    elif pin and commits[0] != pin:
-        bad.append("patch commit %s != Cargo.toml [patch] rev %s — one of them is stale"
-                   % (commits[0][:12], pin[:12]))
-    touched, cur, src_lines = sorted(set(re.findall(r"^diff --git a/(\S+)", patch, re.M))), None, 0
-    for ln in patch.splitlines():
-        if d := re.match(r"^diff --git a/(\S+)", ln):
-            cur = d.group(1)
-        elif cur and "/src/" in cur and re.match(r"^[+-][^+-]", ln):
-            src_lines += 1
-    bad += ["patch touches %s — only Cargo.toml packaging may differ from upstream" % t
-            for t in touched if os.path.basename(t) != "Cargo.toml"]
-    if src_lines:
-        bad.append("patch changes %d lines under discovery-core/src — "
-                   "'consumed unmodified' is false" % src_lines)
-    return ("FAIL" if bad else "PASS"), "%d file(s) touched: %s; %d lines under */src" % (
-        len(touched), ", ".join(touched) or "none", src_lines), bad
+    return ("FAIL" if bad else "PASS"), "fork pin %s, patch carries %d commit(s)" % (
+        pin[:12] if pin else "MISSING", len(commits)), bad
 
 
 CHECKS = [("1. feed URLs carry nothing user-derived", check_feed_urls),
