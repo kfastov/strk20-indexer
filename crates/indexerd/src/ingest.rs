@@ -6,7 +6,7 @@
 
 use crate::config::ChainConfig;
 use crate::db::{BlockRow, Db, EventRow};
-use crate::rpc::{BlockRef, RpcClient};
+use crate::rpc::{BlockHeader, BlockRef, RpcClient};
 use anyhow::{bail, Context, Result};
 use starknet_types_core::felt::Felt;
 use std::collections::BTreeMap;
@@ -35,6 +35,58 @@ const SCAN_SEGMENT: u64 = MAX_SCAN_WINDOW;
 /// it — a backfill, a long outage — the sweep is skipped and completeness for
 /// that stretch is the auditor's job, not the poll loop's.
 const TAIL_STATE_DIFF_SPAN: u64 = 256;
+
+/// The only block status that means "irreversible without an L1 reorg". The
+/// finality poll asks for this tier by name, so an answer that labels itself
+/// anything else is not an answer to the question we asked.
+const STATUS_ACCEPTED_ON_L1: &str = "ACCEPTED_ON_L1";
+
+/// Why the finality poll's answer may not be believed, or `None` when it may.
+///
+/// `getBlockWithTxHashes("l1_accepted")` goes to the same endpoints as every
+/// other call, and those endpoints are aggregators: LIVE-8 is precisely that a
+/// request can be served by a backend that never saw the state we assume it is
+/// answering from. Until this check existed the answer was believed verbatim —
+/// `run_cycle` wrote `block_number` straight into `meta.l1_accepted_number`,
+/// and `/health`, `/metrics`, `head.ndjson` and `manifest.json` all republish
+/// that row, so one wrong answer became the height four public artifacts
+/// asserted (#21).
+///
+/// Three things an L1-accepted height cannot be, each checkable against what
+/// the same cycle already holds:
+///
+/// * a block the answer itself labels unfinalized — the tier is the question;
+/// * a block above the chain's own `latest` — nothing is final above head;
+/// * a block below a height already recorded as final — L1 finality does not
+///   walk backwards, and epochs at or under the recorded height are already
+///   published as immutable by construction.
+///
+/// The remaining window, `(persisted, latest]`, is exactly the range an honest
+/// answer lives in; this function does not pretend to rank answers inside it.
+fn l1_answer_rejection(
+    answer: &BlockHeader,
+    latest: u64,
+    persisted: Option<u64>,
+) -> Option<String> {
+    let n = answer.block_number;
+    match answer.status.as_deref() {
+        Some(status) if status != STATUS_ACCEPTED_ON_L1 => {
+            return Some(format!(
+                "block {n} is labelled {status}, not {STATUS_ACCEPTED_ON_L1}"
+            ))
+        }
+        _ => {}
+    }
+    if n > latest {
+        return Some(format!("block {n} is above latest {latest}"));
+    }
+    match persisted {
+        Some(p) if n < p => Some(format!(
+            "block {n} is below {p}, already recorded as L1-accepted"
+        )),
+        _ => None,
+    }
+}
 
 /// Next window length, predicted from what the last one answered: aim at three
 /// quarters of a page. Prediction, not dogma — an overshoot comes back with a
@@ -81,10 +133,32 @@ impl<'a> Ingestor<'a> {
         let latest = self.rpc.get_block(BlockRef::Latest).await?;
         let l1 = self.rpc.get_block(BlockRef::L1Accepted).await?;
         out.head_number = latest.block_number;
-        out.l1_accepted = l1.block_number;
-        self.db.promote_l1(l1.block_number)?;
-        self.db
-            .meta_set("l1_accepted_number", &l1.block_number.to_string())?;
+        let persisted_l1: Option<u64> = self
+            .db
+            .meta_get("l1_accepted_number")?
+            .and_then(|s| s.parse().ok());
+        match l1_answer_rejection(&l1, latest.block_number, persisted_l1) {
+            None => {
+                out.l1_accepted = l1.block_number;
+                self.db.promote_l1(l1.block_number)?;
+                self.db
+                    .meta_set("l1_accepted_number", &l1.block_number.to_string())?;
+            }
+            Some(reason) => {
+                // Nothing is written and nothing is promoted: the cycle carries
+                // the last height a cycle actually produced (0 on a mirror that
+                // has never had one), so `/health` and the feed keep publishing
+                // that instead of an answer we can see is not one.
+                tracing::warn!(
+                    answered = l1.block_number,
+                    latest = latest.block_number,
+                    persisted = persisted_l1,
+                    endpoint = %self.rpc.active_endpoint(),
+                    "rejected l1_accepted answer: {reason}; keeping the last persisted height"
+                );
+                out.l1_accepted = persisted_l1.unwrap_or(0);
+            }
+        }
 
         let prev_head_hash = self.db.meta_get("head_hash")?;
         let latest_hash_hex = normalize_hex(&latest.block_hash)?;
@@ -845,4 +919,128 @@ pub async fn init_checks(db: &Db, rpc: &RpcClient, cfg: &ChainConfig) -> Result<
         }
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An answer shaped like the one `getBlockWithTxHashes` returns. `status`
+    /// is `Option` on the wire and stays optional here: an endpoint that omits
+    /// it has told us nothing about the tier, which is not the same as telling
+    /// us the wrong tier.
+    fn answer(number: u64, status: Option<&str>) -> BlockHeader {
+        BlockHeader {
+            block_number: number,
+            block_hash: "0x1".into(),
+            parent_hash: "0x0".into(),
+            timestamp: 1_700_000_000,
+            status: status.map(str::to_owned),
+            new_root: None,
+            transactions: vec![],
+        }
+    }
+
+    /// #21, as observed: `/mainnet/health` published 7,457,223 while the feed
+    /// head was 14,262,623 — a height ~6.8M blocks under one already recorded
+    /// as final, and under the pool's own genesis block. No mirror state can
+    /// produce that number; an endpoint's answer can, and used to be written
+    /// into `meta.l1_accepted_number` unread.
+    #[test]
+    fn an_answer_below_the_recorded_height_is_rejected() {
+        let reason = l1_answer_rejection(
+            &answer(7_457_223, Some(STATUS_ACCEPTED_ON_L1)),
+            14_262_623,
+            Some(14_258_250),
+        )
+        .expect("an L1-accepted height that walks backwards must be rejected");
+        assert!(reason.contains("7457223"), "{reason}");
+        assert!(reason.contains("14258250"), "{reason}");
+    }
+
+    /// The dangerous direction: a height above `latest` would let
+    /// `cut_ready_epochs` publish an epoch as immutable over blocks that are
+    /// still revocable en masse (docs/research-answers.md Q12).
+    #[test]
+    fn an_answer_above_latest_is_rejected() {
+        assert!(l1_answer_rejection(
+            &answer(14_300_000, Some(STATUS_ACCEPTED_ON_L1)),
+            14_262_623,
+            Some(14_258_250),
+        )
+        .is_some());
+    }
+
+    /// The tag names a finality tier, so the tier the answer reports IS the
+    /// binding check: an aggregator that resolves `"l1_accepted"` as `latest`
+    /// hands back a real, current, wrong block, and only `status` shows it.
+    #[test]
+    fn an_answer_that_is_not_l1_accepted_is_rejected() {
+        assert!(l1_answer_rejection(
+            &answer(14_262_623, Some("ACCEPTED_ON_L2")),
+            14_262_623,
+            Some(14_258_250),
+        )
+        .is_some());
+        assert!(l1_answer_rejection(
+            &answer(14_262_623, Some("PRE_CONFIRMED")),
+            14_262_623,
+            None
+        )
+        .is_some());
+    }
+
+    /// A mirror with no recorded height has nothing to compare against, so the
+    /// only bounds left are the tier and `latest`. A plausible answer is still
+    /// accepted — the guard must not deadlock a first cycle.
+    #[test]
+    fn a_first_answer_is_accepted_on_its_own_terms() {
+        assert_eq!(
+            l1_answer_rejection(
+                &answer(14_258_250, Some(STATUS_ACCEPTED_ON_L1)),
+                14_262_623,
+                None
+            ),
+            None
+        );
+        // Below genesis is NOT a rejection reason on its own: a fresh mirror
+        // holds no evidence about L1 that would rank one height over another,
+        // and inventing one here would be the same class of claim as #21.
+        assert_eq!(
+            l1_answer_rejection(&answer(1, Some(STATUS_ACCEPTED_ON_L1)), 14_262_623, None),
+            None
+        );
+    }
+
+    /// Normal operation: finality advances, and standing still is normal too —
+    /// `l1_accepted` moves once every few hours while the poll runs every cycle.
+    #[test]
+    fn an_advancing_or_unchanged_height_is_accepted() {
+        for n in [14_258_250, 14_258_400] {
+            assert_eq!(
+                l1_answer_rejection(
+                    &answer(n, Some(STATUS_ACCEPTED_ON_L1)),
+                    14_262_623,
+                    Some(14_258_250)
+                ),
+                None,
+                "height {n}"
+            );
+        }
+    }
+
+    /// An endpoint that sends no `status` is not evidence of a wrong tier, so
+    /// the range checks carry the whole decision on their own.
+    #[test]
+    fn a_missing_status_leaves_the_range_checks_deciding() {
+        assert_eq!(
+            l1_answer_rejection(&answer(14_258_400, None), 14_262_623, Some(14_258_250)),
+            None
+        );
+        assert!(
+            l1_answer_rejection(&answer(7_457_223, None), 14_262_623, Some(14_258_250)).is_some()
+        );
+    }
 }

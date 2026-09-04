@@ -654,6 +654,43 @@ mod tests {
             .map(str::to_owned)
     }
 
+    /// #21: the container answers `/health` from the moment it binds, which is
+    /// before the first ingest cycle has produced anything. Every height it
+    /// publishes comes from `meta`, and `meta.l1_accepted_number` is written by
+    /// exactly one place — `Ingestor::run_cycle` — so a mirror that has not
+    /// completed a cycle must publish NO L1-accepted height at all. `null` and
+    /// the `0` gauge are the two shapes of "not produced yet"; a block number
+    /// here is a claim the server has no basis for.
+    #[tokio::test]
+    async fn a_mirror_that_has_run_no_cycle_publishes_no_l1_accepted_height() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = serve(dir.path(), false).await;
+
+        let r = reqwest::get(format!("{base}/health")).await.unwrap();
+        assert_eq!(r.status(), 503, "no head yet is UNHEALTHY");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["status"], "UNHEALTHY", "{body}");
+        assert!(body["head"].is_null(), "{body}");
+        assert!(
+            body["l1_accepted"].is_null(),
+            "a fresh mirror must publish no L1-accepted height, got {}",
+            body["l1_accepted"]
+        );
+
+        // The gauge cannot carry `null`, so it carries the unset value; what it
+        // must never carry is a height nothing measured.
+        let text = reqwest::get(format!("{base}/metrics"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            text.contains("strk20_l1_accepted_block 0\n"),
+            "expected the unset gauge, got:\n{text}"
+        );
+    }
+
     #[tokio::test]
     async fn cors_covers_the_public_surface_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
