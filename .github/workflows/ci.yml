@@ -99,9 +99,10 @@ jobs:
 
   # ---------------------------------------------------------------- invariants
   #
-  # Five mechanical checks (docs/ops/invariants.md): no user-derived value in a
+  # Six mechanical checks (docs/ops/invariants.md): no user-derived value in a
   # feed URL, Block B free of host APIs, no silent truncation in ingest, no
-  # secrets in tracked files, upstream consumed unmodified.
+  # secrets in tracked files, upstream consumed unmodified, compose RPC defaults
+  # equal config.rs.
   #
   # Stdlib Python, no toolchain, ~2 s. It is a required job rather than an
   # advisory one because an advisory invariant check is a comment.

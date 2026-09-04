@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The five invariants a reviewer keeps re-checking by hand. `scripts/check-invariants.py`
+"""The six invariants a reviewer keeps re-checking by hand. `scripts/check-invariants.py`
 
 Python rather than bash for three reasons that each cost real effort in shell:
 check 2 must ignore matches inside Rust comments (line-based `grep -v '//'` cannot
@@ -326,11 +326,63 @@ def check_fork():
         len(touched), ", ".join(touched) or "none", src_lines), bad
 
 
+# --- 6. compose RPC defaults equal the code profile -----------------------
+# `docker-compose.yml` restates the endpoints that `crates/indexerd/src/config.rs`
+# already owns, and drift between them is silent: the container starts, ingest
+# looks healthy, and only anchors/verify-root/snapshots go missing (issue #18,
+# fixed by hand in 61a790d). Compose has no way to read a Rust const, so the
+# equality is asserted here instead.
+RPC_PAIRS = [("MAINNET_RPC_URL", "MAINNET_RPC_PRIMARY"),
+             ("MAINNET_RPC_FALLBACK", "MAINNET_RPC_FALLBACK"),
+             ("SEPOLIA_RPC_URL", "SEPOLIA_RPC_PRIMARY"),
+             ("SEPOLIA_RPC_FALLBACK", "SEPOLIA_RPC_FALLBACK")]
+
+
+def check_compose_rpc():
+    compose, cfg = R("docker-compose.yml"), R("crates/indexerd/src/config.rs")
+    yml, rs = read(compose), read(cfg)
+    if yml is None or rs is None:
+        return "FAIL", "cannot read %s" % rel(compose if yml is None else cfg), [
+            "%s is missing — the compose/config equality cannot be checked"
+            % rel(compose if yml is None else cfg)]
+    # YAML comments only: a `#` opens one at line start or after whitespace, and
+    # no endpoint literal here contains one. Rust comments are blanked, string
+    # literals kept, so a const named inside a doc comment is not a definition.
+    yml = re.sub(r"(?m)(^|\s)#.*$", r"\1", yml)
+    rs = blank(rs, strings=False)
+    bad, checked = [], 0
+    for var, const in RPC_PAIRS:
+        c = re.search(r'\bconst\s+%s\s*:\s*&\'?\w*\s*str\s*=\s*"([^"]*)"' % const, rs)
+        if not c:
+            bad.append("%s  no `const %s: &str` — config.rs no longer names the endpoint "
+                       "docker-compose.yml copies" % (rel(cfg), const))
+            continue
+        uses = re.findall(r"\$\{%s(:-[^}]*)?\}" % var, yml)
+        if not uses:
+            bad.append("%s  ${%s} is gone; config.rs still has %s = %r, so the compose "
+                       "default is now unpinned" % (rel(compose), var, const, c.group(1)))
+            continue
+        for suffix in uses:
+            checked += 1
+            if not suffix:
+                bad.append("%s  ${%s} has no `:-default`; a host without a .env would get an "
+                           "empty endpoint instead of %s = %r"
+                           % (rel(compose), var, const, c.group(1)))
+            elif suffix[2:] != c.group(1):
+                bad.append("%s  ${%s:-%s} != %s::%s = %s — a host without a .env would use the "
+                           "compose value, and drift here is silent (ingest stays healthy, "
+                           "anchors stop)" % (rel(compose), var, suffix[2:],
+                                              rel(cfg), const, c.group(1)))
+    return ("FAIL" if bad else "PASS"), \
+        "%d compose defaults vs %d config.rs constants" % (checked, len(RPC_PAIRS)), bad
+
+
 CHECKS = [("1. feed URLs carry nothing user-derived", check_feed_urls),
           ("2. Block B stays wasm-portable", check_wasm_seam),
           ("3. no silent truncation in ingest/scan", check_truncation),
           ("4. no secrets in tracked files", check_secrets),
-          ("5. upstream consumed unmodified", check_fork)]
+          ("5. upstream consumed unmodified", check_fork),
+          ("6. compose RPC defaults equal config.rs", check_compose_rpc)]
 
 
 def main():
