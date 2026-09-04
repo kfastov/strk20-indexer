@@ -31,6 +31,7 @@ import {
   armOp,
   commit,
   emptyCard,
+  endToEndMetric,
   initialState,
   logInvariantsHold,
   pendingLine,
@@ -434,7 +435,6 @@ function checkArmedOp(notes: readonly Note[], trigger: string): void {
   if (deadlineTimer) clearTimeout(deadlineTimer);
   if (!line || line.status !== 'pending') return;
   const elapsed = performance.now() - op.armedAt;
-  const endToEnd = Date.now() - hit.blockTimestamp * 1000;
   commit(state, line, {
     text: `${op.kind} · note ${short(hit.noteId)} ${op.target.kind === 'nullifier' ? 'spent' : 'found'} · ${trigger}`,
     status: 'ok',
@@ -444,7 +444,9 @@ function checkArmedOp(notes: readonly Note[], trigger: string): void {
     elapsedMs: elapsed,
     metrics: [
       { label: 'passes', value: String(op.pokes), provenance: 'measured' },
-      { label: 'end-to-end', value: `${(endToEnd / 1000).toFixed(0)} s`, provenance: 'measured' },
+      // REPLAY's block timestamps are generated, not captured (the lane's own
+      // `synthetic` chip says so), so its clock is not the chain's.
+      endToEndMetric(hit.blockTimestamp, Date.now(), state.lane !== 'replay'),
     ],
   });
 }
