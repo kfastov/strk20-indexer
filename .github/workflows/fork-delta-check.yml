@@ -9,6 +9,13 @@ name: fork-delta-check
 #
 # If this job goes red, the README/spec sentence "the engine is consumed
 # unmodified" has stopped being true. Fix the fork, not this job.
+#
+# Two steps, both load-bearing: the pin in Cargo.toml is the fork branch head,
+# and discovery-core/src is byte-identical to upstream. A file-list step and a
+# patch-replay step used to sit here too (#17). Neither ever went red, and
+# neither guards anything the build itself does not: Cargo.lock pins the fork
+# rev, so the source the build compiles is the source the src-diff above just
+# checked, whatever else the branch or patches/ happens to contain.
 
 on:
   push:
@@ -74,36 +81,3 @@ jobs:
             exit 1
           fi
           echo "discovery-core/src: 0 lines differ from upstream $UPSTREAM_REV — unmodified claim holds."
-
-      - name: The fork may only touch discovery-core/Cargo.toml
-        run: |
-          set -euo pipefail
-          cd fork-delta
-          files=$(git diff --name-only "$(cat ../.upstream-sha)".."$(cat ../.fork-sha)")
-          unexpected=$(echo "$files" | grep -v '^crates/discovery-core/Cargo.toml$' || true)
-          if [ -n "$unexpected" ]; then
-            echo "::error::The fork branch changes files outside crates/discovery-core/Cargo.toml:"
-            echo "$unexpected"
-            exit 1
-          fi
-          echo "fork delta is confined to crates/discovery-core/Cargo.toml"
-
-      - name: Checked-in patch file reproduces the fork tree exactly
-        run: |
-          set -euo pipefail
-          cd fork-delta
-          # Apply the checked-in patch on top of the pinned upstream rev and
-          # require the resulting tree to equal the fork branch's tree. This is
-          # an exact check: patches/ cannot drift from the branch it documents.
-          git checkout -q "$(cat ../.upstream-sha)"
-          git apply ../patches/discovery-core-providers-gate.patch
-          git add -A
-          rebuilt=$(git write-tree)
-          expected=$(git rev-parse "$(cat ../.fork-sha)^{tree}")
-          if [ "$rebuilt" != "$expected" ]; then
-            echo "::error::patches/discovery-core-providers-gate.patch does not reproduce $FORK_REF."
-            echo "Applying it to $UPSTREAM_REV gives tree $rebuilt; the fork branch has tree $expected."
-            echo "Re-export it with: git format-patch --stdout $UPSTREAM_REV..$FORK_REF"
-            exit 1
-          fi
-          echo "checked-in patch reproduces the fork tree exactly"

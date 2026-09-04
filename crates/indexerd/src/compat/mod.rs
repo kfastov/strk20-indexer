@@ -316,3 +316,63 @@ async fn history(
         .into_response(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::BlockRow;
+
+    /// The 409 gate, moved down from the acceptance leg it used to ride on
+    /// (#17). The claim is narrow and so is the fixture: a hash the reorg
+    /// rollback tombstoned in `seen_heads` must produce HTTP 409 with code
+    /// BLOCK_REORGED, while a hash still in `blocks` must pass. The
+    /// unknown-hash case is a THIRD outcome and belongs here too — this
+    /// instance cannot testify against a hash it never saw, so it must NOT
+    /// 409; that false 409 is what broke every client after a DB rebuild.
+    #[tokio::test]
+    async fn reorged_last_known_block_409s() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compat.db");
+        let canonical = Felt::from(0xc0ffee_u64);
+        let orphan = Felt::from(0xdead_u64);
+        let never_seen = Felt::from(0x1234_u64);
+        {
+            let mut db = Db::open(&path).unwrap();
+            for (number, hash) in [(44_u64, canonical), (45, orphan)] {
+                db.insert_block(&BlockRow {
+                    number,
+                    hash,
+                    parent_hash: Felt::ZERO,
+                    timestamp: 1000 + number,
+                    l1_accepted: false,
+                })
+                .unwrap();
+            }
+            // the reorg: everything above 44 is forgotten and tombstoned
+            db.rollback_above(44).unwrap();
+        }
+        let state = CompatState {
+            backend: DbBackend::new(path.clone(), Felt::ONE),
+            db: Arc::new(Mutex::new(Db::open(&path).unwrap())),
+            pool: Felt::ONE,
+        };
+
+        assert!(check_last_known(&state, None).is_ok(), "no hash, no gate");
+        assert!(
+            check_last_known(&state, Some(canonical)).is_ok(),
+            "a block still in `blocks` is canonical"
+        );
+        assert!(
+            check_last_known(&state, Some(never_seen)).is_ok(),
+            "an unseen hash must not 409: this instance cannot testify against it"
+        );
+
+        let resp = check_last_known(&state, Some(orphan)).expect_err("orphan must be rejected");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], error_codes::BLOCK_REORGED);
+    }
+}

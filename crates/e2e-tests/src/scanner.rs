@@ -3,8 +3,8 @@
 //! minimal hex, 64-padded hex (with/without 0x, both cases), decimal ASCII,
 //! raw 32-byte BE, raw 32-byte LE, and base64 of the BE bytes.
 //!
-//! The detector's own sensitivity is proven by the compat leg: the same
-//! scanner MUST find the viewing key in a compat-mode request capture.
+//! The detector's own sensitivity is proven inside leg d itself: the same
+//! scanner MUST find the viewing key in a compat-mode request body.
 
 use starknet_types_core::felt::Felt;
 

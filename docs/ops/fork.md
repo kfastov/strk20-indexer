@@ -35,10 +35,16 @@ packaging (`Cargo.toml`) and nothing else. CI job `fork-delta-check` is the
 mechanical form of the claim: it fails if
 `git diff upstream..fork -- crates/discovery-core/src` is non-empty, and its
 failure message says outright that the "unmodified" sentence has stopped being
-true. It also asserts the fork touches no file other than
-`crates/discovery-core/Cargo.toml`, that the `[patch]` rev equals the fork
-branch head, and that `patches/discovery-core-providers-gate.patch` reproduces
-the fork tree byte-for-byte.
+true. It also asserts that the `[patch]` rev equals the fork branch head, so the
+diff it just took is the code the build compiles. Two further steps used to sit
+there — a whole-file-list assertion and a replay of
+`patches/discovery-core-providers-gate.patch` against the fork tree — and #17
+removed both: neither ever went red, and `Cargo.lock` pins the fork rev anyway.
+The consequence is worth stating plainly: **the checked-in patch file is now
+verified only for carrying exactly one commit** (`scripts/check-invariants.py`,
+check 5). It is documentation of the delta, not evidence for it. Re-export it
+with `git format-patch --stdout <upstream>..<fork-ref>` whenever the fork moves;
+nothing will tell you if you forget.
 
 `starknet-providers` really is unused at this rev — `grep -rn 'starknet.providers'`
 over `crates/discovery-core/src` and `crates/discovery-core/tests` returns

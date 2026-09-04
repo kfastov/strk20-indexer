@@ -2,16 +2,17 @@
 //! Topology: strk20-sync → recording proxy → strk20 → fixture RPC.
 //!
 //! Legs (run sequentially over one evolving fixture chain):
-//!   a. pipeline liveness           g. reorg with cursor rewind
-//!   b. keyless discovery equality  h. compat + 409 + detector self-test
+//!   a. pipeline liveness (in b)    g. reorg with cursor rewind
+//!   b. keyless discovery equality  h. compat smoke
 //!   c. key-sensitivity control     i. upgrade/degraded mode
-//!   d. mechanical no-key proof     j. mirror determinism
+//!   d. no-key proof + detector     j. mirror determinism
 //!   e. tamper detection            k. spent-state
 //!   f. O(delta) resume + server-side scan
 
 use discovery_core::privacy_pool::types::SecretFelt;
 use e2e_tests::bins::{bin, ensure_built, pick_free_port, run_capture, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{FixtureChain, FxEvent};
+use e2e_tests::compat_body;
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::oracle;
 use e2e_tests::proxy::RecordingProxy;
@@ -257,12 +258,15 @@ async fn acceptance() {
         pool_hex: strk20_feed::felt_hex(&pool),
     };
 
-    // ---------------------------------------------------------- leg a
-    let indexer = ctx.spawn_indexer("indexer", &[]);
-    ctx.wait_health(1).await; // epochs 0 [0,15] and 1 [16,31] cut
-    println!("leg a OK: pipeline live, epoch 1 cut");
-
     // ---------------------------------------------------------- leg b
+    // Preamble (was leg a): bring the pipeline up. The wait is for the EXACT
+    // epoch, not merely for /health to answer — epochs 0 [0,15] and 1 [16,31]
+    // must both be cut before the oracle comparison below, or leg b compares
+    // against a half-published feed. wait_health(1) is what pins that, and it
+    // is the whole of what the old leg a asserted.
+    let indexer = ctx.spawn_indexer("indexer", &[]);
+    ctx.wait_health(1).await;
+
     // Oracle O1 over the same 48 slots + committed write blocks.
     let o1_backend = {
         let chain = ctx_chain(&rpc);
@@ -405,7 +409,20 @@ async fn acceptance() {
     // address-blindness: alice's, bob's and unused's request sets identical
     assert_eq!(url_multisets[0], url_multisets[1]);
     assert_eq!(url_multisets[0], url_multisets[2]);
-    println!("leg d OK: no key/address/channel-key bytes on the wire; request sets address-blind");
+
+    // Detector self-test (was in leg h): the emptiness asserted just above is
+    // only worth something if the scanner can see a key at all. These are the
+    // exact bytes leg h POSTs to compat — a body that DOES carry bob's key —
+    // and the same scanner must find it. Keep this next to the negative it
+    // qualifies, not four legs away behind a server restart. The body comes
+    // from the shared builder so leg h cannot drift from what is scanned here.
+    let compat_bytes = compat_body::incoming_state_body(&ctx.pool_hex, bob, "0xb0b");
+    let self_test = scanner::scan(&compat_bytes, &[(bob_key, "bob-key".into())]);
+    assert!(
+        !self_test.is_empty(),
+        "detector self-test failed: scanner blind to the key in a compat body"
+    );
+    println!("leg d OK: no key/address/channel-key bytes on the wire; request sets address-blind; detector non-vacuous");
 
     // ---------------------------------------------------------- leg e
     let epoch0 = ctx.dir.path().join("feed/epochs/00000000.strk20e.zst");
@@ -481,10 +498,6 @@ async fn acceptance() {
             .any(|n| n["block_number"].as_u64() == Some(47) && n["amount"] == "777"),
         "pre-fork tail note must be discovered: {pre_fork_notes:?}"
     );
-    let pre_fork_head_hash = {
-        let chain = ctx_chain(&rpc);
-        chain.block_hash(47)
-    };
 
     // Fork blocks >= 45: N1 moves to 45', a new N2 appears at 46', head 47'.
     let n2 = oracle::mint_note(
@@ -548,17 +561,23 @@ async fn acceptance() {
     println!("leg g OK: reorg detected, cursor rewound to L1 checkpoint, epochs untouched");
 
     // ---------------------------------------------------------- leg h (compat)
+    // Smoke only. What needs a live server here is that `--enable-compat`
+    // actually turns the keyed route on and labels it; the response payload
+    // is asserted here only as "non-empty". The wire contract itself has a
+    // cheaper carrier that does hold it: conformance.rs
+    // `compat_incoming_wire_equals_oracle` builds its request with the same
+    // `compat_body` builder, POSTs it at the same compat router bound
+    // in-process, and decodes the reply into `wire::IncomingSyncResponse` —
+    // notes == the O1 oracle on every page, `block_ref` pinned, and the
+    // served cursor JSON parsed back into the client's `DiscoveryCursor`.
+    // The 409 gate is the compat unit test `reorged_last_known_block_409s`.
+    // The key in `compat_bytes` is bob's REAL one on purpose: leg f(iii) below
+    // greps the server's db/feed/logs for it, and a fake key makes that
+    // vacuous. This process must also stay alive for leg i's compat 503.
     drop(indexer);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let indexer = ctx.spawn_indexer("indexer-compat", &["--enable-compat"]);
     ctx.wait_head(47).await;
-
-    let compat_body = serde_json::json!({
-        "contract_address": ctx.pool_hex,
-        "viewing_key": "0xb0b",
-        "recipient_address": strk20_feed::felt_hex(&bob),
-    });
-    let compat_bytes = serde_json::to_vec(&compat_body).unwrap();
     let resp = ctx
         .http
         .post(format!("{}/v1/sync/incoming_state", ctx.indexer_url()))
@@ -573,86 +592,11 @@ async fn acceptance() {
     );
     assert!(resp.status().is_success(), "compat sync failed: {}", resp.status());
     let compat: Value = resp.json().await.unwrap();
-    // drive pagination to completion like the SDK would
-    let mut compat_notes: Vec<Value> = compat["notes"].as_array().cloned().unwrap_or_default();
-    let mut cursor = compat["cursor"].clone();
-    for _ in 0..50 {
-        let complete = cursor["channel_discovery_complete"] == true;
-        let _ = complete;
-        let body = serde_json::json!({
-            "contract_address": ctx.pool_hex,
-            "viewing_key": "0xb0b",
-            "recipient_address": strk20_feed::felt_hex(&bob),
-            "cursor": cursor,
-        });
-        let resp = ctx
-            .http
-            .post(format!("{}/v1/sync/incoming_state", ctx.indexer_url()))
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-        let page: Value = resp.json().await.unwrap();
-        compat_notes.extend(page["notes"].as_array().cloned().unwrap_or_default());
-        let new_cursor = page["cursor"].clone();
-        if new_cursor == cursor {
-            break;
-        }
-        cursor = new_cursor;
-    }
-    // cursor round-trips into the client's persisted type (type identity)
-    let _: discovery_core::discovery::DiscoveryCursor =
-        serde_json::from_value(cursor.clone()).expect("compat cursor round-trips");
-    let mut compat_canonical: Vec<Value> = compat_notes
-        .iter()
-        .map(|n| {
-            serde_json::json!({
-                "sender": n["sender_addr"],
-                "token": n["token"],
-                "index": n["index"],
-                "note_id": n["note_id"],
-                "amount": n["amount"],
-                "block_number": n["block_number"],
-            })
-        })
-        .collect();
-    compat_canonical.sort_by_key(|j| {
-        (
-            j["token"].as_str().unwrap_or("").to_owned(),
-            j["index"].as_u64().unwrap_or(0),
-        )
-    });
-    assert_eq!(
-        compat_canonical,
-        oracle::notes_canonical(&o1_post.notes),
-        "compat notes must equal the oracle"
-    );
-
-    // detector self-test: the same scanner MUST find the key in compat bytes
-    let self_test = scanner::scan(&compat_bytes, &[(bob_key, "bob-key".into())]);
     assert!(
-        !self_test.is_empty(),
-        "detector self-test failed: scanner blind to the key in a compat body"
+        compat["notes"].as_array().is_some_and(|n| !n.is_empty()),
+        "compat must serve a non-empty note set for a keyed request: {compat}"
     );
-
-    // 409 on the reorged-out pre-fork head hash
-    let resp = ctx
-        .http
-        .post(format!("{}/v1/sync/incoming_state", ctx.indexer_url()))
-        .json(&serde_json::json!({
-            "contract_address": ctx.pool_hex,
-            "viewing_key": "0xb0b",
-            "recipient_address": strk20_feed::felt_hex(&bob),
-            "last_known_block": strk20_feed::felt_hex(&pre_fork_head_hash),
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 409, "reorged block_ref must 409");
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "BLOCK_REORGED");
-    println!("leg h OK: compat wire equals oracle, cursor interops, 409 on reorg, detector sees keys");
+    println!("leg h OK: --enable-compat serves keyed notes labeled compat-keyed");
 
     // ---------------------------------------------------- leg f(iii) server scan
     let mut server_side = Vec::new();
@@ -730,7 +674,8 @@ async fn acceptance() {
     let resp = ctx
         .http
         .post(format!("{}/v1/sync/incoming_state", ctx.indexer_url()))
-        .json(&compat_body)
+        .header("content-type", "application/json")
+        .body(compat_bytes.clone())
         .send()
         .await
         .unwrap();
