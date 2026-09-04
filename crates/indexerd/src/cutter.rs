@@ -168,11 +168,25 @@ impl<'a> Cutter<'a> {
         })
     }
 
+    /// `finality_upto` is the L1-accepted height the FILE these lines go into
+    /// asserts in its own header, or `None` for epoch files, whose lines carry
+    /// no `finality` at all (an epoch is cut at an l1-final block, so every
+    /// line in it is final by construction).
+    ///
+    /// Passing the height rather than a "yes, stamp finality" marker is the
+    /// point: one head.ndjson must not say `l1_accepted: N` in its header and
+    /// stamp `"fin":"l1"` on a block above N in its tail. `blocks.status`
+    /// and `meta.l1_accepted_number` are two different writers — the column is
+    /// also set from each block's own header label in `ingest_block` — so the
+    /// two halves can disagree, and the tail is the half that reaches wallets
+    /// per block (consumer/src/apply.rs maps `Finality::L1` into the flag
+    /// `replace_range` persists). The header wins: a line is L1 only if the
+    /// row says so AND the header's height covers it.
     fn blocks_as_lines(
         &self,
         from: u64,
         to: u64,
-        finality_from_status: Option<()>,
+        finality_upto: Option<u64>,
     ) -> Result<Vec<BlockLine>> {
         let rows = self.db.blocks_in_range(from, to)?;
         let mut out = Vec::with_capacity(rows.len());
@@ -198,8 +212,8 @@ impl<'a> Cutter<'a> {
                 diffs,
                 events,
                 replaced_class: self.db.replaced_class_of_block(b.number)?,
-                finality: finality_from_status.map(|_| {
-                    if b.l1_accepted {
+                finality: finality_upto.map(|upto| {
+                    if b.l1_accepted && b.number <= upto {
                         Finality::L1
                     } else {
                         Finality::L2
@@ -1069,7 +1083,7 @@ impl<'a> Cutter<'a> {
             Some((_, _, to)) => to + 1,
             None => self.cfg.epoch_range(self.cfg.first_epoch()).0,
         };
-        let blocks = self.blocks_as_lines(tail_from, head_number, Some(()))?;
+        let blocks = self.blocks_as_lines(tail_from, head_number, Some(l1_accepted))?;
         let footer = footer_for(
             &blocks,
             self.db.class_as_of(head_number)?.unwrap_or(Felt::ZERO),
@@ -1173,6 +1187,76 @@ fn footer_for(blocks: &[BlockLine], class: Felt) -> Footer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::BlockRow;
+
+    /// One head.ndjson must not contradict itself. Its header's `l1_accepted`
+    /// comes from `meta`; each tail line's `fin` comes from `blocks.status`,
+    /// and the two are written by different code — `promote_l1` and the
+    /// finality poll write the first, while `ingest_block` also sets the column
+    /// straight from each block's OWN header label, which no cycle ever
+    /// compared against `meta`. So the column can run ahead, and a reader
+    /// handed `l1_accepted: 102` in the header and `"fin":"l1"` on block 104
+    /// has no way to tell which half to believe. The tail is the half that
+    /// reaches wallets per block (consumer/src/apply.rs turns `Finality::L1`
+    /// into the flag `replace_range` persists), so the header is what caps it.
+    #[test]
+    fn no_head_line_claims_more_finality_than_the_header_it_ships_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = ChainConfig::sepolia();
+        cfg.genesis_block = 100;
+        cfg.epoch_size = 16;
+        let mut db = Db::open(&dir.path().join("t.db")).unwrap();
+        // 100..=104 all carry status=1 — the state a stale `meta` plus honest
+        // per-block labels leaves behind — while meta stops at 102.
+        for n in 100..=104u64 {
+            db.insert_block_data(
+                &BlockRow {
+                    number: n,
+                    hash: Felt::from(n + 0x1000),
+                    parent_hash: Felt::from(n + 0xfff),
+                    timestamp: 1_700_000_000 + n,
+                    l1_accepted: true,
+                },
+                &[],
+                &[],
+                None,
+                n,
+            )
+            .unwrap();
+        }
+        db.meta_set("head_number", "104").unwrap();
+        db.meta_set("head_hash", &felt_hex(&Felt::from(0x1068u64)))
+            .unwrap();
+        db.meta_set("l1_accepted_number", "102").unwrap();
+
+        let rpc = RpcClient::new("http://127.0.0.1:1/".to_owned(), None);
+        let feed_dir = dir.path().join("feed");
+        Cutter {
+            db: &db,
+            rpc: &rpc,
+            cfg: &cfg,
+            feed_dir: feed_dir.clone(),
+        }
+        .regen_head()
+        .unwrap();
+
+        let text = fs::read_to_string(feed_dir.join("head.ndjson")).unwrap();
+        assert!(text.contains("\"l1_accepted\":102"), "{text}");
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("{\"t\":\"blk\",\"b\":") else {
+                continue;
+            };
+            let number: u64 = rest[..rest.find(',').unwrap()].parse().unwrap();
+            let l1 = line.contains("\"fin\":\"l1\"");
+            assert_eq!(
+                l1,
+                number <= 102,
+                "block {number} is stamped {} in a file whose header says \
+                 l1_accepted 102\n{text}",
+                if l1 { "l1" } else { "l2" }
+            );
+        }
+    }
 
     fn mismatch() -> RootMismatch {
         RootMismatch {

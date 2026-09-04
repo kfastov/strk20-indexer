@@ -473,9 +473,21 @@ async fn metrics(State(s): State<AppState>) -> Response {
             .unwrap_or(0);
         let epochs = db.epoch_rows()?.len();
         let degraded = db.meta_get("decode_state")?.as_deref() == Some("degraded");
+        // Finality answers the ingest loop refused (#21). Rejecting is the safe
+        // outcome but not a free one — the recorded height is a one-way ratchet,
+        // so a mirror stuck above what its endpoints will confirm rejects every
+        // honest answer forever. That state is invisible in the two gauges
+        // above; it is exactly this counter climbing while
+        // `strk20_l1_accepted_block` stands still.
+        let l1_rejected: u64 = db
+            .meta_get(crate::ingest::L1_REJECTED_META)?
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0);
         Ok(format!(
             "# TYPE strk20_head_block gauge\nstrk20_head_block {head}\n\
              # TYPE strk20_l1_accepted_block gauge\nstrk20_l1_accepted_block {l1}\n\
+             # TYPE strk20_l1_answer_rejected_total counter\n\
+             strk20_l1_answer_rejected_total {l1_rejected}\n\
              # TYPE strk20_epochs_cut gauge\nstrk20_epochs_cut {epochs}\n\
              # TYPE strk20_decode_degraded gauge\nstrk20_decode_degraded {}\n\
              # TYPE strk20_sse_connections gauge\nstrk20_sse_connections {}\n",
@@ -652,6 +664,53 @@ mod tests {
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned)
+    }
+
+    /// #21: the container answers `/health` from the moment it binds, which is
+    /// before the first ingest cycle has produced anything. Every height it
+    /// publishes comes from `meta`, and `meta.l1_accepted_number` is written by
+    /// exactly one place — `Ingestor::run_cycle` — so a mirror that has not
+    /// completed a cycle must publish NO L1-accepted height at all. `null` and
+    /// the `0` gauge are the two shapes of "not produced yet"; a block number
+    /// here is a claim the server has no basis for.
+    #[tokio::test]
+    async fn a_mirror_that_has_run_no_cycle_publishes_no_l1_accepted_height() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = serve(dir.path(), false).await;
+
+        let r = reqwest::get(format!("{base}/health")).await.unwrap();
+        assert_eq!(r.status(), 503, "no head yet is UNHEALTHY");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["status"], "UNHEALTHY", "{body}");
+        assert!(body["head"].is_null(), "{body}");
+        assert!(
+            body["l1_accepted"].is_null(),
+            "a fresh mirror must publish no L1-accepted height, got {}",
+            body["l1_accepted"]
+        );
+
+        // The gauge cannot carry `null`, so it carries the unset value; what it
+        // must never carry is a height nothing measured.
+        let text = reqwest::get(format!("{base}/metrics"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            text.contains("strk20_l1_accepted_block 0\n"),
+            "expected the unset gauge, got:\n{text}"
+        );
+        // And the counter that makes a mirror stuck ABOVE what its endpoints
+        // will confirm visible: zero here, but its exposition format is a
+        // scrape contract the moment an alert is written against it.
+        assert!(
+            text.contains(
+                "# TYPE strk20_l1_answer_rejected_total counter\n\
+                 strk20_l1_answer_rejected_total 0\n"
+            ),
+            "expected the rejection counter, got:\n{text}"
+        );
     }
 
     #[tokio::test]

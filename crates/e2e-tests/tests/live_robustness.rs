@@ -24,6 +24,10 @@
 //! T18 §12 B1  an exhausted retry budget is UNAVAILABLE, not MISMATCH
 //! T19 §12 B2  a proof whose global_roots.block_hash is not the block's is
 //!             rejected as a hard error and never becomes a root
+//! T25 #21     a refused l1_accepted answer leaves NOTHING behind: not meta,
+//!             not blocks.status, not one byte of head.ndjson
+//! T26 #21     the canonicity walkback does not stop at a row marked final
+//!             above the height the mirror itself recorded as final
 //!
 //! The R legs are the mirror REPAIR path (docs/pre-submission-corrections.md
 //! plan A): a hole below the frontier is found, patched and republished
@@ -2783,5 +2787,226 @@ async fn t24_a_mismatch_while_the_tail_is_forking_is_a_reorg_not_a_hole() {
             .await
             .unwrap(),
         "the height is populated again, but by a different block than the mirror holds"
+    );
+}
+
+// ---------------------------------------------------------------- T25
+
+/// Every block the mirror holds as L1-final, lowest first. The DB column is a
+/// second finality writer alongside `meta.l1_accepted_number`, and the two can
+/// disagree — which is the whole point of reading it separately here.
+fn l1_final_blocks(dir: &Path, to: u64) -> Vec<u64> {
+    let db = Db::open(&dir.join("strk20.db")).expect("open indexer db");
+    // `to` is a real height, not `u64::MAX`: the query binds it as an i64, so
+    // a saturating sentinel becomes -1 and the range answers EMPTY — which a
+    // before/after comparison would then pass for free.
+    db.blocks_in_range(0, to)
+        .expect("read blocks")
+        .into_iter()
+        .filter(|b| b.l1_accepted)
+        .map(|b| b.number)
+        .collect()
+}
+
+/// #21 at the CYCLE level, which is where the defect lived: the guard on the
+/// finality answer is a pure function, and a unit test on it can only prove the
+/// function decides correctly — never that a rejection leaves the mirror alone.
+/// It did not. `run_cycle` had two finality writers, and only one of them was
+/// behind the guard: the second `promote_l1` at the end of the cycle still took
+/// the RAW answer, so a refused height was held out of `meta` and stamped into
+/// `blocks.status` anyway. `regen_head` then built ONE head.ndjson whose header
+/// said `l1_accepted: 40` (from meta, correctly held back) while its tail lines
+/// up to 46 carried `"finality":"l1"` (from the column) — both halves derived
+/// from the one answer the cycle had just decided not to believe, and the tail
+/// half is the one that reaches wallets per block (consumer/src/apply.rs maps
+/// `Finality::L1` into the flag `replace_range` persists).
+///
+/// The fault is the aggregator behaviour the guard's doc-comment names:
+/// `getBlockWithTxHashes("l1_accepted")` answered with `latest`. The mirror is
+/// built against an honest endpoint FIRST, because "kept what it already had"
+/// is only meaningful once it has something.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t25_a_rejected_l1_answer_leaves_the_mirror_and_the_feed_untouched() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let mut chain = FixtureChain::build(&fixture);
+    // The devnet chain's pool activity all sits at 10/20/30, at or under
+    // l1_accepted = 40, which leaves NOTHING above the finality line for a
+    // wrong answer to promote. Two pool-active blocks in the revocable tail
+    // are what give the defect something to write on, and what put lines in
+    // head.ndjson's tail for it to stamp.
+    for n in [42u64, 45] {
+        assert!(n > chain.l1_accepted && n <= chain.head);
+        chain.active.insert(n, active_block(n));
+    }
+    let rpc = FixtureRpc::new(chain, CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "honest backfill failed\nstdout:\n{so}\nstderr:\n{se}");
+
+    let (chain_head, chain_l1) = {
+        let c = rpc.chain.read().unwrap();
+        (c.head, c.l1_accepted)
+    };
+    assert!(
+        chain_head > chain_l1,
+        "the chain needs revocable blocks above l1_accepted ({chain_l1}..{chain_head}),          or a wrong answer has nothing to falsely promote and this test proves nothing"
+    );
+    let honest = meta(dir.path(), "l1_accepted_number").expect("a cycle ran, so meta holds one");
+    assert_eq!(
+        honest,
+        chain_l1.to_string(),
+        "the honest run must record the chain's own height"
+    );
+    let final_before = l1_final_blocks(dir.path(), chain_head);
+    assert!(
+        !final_before.is_empty(),
+        "the honest run must leave SOME block marked final, or the comparison below \
+         holds between two empty sets"
+    );
+    for n in [42u64, 45] {
+        assert!(
+            !final_before.contains(&n),
+            "block {n} is above l1_accepted {chain_l1} and must not be marked final yet; \
+             final = {final_before:?}"
+        );
+    }
+    let head_ndjson = dir.path().join("feed").join("head.ndjson");
+    let feed_before = std::fs::read(&head_ndjson).expect("head.ndjson after the honest run");
+    let feed_text = String::from_utf8(feed_before.clone()).expect("head.ndjson is utf-8");
+    assert!(
+        feed_text.contains("\"b\":45,"),
+        "the revocable blocks must actually reach head.ndjson's tail, or the byte \
+         comparison below is comparing two empty tails:\n{feed_text}"
+    );
+    assert!(
+        !feed_text.contains("\"fin\":\"l1\""),
+        "nothing in the tail is L1-final on the honest run:\n{feed_text}"
+    );
+
+    // From here the endpoint resolves the `l1_accepted` tag as `latest`: a
+    // real, current block, labelled ACCEPTED_ON_L2 because that is what it is.
+    rpc.set_l1_tag_as_latest(true);
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(
+        ok,
+        "the cycle must survive a wrong answer\nstdout:\n{so}\nstderr:\n{se}"
+    );
+
+    // Positive witness first: without it every assertion below passes for the
+    // uninteresting reason that the fault never fired.
+    let rejected: u64 = meta(dir.path(), "l1_answer_rejected_total")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0);
+    assert!(
+        rejected >= 1,
+        "the cycle must actually have met the wrong answer and refused it;          counter = {rejected}\nstderr:\n{se}"
+    );
+
+    assert_eq!(
+        meta(dir.path(), "l1_accepted_number").as_deref(),
+        Some(honest.as_str()),
+        "meta must still carry the last height a cycle produced"
+    );
+    assert_eq!(
+        l1_final_blocks(dir.path(), chain_head),
+        final_before,
+        "blocks.status is the second finality writer: promoting it from the refused          answer marks blocks {}..{} irreversible on the strength of an answer the          cycle rejected",
+        chain_l1 + 1,
+        chain_head
+    );
+    assert_eq!(
+        std::fs::read(&head_ndjson).expect("head.ndjson after the wrong answer"),
+        feed_before,
+        "head.ndjson is regenerated every cycle and is what wallets read: not one byte          of it may move on an answer the cycle refused, header or tail"
+    );
+}
+
+// ---------------------------------------------------------------- T26
+
+/// The consequence of a falsely-final row that nothing reports: it ends the
+/// canonicity walkback ABOVE the true fork point.
+///
+/// `detect_reorg` walks stored blocks downward and stops at the first one whose
+/// `blocks.status` says L1-final, without asking the chain, on the ground that
+/// a final block cannot have been reorged. That is only sound while the column
+/// means what it says. A row marked final above the height the mirror itself
+/// recorded (`meta.l1_accepted_number`) makes the walk return an ancestor above
+/// the fork, `rollback_above` then deletes nothing that matters, and the blocks
+/// from the abandoned branch stay in the mirror — with no error anywhere. The
+/// divergence surfaces hours later as a verify-root MISMATCH that latches
+/// publishing, pointing at a block rather than at the promotion that stranded
+/// it.
+///
+/// The precondition is built with `promote_l1` directly, which is what makes
+/// this a test of the walkback rather than of the finality poll: it is exactly
+/// the state the unguarded second `promote_l1` used to leave behind (T25), and
+/// the state a per-block `ACCEPTED_ON_L1` label from an aggregator still
+/// produces, since `ingest_block` sets the column from each block's own header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t26_the_walkback_does_not_stop_at_a_row_above_the_recorded_final_height() {
+    ensure_built();
+    let fixture = load_devnet_fixture();
+    let pool_hex = felt_hex(&fixture.constants.contract_address);
+    let mut chain = FixtureChain::build(&fixture);
+    for n in [42u64, 45] {
+        chain.active.insert(n, active_block(n));
+    }
+    let rpc = FixtureRpc::new(chain, CHAIN_ID);
+    let addr = rpc.serve().await;
+    let url = format!("http://{addr}/");
+    let dir = tempfile::tempdir().unwrap();
+
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "honest backfill failed\nstdout:\n{so}\nstderr:\n{se}");
+    let (chain_head, chain_l1) = {
+        let c = rpc.chain.read().unwrap();
+        (c.head, c.l1_accepted)
+    };
+    assert_eq!(
+        meta(dir.path(), "l1_accepted_number").as_deref(),
+        Some(chain_l1.to_string().as_str())
+    );
+
+    // The precondition: blocks 42 and 45 marked final, `meta` untouched at 40.
+    {
+        let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+        db.promote_l1(chain_head).unwrap();
+        assert_eq!(
+            l1_final_blocks(dir.path(), chain_head),
+            vec![10, 20, 30, 42, 45],
+            "the setup must actually mark the revocable blocks final"
+        );
+    }
+    assert_eq!(
+        meta(dir.path(), "l1_accepted_number").as_deref(),
+        Some(chain_l1.to_string().as_str()),
+        "and must leave the recorded height alone, or there is no disagreement to test"
+    );
+
+    // A reorg strictly below the falsely-final block 45, and below 42 too.
+    rpc.chain.write().unwrap().fork_tail(42);
+
+    let (so, se, ok) = backfill(dir.path(), &url, &url, &pool_hex);
+    assert!(ok, "the reorg cycle failed\nstdout:\n{so}\nstderr:\n{se}");
+
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let survivors: Vec<u64> = db
+        .blocks_in_range(42, chain_head)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.number)
+        .collect();
+    assert!(
+        survivors.is_empty(),
+        "blocks {survivors:?} are from the abandoned branch and no longer exist on \
+         this chain; the walkback stopped at a row whose finality the mirror's own \
+         meta ({chain_l1}) does not cover, so the rollback never reached them\
+         \nstderr:\n{se}"
     );
 }
