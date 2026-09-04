@@ -10,7 +10,7 @@ One line per check with `PASS` / `WARN` / `FAIL` and a count, then details only 
 what is not clean. **Exit code is 1 if any check FAILs**; a `WARN` never fails the
 run — it is a shortlist for a human to eyeball, not a verdict.
 
-It exists so a reviewer stops re-deriving five answers by hand every time. It is a
+It exists so a reviewer stops re-deriving six answers by hand every time. It is a
 grep with a memory, not a proof: passing means none of the *known* ways to break
 these invariants are present, not that the invariant holds.
 
@@ -144,3 +144,18 @@ patch) being re-exported — `git format-patch --stdout <upstream>..<fork-ref>`.
 under `discovery-core/src` mean the "consumed unmodified" sentence in the README and
 spec has become false: revert the source change on the fork, or stop making the
 claim. See `docs/ops/fork.md`.
+
+## 6. Compose RPC defaults equal the code profile
+
+**Protects** a host started without a `.env`: `docker-compose.yml` restates endpoints that
+`crates/indexerd/src/config.rs` owns, and drift is silent — ingest stays healthy while every
+anchor, `verify-root` and snapshot goes missing (issue #18; the Sepolia half of it was fixed by
+hand in 61a790d).
+
+**How.** The `${MAINNET_RPC_URL:-…}`, `${MAINNET_RPC_FALLBACK:-…}`, `${SEPOLIA_RPC_URL:-…}` and
+`${SEPOLIA_RPC_FALLBACK:-…}` defaults must equal `MAINNET_RPC_PRIMARY`, `MAINNET_RPC_FALLBACK`,
+`SEPOLIA_RPC_PRIMARY`, `SEPOLIA_RPC_FALLBACK`. A dropped `:-default` and a deleted variable fail
+too — both leave the compose endpoint unpinned from the profile.
+
+**When it fires.** Change the const, then copy it into compose (or the reverse); the failure
+prints both values. Never delete the compose default to silence it.
