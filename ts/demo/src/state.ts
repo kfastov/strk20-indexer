@@ -289,3 +289,38 @@ export function resolveOp(op: OpState, notes: readonly Note[]): Note | null {
   }
   return notes.find((n) => n.spent && !op.baselineSpent.has(n.noteId)) ?? null;
 }
+
+// ------------------------------------------------------------ the chain clock
+
+/**
+ * The chain-side clock of a resolved operation: wall clock now, minus the block
+ * timestamp of the note that resolved it. It is the second of the two latency
+ * numbers a resolved line carries, and the only one this page does not control;
+ * `elapsedMs` is the other.
+ *
+ * Neither engine the demo runs supplies a usable timestamp today, and neither
+ * failure is visible in the subtraction:
+ *
+ *   - `engine-wasm.ts` sets `blockTimestamp: 0` on every note, because the
+ *     second-pass ABI does not carry one. Subtracting it prints the whole Unix
+ *     epoch in seconds under a `measured` badge.
+ *   - the REPLAY fixture derives `ts` from the block number at generation time
+ *     (`scripts/gen-replay-feed.mjs`: `1756000000 + (b - genesis) * 3`), so the
+ *     subtraction measures the FIXTURE'S AGE rather than any latency.
+ *
+ * `chainClock` is therefore the caller's statement that this lane's timestamps
+ * came from a chain and not from a generator; the rest is a plausibility check.
+ * A slot failing any of them says `unavailable` and prints no number, which is
+ * the rule `counted()` in main.ts already follows.
+ */
+export function endToEndMetric(
+  blockTimestampSec: number,
+  nowMs: number,
+  chainClock: boolean,
+): Metric {
+  const deltaMs = nowMs - blockTimestampSec * 1000;
+  if (!chainClock || blockTimestampSec <= 0 || deltaMs < 0) {
+    return { label: 'end-to-end', value: 'unavailable', provenance: 'unavailable' };
+  }
+  return { label: 'end-to-end', value: `${Math.round(deltaMs / 1000)} s`, provenance: 'measured' };
+}
