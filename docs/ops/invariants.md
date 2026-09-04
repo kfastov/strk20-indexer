@@ -155,7 +155,10 @@ hand in 61a790d).
 **How.** The `${MAINNET_RPC_URL:-…}`, `${MAINNET_RPC_FALLBACK:-…}`, `${SEPOLIA_RPC_URL:-…}` and
 `${SEPOLIA_RPC_FALLBACK:-…}` defaults must equal `MAINNET_RPC_PRIMARY`, `MAINNET_RPC_FALLBACK`,
 `SEPOLIA_RPC_PRIMARY`, `SEPOLIA_RPC_FALLBACK`. A dropped `:-default` and a deleted variable fail
-too — both leave the compose endpoint unpinned from the profile.
+too — both leave the compose endpoint unpinned from the profile. The four pairs are named in
+the script, not discovered: a service that introduces a *different* variable is invisible, and
+nothing checks which service a default sits in — a cross-service swap fails only because the
+network-prefixed variable it displaces goes missing.
 
 **When it fires.** Change the const, then copy it into compose (or the reverse); the failure
 prints both values. Never delete the compose default to silence it.
