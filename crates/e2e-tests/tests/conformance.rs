@@ -251,10 +251,10 @@ mod seam {
     const CHAIN_ID: &str = "SN_SEPOLIA";
     const EPOCH_SIZE: u64 = 100;
     const FIXTURE_BLOCK: u64 = 46;
-    const EPOCH_END: u64 = EPOCH_SIZE - 1;
-    const SPEND_BLOCK: u64 = 100;
+    pub(super) const EPOCH_END: u64 = EPOCH_SIZE - 1;
+    pub(super) const SPEND_BLOCK: u64 = 100;
 
-    fn blk(number: u64, diffs: Vec<(Felt, Felt)>, finality: Option<Finality>) -> BlockLine {
+    pub(super) fn blk(number: u64, diffs: Vec<(Felt, Felt)>, finality: Option<Finality>) -> BlockLine {
         let mut diffs = diffs;
         diffs.sort_by_key(|(k, _)| k.to_bytes_be());
         BlockLine {
@@ -269,7 +269,7 @@ mod seam {
         }
     }
 
-    fn footer_of(blocks: &[BlockLine]) -> Footer {
+    pub(super) fn footer_of(blocks: &[BlockLine]) -> Footer {
         Footer {
             blocks: blocks.len() as u64,
             diffs: blocks.iter().map(|b| b.diffs.len() as u64).sum(),
@@ -279,7 +279,7 @@ mod seam {
     }
 
     /// Write `head.ndjson` for a tail of `blocks` above the epoch floor.
-    fn write_head(feed: &Path, blocks: Vec<BlockLine>, head: u64, l1_accepted: u64) {
+    pub(super) fn write_head(feed: &Path, blocks: Vec<BlockLine>, head: u64, l1_accepted: u64) {
         let footer = footer_of(&blocks);
         let payload = codec::encode_head(&Head {
             header: HeadHeader {
@@ -296,7 +296,7 @@ mod seam {
 
     /// A one-epoch feed carrying the devnet fixture's slots at block 46.
     /// Returns the feed directory.
-    fn build_feed(dir: &Path, pool: Felt, slots: &[(Felt, Felt)]) -> PathBuf {
+    pub(super) fn build_feed(dir: &Path, pool: Felt, slots: &[(Felt, Felt)]) -> PathBuf {
         let feed = dir.join("feed");
         std::fs::create_dir_all(feed.join("epochs")).unwrap();
 
@@ -487,5 +487,282 @@ mod seam {
             mirror_root(&mem, SPEND_BLOCK),
             "the two mirrors must still agree after the tail apply"
         );
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// 5. History-independence: a cold start == a client that watched the spend
+// ---------------------------------------------------------------------------
+//
+// Upstream's note scan is nullifier-first: `process_note_batch`
+// (discovery/notes.rs) reads every index's nullifier and `continue`s past the
+// spent ones before it ever fetches the note slot. So `sync_incoming_state`
+// answers "the notes that are unspent at this bound", not "the notes", and
+// registering only what it returns made the report a function of when the
+// client started — a client whose registry predates the spend keeps the row
+// and reports `spent: true`, a cold start over the identical bytes reported
+// nothing at all. Balances agreed; the report shape did not.
+//
+// The seam leg above cannot catch this. Its spend lands in the head TAIL, and
+// `sync_once`'s checkpoint pass is bound to the epoch floor BELOW the tail, so
+// even a fresh client sees the note unspent there and registers it. The bug
+// needs a spend that is already inside a cut epoch when the client arrives,
+// which is what this fixture builds: two epochs, the note minted in the first
+// and spent in the second.
+
+mod history_independence {
+    use super::*;
+    use starknet_types_core::felt::Felt;
+    use std::path::Path;
+    use strk20_client::transport::DirTransport;
+    use strk20_consumer::mem::MemStore;
+    use strk20_consumer::store::ConsumerStore;
+    use strk20_consumer::sync::{sync_once, SyncOptions, SyncReport};
+    use strk20_feed::codec::{self, BlockLine, Epoch, EpochHeader, Head, HeadHeader};
+    use strk20_feed::manifest::{Genesis, Manifest, ManifestEpoch, ManifestHead};
+
+    use super::seam::{blk, footer_of};
+
+    const CHAIN_ID: &str = "SN_SEPOLIA";
+    const EPOCH_SIZE: u64 = 100;
+    /// The fixture's slots, inside epoch 0 = [0, 99].
+    const MINT_BLOCK: u64 = 46;
+    const E0_TO: u64 = 99;
+    /// The spend, inside epoch 1 = [100, 199] — an L1-final epoch, not a tail.
+    const SPEND_BLOCK: u64 = 100;
+    const E1_TO: u64 = 199;
+
+    /// Write one epoch file; return its payload hash and its manifest entry.
+    fn cut_epoch(
+        feed: &Path,
+        pool: Felt,
+        e: u64,
+        from: u64,
+        to: u64,
+        blocks: Vec<BlockLine>,
+        prev: Option<[u8; 32]>,
+    ) -> ([u8; 32], ManifestEpoch) {
+        let footer = footer_of(&blocks);
+        let payload = codec::encode_epoch(&Epoch {
+            header: EpochHeader {
+                chain_id: CHAIN_ID.to_owned(),
+                pool,
+                epoch: e,
+                from,
+                to,
+                prev,
+            },
+            blocks,
+            footer,
+        });
+        let zst = strk20_feed::compress(&payload);
+        std::fs::write(feed.join(format!("epochs/{e:08}.strk20e.zst")), &zst).unwrap();
+        let hash = strk20_feed::payload_sha256(&payload);
+        (
+            hash,
+            ManifestEpoch {
+                e,
+                from,
+                to,
+                hash: hex::encode(hash),
+                zst: hex::encode(strk20_feed::payload_sha256(&zst)),
+                bytes: zst.len() as u64,
+                anchor: None,
+            },
+        )
+    }
+
+    /// Publish `epochs` and an empty tail sitting directly on top of them.
+    fn publish(feed: &Path, pool: Felt, epochs: Vec<ManifestEpoch>) {
+        let top = epochs.last().expect("at least one epoch").to;
+        let latest = epochs.last().unwrap().e;
+        let manifest = Manifest {
+            v: 1,
+            chain_id: CHAIN_ID.to_owned(),
+            pool: strk20_feed::felt_hex(&pool),
+            genesis_block: 0,
+            epoch_size: EPOCH_SIZE,
+            head: ManifestHead {
+                number: top,
+                hash: strk20_feed::felt_hex(&Felt::from(0xb10c0000u64 + top)),
+                l1_accepted: top,
+                class: strk20_feed::felt_hex(&Felt::from(0xc1a55u64)),
+                decode_state: "ok".to_owned(),
+            },
+            latest_epoch: Some(latest),
+            epochs,
+            snapshot: None,
+        };
+        std::fs::write(
+            feed.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let blocks: Vec<BlockLine> = Vec::new();
+        let payload = codec::encode_head(&Head {
+            header: HeadHeader {
+                tail_from: top + 1,
+                head: top,
+                head_hash: Felt::from(0xb10c0000u64 + top),
+                l1_accepted: top,
+            },
+            footer: footer_of(&blocks),
+            blocks,
+        });
+        std::fs::write(feed.join("head.ndjson"), payload).unwrap();
+    }
+
+    fn write_genesis(feed: &Path, pool: Felt) {
+        let genesis = Genesis {
+            format: "strk20-feed".to_owned(),
+            v: 1,
+            chain_id: CHAIN_ID.to_owned(),
+            pool: strk20_feed::felt_hex(&pool),
+            genesis_block: 0,
+            epoch_size: EPOCH_SIZE,
+        };
+        std::fs::write(
+            feed.join("genesis.json"),
+            serde_json::to_vec_pretty(&genesis).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn canonical(r: &SyncReport) -> serde_json::Value {
+        serde_json::to_value(r).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cold_start_after_a_spend_equals_warm_sync_across_the_spend() {
+        let f = load_devnet_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let pool = f.constants.contract_address;
+        let feed = dir.path().join("feed");
+        std::fs::create_dir_all(feed.join("epochs")).unwrap();
+        write_genesis(&feed, pool);
+
+        let alice = f.constants.alice_address;
+        let key = SecretFelt::new(f.constants.alice_viewing_key);
+        let bob = f.constants.bob_address;
+        let bob_key = SecretFelt::new(f.constants.bob_viewing_key);
+
+        // ------------------------------------------- epoch 0: the note exists
+        let slots: Vec<(Felt, Felt)> = f.slots.iter().map(|(k, v)| (*k, *v)).collect();
+        let (e0_hash, e0) = cut_epoch(
+            &feed,
+            pool,
+            0,
+            0,
+            E0_TO,
+            vec![blk(MINT_BLOCK, slots, None)],
+            None,
+        );
+        publish(&feed, pool, vec![e0.clone()]);
+
+        let transport = DirTransport::new(feed.clone());
+        let opts = SyncOptions::default();
+
+        // The warm client folds the feed while the note is still unspent.
+        let warm = MemStore::new();
+        let before = sync_once(&warm, &transport, alice, &key, &opts)
+            .await
+            .expect("warm sync before the spend");
+        assert_eq!(
+            before.notes.len(),
+            1,
+            "fixture sanity: alice holds exactly one note here: {before:?}"
+        );
+        assert!(
+            !before.notes[0].spent,
+            "fixture sanity: it is unspent, so the spend below is a real transition"
+        );
+
+        // ------------------------------- epoch 1: the nullifier is written
+        let nullifier = Felt::from_hex(&before.notes[0].nullifier).unwrap();
+        let nullifier_slot = discovery_core::privacy_pool::storage_slots::nullifiers(nullifier);
+        let (_, e1) = cut_epoch(
+            &feed,
+            pool,
+            1,
+            E0_TO + 1,
+            E1_TO,
+            vec![blk(SPEND_BLOCK, vec![(nullifier_slot, Felt::ONE)], None)],
+            Some(e0_hash),
+        );
+        publish(&feed, pool, vec![e0, e1]);
+
+        let warm_report = sync_once(&warm, &transport, alice, &key, &opts)
+            .await
+            .expect("warm sync across the spend");
+
+        // ------------------------- the cold client: same bytes, no history
+        let cold = MemStore::new();
+        let cold_report = sync_once(&cold, &transport, alice, &key, &opts)
+            .await
+            .expect("cold sync after the spend");
+
+        assert_eq!(
+            canonical(&cold_report),
+            canonical(&warm_report),
+            "a client folding this feed for the first time and one that watched the spend \
+             land must produce the same report, field for field: the report describes the \
+             pool at {E1_TO}, not how long the client has been running"
+        );
+        assert_eq!(
+            cold.notes(&alice).unwrap(),
+            warm.notes(&alice).unwrap(),
+            "and the registries behind them must be row-for-row identical"
+        );
+
+        // Non-vacuity: the equality must not be "both of them report nothing".
+        assert_eq!(
+            cold_report.notes.len(),
+            1,
+            "the spent note must still be REPORTED, not dropped: {cold_report:?}"
+        );
+        let note = &cold_report.notes[0];
+        assert!(note.spent, "and it must be reported as spent: {cold_report:?}");
+        assert_eq!(
+            note.note_id, before.notes[0].note_id,
+            "it is the same note the pre-spend report carried"
+        );
+        assert_eq!(
+            note.nullifier, before.notes[0].nullifier,
+            "with the same nullifier, re-derived from the cursor's channel key"
+        );
+        assert_eq!(
+            note.block_number, before.notes[0].block_number,
+            "and the same creation block — for a note the engine never returns, that \
+             value can only come from the note slot's own write block"
+        );
+        assert_eq!(
+            note.amount, before.notes[0].amount,
+            "and the same decrypted amount, unpacked without the engine"
+        );
+        assert!(
+            cold_report.balances.is_empty(),
+            "a spent note contributes nothing to the balance: {cold_report:?}"
+        );
+
+        // ------ a note spent before ANY client existed is reported too (bob)
+        //
+        // The devnet fixture's bob note is spent in the seed slots themselves,
+        // so the engine returns bob zero notes at every bound (pinned by
+        // tests/oracle_probe.rs). Whatever bob reports here came from the
+        // scanned-range sweep and from nowhere else.
+        let fresh = MemStore::new();
+        let bob_report = sync_once(&fresh, &transport, bob, &bob_key, &opts)
+            .await
+            .expect("cold sync for bob");
+        assert_eq!(
+            bob_report.notes.len(),
+            1,
+            "bob's seed note is spent in the feed's first epoch and the engine never \
+             returns it; a cold start must still report it: {bob_report:?}"
+        );
+        assert!(bob_report.notes[0].spent, "{bob_report:?}");
+        assert!(bob_report.balances.is_empty(), "{bob_report:?}");
     }
 }

@@ -9,5 +9,6 @@
 
 pub use strk20_consumer::sync::{
     check_chain_id, full_resync, prune_missing_notes, refresh_spent, register_notes,
-    reopen_cursor, run_incoming, run_outgoing, sync_once, ReportNote, SyncOptions, SyncReport,
+    register_scanned_notes, reopen_cursor, run_incoming, run_outgoing, sync_once, ReportNote,
+    SyncOptions, SyncReport,
 };

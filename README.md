@@ -74,7 +74,9 @@ headers by design.
 the real binaries around a recording proxy and a synthetic RPC. It asserts that:
 
 - keyless discovery output equals the upstream engine over upstream's own MockBackend,
-  field for field, note creation blocks included;
+  field for field over the unspent notes the engine returns, note creation blocks
+  included; the report additionally carries the spent ones, flagged, so that a cold start
+  and a client that watched the spend land report the same rows;
 - no encoding of the viewing key, the address, or any derived channel key crosses the
   wire, checked by a byte scanner that does find the key when pointed at a compat body,
   so the negative is not vacuous;

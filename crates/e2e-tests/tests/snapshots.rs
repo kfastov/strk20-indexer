@@ -683,13 +683,28 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
                  snapshot carries each slot's write block"
             );
         }
-        assert!(
-            !report["notes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|n| n["note_id"].as_str() == Some(&felt_hex(&seed.pre_spent.note_id))),
-            "{label}: the note spent BELOW the basis must not be reported"
+        // §8 leg l(ii): the note spent below the basis is REPORTED, flagged.
+        // A snapshot-started client sees no `NoteUsed` for it — that event is
+        // below the history floor — so a `spent: true` here can only have come
+        // from the nullifier slot the snapshot carries, and the row itself
+        // from the scanned-range sweep (the engine filters the note out of its
+        // result on both paths; the sanity checks above pin that).
+        let pre_spent = report["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["note_id"].as_str() == Some(&felt_hex(&seed.pre_spent.note_id)))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: the note spent BELOW the basis must still be reported — the \
+                     report is a document about the pool, not about when this client \
+                     started: {report}"
+                )
+            });
+        assert_eq!(
+            pre_spent["spent"],
+            Value::Bool(true),
+            "{label}: and it must be reported spent: {report}"
         );
     }
 
@@ -802,25 +817,38 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
 
     assert_reports_equal(&replay2, &snapshot2, "round 2 (after a tail spend)");
     let nf_hex = felt_hex(&seed.pre_live.nullifier);
+    let pre_spent_hex = felt_hex(&seed.pre_spent.nullifier);
     for (label, report) in [("replay", &replay2), ("snapshot", &snapshot2)] {
-        let spent: Vec<&Value> = report["notes"]
+        let spent: Vec<&str> = report["notes"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|n| n["spent"] == true)
+            .map(|n| n["nullifier"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            spent.len(),
-            1,
-            "{label}: exactly the newly spent note must flip: {report}"
-        );
-        assert_eq!(spent[0]["nullifier"].as_str(), Some(nf_hex.as_str()));
+        // Spentness is STATE, and every spend is reported: the one below the
+        // basis (flipped in round 1) and the one in the tail (this round).
+        for want in [&pre_spent_hex, &nf_hex] {
+            assert!(
+                spent.contains(&want.as_str()),
+                "{label}: {want} must be reported spent: {report}"
+            );
+        }
         assert!(
-            report["newly_spent"]
+            report["notes"]
                 .as_array()
                 .unwrap()
-                .contains(&Value::String(nf_hex.clone())),
-            "{label}: the spend must be reported as newly_spent"
+                .iter()
+                .any(|n| n["note_id"].as_str() == Some(&felt_hex(&seed.tail.note_id))
+                    && n["spent"] == false),
+            "{label}: control — the tail note is untouched and stays unspent: {report}"
+        );
+        // `newly_spent` is the DELTA and holds only this round's flip — the
+        // pre-basis one flipped in round 1, on this same db.
+        assert_eq!(
+            report["newly_spent"].as_array().unwrap(),
+            &vec![Value::String(nf_hex.clone())],
+            "{label}: only the tail spend flipped in this sync: {report}"
         );
     }
 }
@@ -892,12 +920,18 @@ fn assert_grades(replay: &Value, snapshot: &Value) {
     );
 }
 
+/// The report's UNSPENT notes, in the oracle's shape. `oracle::incoming` is
+/// the raw engine, which drops every spent index before it reads the note
+/// slot; the client's report also carries the spent ones, flagged, so that it
+/// does not depend on when the client started (conformance.rs leg 5). The
+/// filter is what makes the two comparable.
 fn client_notes(report: &Value) -> Vec<Value> {
     let mut v: Vec<Value> = report["notes"]
         .as_array()
         .cloned()
         .unwrap_or_default()
         .iter()
+        .filter(|n| n["spent"] != true)
         .map(|n| {
             serde_json::json!({
                 "sender": n["sender"],
