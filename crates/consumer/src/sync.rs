@@ -17,7 +17,8 @@ use crate::transport::FeedTransport;
 use anyhow::{bail, Result};
 use discovery_core::discovery::{CursorLimits, DiscoveryCursor};
 use discovery_core::io_budget::IoBudget;
-use discovery_core::privacy_pool::hashes::compute_nullifier;
+use discovery_core::privacy_pool::decryption::decrypt_packed_value;
+use discovery_core::privacy_pool::hashes::{compute_note_id, compute_nullifier};
 use discovery_core::privacy_pool::storage_slots;
 use discovery_core::privacy_pool::types::SecretFelt;
 use discovery_core::sync::incoming_state::sync_incoming_state;
@@ -52,8 +53,17 @@ pub struct SyncReport {
     pub outgoing_complete: bool,
     pub incoming_senders: Vec<String>,
     pub outgoing_recipients: Vec<String>,
+    /// Every note this owner's channels hold at `head`, spent ones included
+    /// and flagged — never "the unspent ones", which is all the engine itself
+    /// returns (see [`register_scanned_notes`]). The list is a function of the
+    /// mirror at `head`, not of when this client started: a cold start and a
+    /// client that watched the spend happen report the same rows.
     pub notes: Vec<ReportNote>,
+    /// Unspent notes only.
     pub balances: std::collections::BTreeMap<String, String>,
+    /// A delta, not a state: the nullifiers that flipped to spent *in this
+    /// sync*. Unlike `notes` it is history-dependent by construction — the
+    /// first sync that sees a spend reports it, later ones do not.
     pub newly_spent: Vec<String>,
     /// Lowest block for which this mirror holds EVENTS. 0 for a fully
     /// epoch-replayed mirror; `snapshot.block + 1` for a snapshot-started one,
@@ -230,6 +240,87 @@ pub fn register_notes<S: ConsumerStore>(
         })?;
     }
     Ok(())
+}
+
+/// Register the notes the engine *scanned and dropped*.
+///
+/// Upstream's note scan is nullifier-first: `process_note_batch` reads the
+/// nullifier for every index in the subchannel's range and, for the ones that
+/// exist, `continue`s without ever fetching or decrypting the note slot. So
+/// `sync_incoming_state` returns "the notes that are unspent at this bound",
+/// not "the notes". [`register_notes`] therefore registers nothing for a note
+/// that was already spent when this client first folded the feed, while a
+/// client whose registry predates the spend keeps its row and reports
+/// `spent: true`. Same balances, different report — and the report is a
+/// document about the pool, not about how long this client has been running
+/// (spec §8 leg l(ii): a cold start must report the pre-basis note's
+/// `spent == true`).
+///
+/// The dropped notes are recoverable without touching the engine, because the
+/// cursor it returns carries everything the scan used: the channel key per
+/// channel and `last_note_index` — the last index *scanned*, spent ones
+/// included — per subchannel. Re-derive `note_id` over that same range, read
+/// the slot from the mirror (a spent note's own slot is never cleared, the
+/// nullifier slot is the only record of the spend), and decrypt with the same
+/// `decrypt_packed_value` the engine uses, so a row registered here is
+/// field-for-field what the engine would have produced had the note been
+/// unspent.
+///
+/// Rows are registered `spent: false` and left to [`refresh_spent`] exactly
+/// like the engine's own, which keeps `newly_spent` a single honest delta:
+/// one code path decides spent-state, from nullifier slots, for every note.
+/// Notes already in the registry are skipped before any slot read, so a warm
+/// re-sync does no work here and cannot clobber a flag it did not compute.
+pub fn register_scanned_notes<S: ConsumerStore>(
+    store: &S,
+    owner: &Felt,
+    key: &SecretFelt,
+    cursor: &DiscoveryCursor,
+    bound: u64,
+) -> Result<usize> {
+    let known: std::collections::BTreeSet<[u8; 32]> = store
+        .notes(owner)?
+        .iter()
+        .map(|n| n.note_id.to_bytes_be())
+        .collect();
+    let mut added = 0usize;
+    for (sender, channel) in &cursor.channels {
+        for (token, sub) in &channel.subchannels {
+            // `last_note_index` is the scan's own high-water mark and is what
+            // the range must come from: `total_n_notes` is re-derived from the
+            // resume point on every pass, so on a warm pass that finds nothing
+            // new it is `Some(0)` rather than the subchannel's note count.
+            let Some(last) = sub.last_note_index else {
+                continue;
+            };
+            for index in 0..=last {
+                let note_id = compute_note_id(&channel.channel_key, *token, index);
+                if known.contains(&note_id.to_bytes_be()) {
+                    continue;
+                }
+                let (packed, block) =
+                    store.read_slot_as_of(&storage_slots::notes(note_id), bound)?;
+                if packed == Felt::ZERO {
+                    continue;
+                }
+                let (amount, _salt) =
+                    decrypt_packed_value(packed, &channel.channel_key, *token, index);
+                store.upsert_note(&NoteRow {
+                    note_id,
+                    owner: *owner,
+                    sender: *sender,
+                    token: *token,
+                    index,
+                    nullifier: compute_nullifier(&channel.channel_key, *token, index, key),
+                    amount,
+                    block,
+                    spent: false,
+                })?;
+                added += 1;
+            }
+        }
+    }
+    Ok(added)
 }
 
 /// Re-evaluate spent-state from the mirror (nullifier slot != 0 as of
@@ -432,6 +523,7 @@ pub async fn sync_once<S: ConsumerStore>(
             let (cursor, notes) =
                 run_incoming(store, outcome.last_epoch_to, owner, key, ck_in).await?;
             register_notes(store, &owner, key, &cursor, &notes)?;
+            register_scanned_notes(store, &owner, key, &cursor, outcome.last_epoch_to)?;
             save_cursor(store, &in_keys.ckpt, &cursor)?;
             store.meta_set(&in_keys.ckpt_at, &outcome.last_epoch_to.to_string())?;
 
@@ -449,6 +541,7 @@ pub async fn sync_once<S: ConsumerStore>(
     };
     let (in_cursor, in_notes) = run_incoming(store, outcome.head, owner, key, live_start_in).await?;
     register_notes(store, &owner, key, &in_cursor, &in_notes)?;
+    register_scanned_notes(store, &owner, key, &in_cursor, outcome.head)?;
     save_cursor(store, &in_keys.live, &in_cursor)?;
 
     let live_start_out = match store.meta_get(&out_keys.live)?.filter(|s| !s.is_empty()) {

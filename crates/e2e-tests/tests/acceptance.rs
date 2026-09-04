@@ -166,12 +166,19 @@ impl Ctx {
     }
 }
 
+/// The report's UNSPENT notes, in the oracle's shape. The filter is the whole
+/// point of the comparison: `oracle::incoming` is the raw engine, which drops
+/// every spent index before it reads the note slot, whereas the client's
+/// report also carries the spent ones (flagged) so that it does not depend on
+/// when the client started — see `conformance.rs` leg 5. Comparing the two
+/// therefore compares like with like.
 fn client_notes_canonical(report: &Value) -> Vec<Value> {
     let mut v: Vec<Value> = report["notes"]
         .as_array()
         .cloned()
         .unwrap_or_default()
         .iter()
+        .filter(|n| n["spent"] != true)
         .map(|n| {
             serde_json::json!({
                 "sender": n["sender"],
@@ -813,21 +820,34 @@ async fn acceptance() {
     ctx.wait_head(50).await;
     let (after_spend, ok) = ctx.sync_client("bob-spend", &bob, "0xb0b", "bob.db");
     assert!(ok, "post-spend sync failed: {after_spend}");
+    // `newly_spent` is the delta and carries the claim: EXACTLY the nullifier
+    // we just wrote flipped in this sync. The count of spent notes is not the
+    // same statement — the devnet seed already contains a spent note for bob,
+    // which this client reported (flagged) on its very first sync.
+    assert_eq!(
+        after_spend["newly_spent"].as_array().unwrap(),
+        &vec![Value::String(strk20_feed::felt_hex(&nf))],
+        "exactly one nullifier must flip in this sync: {after_spend}"
+    );
     let spent: Vec<&Value> = after_spend["notes"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|n| n["spent"] == true)
         .collect();
-    assert_eq!(spent.len(), 1, "exactly one note must flip to spent");
-    assert_eq!(
-        spent[0]["nullifier"].as_str().unwrap(),
-        strk20_feed::felt_hex(&nf),
+    assert!(
+        spent
+            .iter()
+            .any(|n| n["nullifier"].as_str() == Some(strk20_feed::felt_hex(&nf).as_str())),
+        "and the note it belongs to must be reported spent: {after_spend}"
     );
-    assert!(after_spend["newly_spent"]
-        .as_array()
-        .unwrap()
-        .contains(&Value::String(strk20_feed::felt_hex(&nf))));
+    assert!(
+        !after_spend["balances"]
+            .as_object()
+            .unwrap()
+            .is_empty(),
+        "sanity: bob's other note is untouched, so a balance remains: {after_spend}"
+    );
     println!("leg k OK: spent-state flips exactly the spent note");
 
     drop(indexer);
