@@ -36,9 +36,17 @@ implemented as specified.
 4. **R2's compat proof is not (yet) a byte-replay of upstream's 11 HTTP
    tests.** What stands instead: verbatim-vendored wire types with provenance,
    the unmodified engine behind them (trait-bridge equivalence proven in
-   conformance), acceptance leg h (compat notes == oracle, 409 semantics,
-   cursor interop), and the reference serde schema round-trip. Porting the
-   upstream `devnet-dump.json.gz` harness is the top testing roadmap item.
+   `conformance.rs::engine_over_sqlite_equals_engine_over_mock`), and — since
+   #17 redistributed acceptance leg h — three cheaper carriers for what that
+   leg used to hold: `conformance.rs::compat_incoming_wire_equals_oracle`
+   (the served `IncomingSyncResponse`, decoded off a socket: notes == oracle
+   across every page, `block_ref` pinned, the server's cursor JSON loaded into
+   the client's `DiscoveryCursor`), `compat::tests::reorged_last_known_block_409s`
+   (409 `BLOCK_REORGED` semantics, all three outcomes), and
+   `conformance.rs::cursor_reference_schema_round_trip` (the reference serde
+   schema). Leg h itself is now only the live-server smoke that `--enable-compat`
+   turns the keyed route on and labels it. Porting the upstream
+   `devnet-dump.json.gz` harness is still the top testing roadmap item.
 
 5. **verify-root runs once per cut batch** at `min(frontier, rpc_head)`, not
    per historical epoch: `starknet_getStorageProof` covers only a recent

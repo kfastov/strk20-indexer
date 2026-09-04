@@ -128,19 +128,30 @@ from one dependency-gating commit. The `[patch]` in the root `Cargo.toml` redire
 it to our fork; that is only acceptable while the fork changes packaging and nothing
 else.
 
-**How, offline:** the `[patch]` must exist, point at our fork (not `starkware-libs`),
-and pin a 40-hex `rev` — a branch or tag pin lets the fork move under us.
-`patches/discovery-core-providers-gate.patch` must carry exactly one commit, whose
-sha equals the pinned rev, touching only `Cargo.toml` paths and zero lines under
-`discovery-core/src`.
+**How, offline (narrowed by #17):** the `[patch]` must exist, point at our fork (not
+`starkware-libs`), and pin a 40-hex `rev` — a branch or tag pin lets the fork move
+under us. `patches/discovery-core-providers-gate.patch` must carry exactly one
+commit. That is the whole offline check.
 
-This is the local half. CI job `fork-delta-check` does the half that needs the
-network: it diffs the fork branch against the pinned upstream rev and replays the
-checked-in patch to confirm it reproduces the fork tree exactly. Green here does not
-substitute for that job.
+This is the local half, and it is deliberately the weaker one. CI job
+`fork-delta-check` does the half that needs the network, and it is the half that
+carries the claim: it asserts the pinned rev IS the fork branch head, and that
+`git diff <upstream>..<fork> -- crates/discovery-core/src` is empty. Green here does
+not substitute for that job.
 
-**When it fires.** A stale sha means the fork branch moved without the pin (or the
-patch) being re-exported — `git format-patch --stdout <upstream>..<fork-ref>`. Lines
-under `discovery-core/src` mean the "consumed unmodified" sentence in the README and
-spec has become false: revert the source change on the fork, or stop making the
-claim. See `docs/ops/fork.md`.
+**What nothing checks any more.** `patches/discovery-core-providers-gate.patch` is
+now verified only for its commit count. Its sha is no longer compared to the `[patch]`
+rev, its touched-file list is not inspected, and no job replays it to see whether it
+still reproduces the fork tree. The file can name a rev that no longer exists, or
+diff a different tree, and every check in the repo will stay green. That is
+deliberate: `Cargo.lock` pins the fork rev, so the source the build compiles is the
+source `fork-delta-check` just diffed, whatever `patches/` happens to contain. The
+patch is documentation of the delta, not evidence for it — re-export it by hand with
+`git format-patch --stdout <upstream>..<fork-ref>` whenever the fork branch moves.
+
+**When it fires.** A missing or branch/tag `[patch]` pin, a `[patch]` aimed at
+`starkware-libs` instead of the fork, or a patch file that has grown a second commit.
+The "consumed unmodified" alarm proper is `fork-delta-check`'s, not this one: lines
+under `discovery-core/src` mean the sentence in the README and spec has become false
+— revert the source change on the fork, or stop making the claim. See
+`docs/ops/fork.md`.

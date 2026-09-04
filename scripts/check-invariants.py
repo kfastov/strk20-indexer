@@ -289,11 +289,19 @@ def check_secrets():
 # Scope, deliberately narrow (#17): this check answers only what the working
 # tree can answer offline — does Cargo.toml still point discovery-core at OUR
 # fork at a 40-hex pin, and is the checked-in patch still exactly one commit.
-# Whether that commit's TREE equals upstream is
-# .github/workflows/fork-delta-check.yml's job; it fetches both repos and
-# diffs them, which is strictly stronger than re-deriving the same verdict
-# from the patch text. Asserting it in both places only meant two places to
-# update when the pin moved.
+# Whether the fork TREE equals upstream is
+# .github/workflows/fork-delta-check.yml's job; it fetches both repos, asserts
+# the pin is the fork branch head, and diffs discovery-core/src — a stronger
+# claim about the code that actually compiles than anything derivable from the
+# patch text. Asserting it in both places only meant two places to update when
+# the pin moved.
+#
+# The cost, stated because docs/ops/invariants.md §5 and docs/ops/fork.md now
+# state it too: patches/discovery-core-providers-gate.patch is checked for its
+# commit COUNT and nothing else. Its sha is no longer compared to the [patch]
+# rev, and no job replays it. Cargo.lock pins what compiles, so the patch file
+# is documentation of the delta rather than evidence for it; if it goes stale,
+# nothing here goes red.
 def check_fork():
     bad, pin = [], None
     sect = re.search(r'^\[patch\."[^"]+"\]\s*$(.*?)(?=^\[|\Z)', read(R("Cargo.toml"), ""), re.S | re.M)

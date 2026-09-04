@@ -1962,9 +1962,13 @@ Unchanged. Given: `starknet-providers` is declared but unused in
    one git dependency in one workspace yields two `discovery-core`/`Felt` type
    identities.
 3. The diff is vendored at `patches/discovery-core-providers-gate.patch`. CI job
-   `fork-delta-check` asserts, on every run: the fork rev equals the upstream rev
-   plus that patch, **and** `git diff <upstream>..<fork> --
+   `fork-delta-check` asserts, on every run: the `[patch]` rev in `Cargo.toml`
+   equals the fork branch head, **and** `git diff <upstream>..<fork> --
    crates/discovery-core/src` is EMPTY — Cargo metadata only, zero source lines.
+   It no longer replays the vendored patch to re-derive the fork tree (#17):
+   `Cargo.lock` pins the rev that is actually compiled, so the src-diff above
+   already covers that source, and the patch file is documentation of the delta
+   rather than evidence for it. See `docs/ops/fork.md`.
 4. The upstream PR is filed at step 0b, in parallel with the refactor. On merge,
    the `[patch]` section and `patches/` file are deleted in one commit and the CI
    job inverts into a tripwire that fails if the `[patch]` section ever returns.
@@ -3511,8 +3515,12 @@ cursors round-trip request ↔ response in the reference schema; a forked
 leg-k spend as a `notes` event with the note in `spent`.
 
 **w. serve (A5).** `strk20-sync serve --feed <dir>` colocated with a live
-cutter dir: **base leg h's compat assertions are re-run verbatim against this
-second mount** (one conformance suite, two mounts); every response carries
+cutter dir: **the compat wire assertions are re-run against this second mount**
+— not base leg h's, which #17 reduced to a mode-header check plus a non-empty
+note set, but `conformance.rs::compat_incoming_wire_equals_oracle`'s: notes ==
+oracle across every page, `block_ref` pinned, the served cursor loaded into the
+client's `DiscoveryCursor`. Inheriting leg h's smoke here would give this leg
+no wire contract at all. Every response carries
 `X-Strk20-Mode: delegated-keyed`; `/feed/live` pokes after the fixture extends
 the chain; a non-loopback `--listen` without both `--allow-remote` and
 `--auth-token-file` is **refused at startup**; a missing or wrong bearer yields

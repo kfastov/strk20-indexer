@@ -4,6 +4,7 @@
 
 pub mod bins;
 pub mod chain;
+pub mod compat_body;
 pub mod feed_urls;
 pub mod fixture;
 pub mod oracle;

@@ -4,7 +4,9 @@
 //!    for the same slots — full struct equality via canonical JSON;
 //! 2. Cairo reference vectors: the crypto/slot functions we ship compute the
 //!    exact values blessed by the Cairo contract's reference fixture;
-//! 3. cursor JSON round-trip through the reference serde schema.
+//! 3. cursor JSON round-trip through the reference serde schema;
+//! 4. the compat HTTP wire: the reply `/v1/sync/incoming_state` serializes,
+//!    read back off a socket, equals the oracle.
 
 use discovery_core::privacy_pool::types::SecretFelt;
 use discovery_core::privacy_pool::{hashes, storage_slots};
@@ -12,8 +14,43 @@ use discovery_core::storage_backend::{MockBackend, StorageBackend};
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::oracle;
 use starknet_types_core::felt::Felt;
+use std::collections::HashMap;
 use strk20_indexerd::bridge::DbBackend;
 use strk20_indexerd::db::{BlockRow, Db, EventRow};
+
+/// The one-block mirror the SQLite-backed tests in this file read.
+const HEAD_NUMBER: u64 = 46;
+const HEAD_HASH: u64 = 0xb10c;
+
+/// Load `slots` into a fresh SQLite mirror as one block at `HEAD_NUMBER`.
+fn seed_db(slots: &HashMap<Felt, Felt>, db_path: &std::path::Path) {
+    let mut db = Db::open(db_path).unwrap();
+    let block = BlockRow {
+        number: HEAD_NUMBER,
+        hash: Felt::from(HEAD_HASH),
+        parent_hash: Felt::from(0xb0ffu64),
+        timestamp: 1046,
+        l1_accepted: true,
+    };
+    let mut diffs: Vec<(Felt, Felt)> = slots.iter().map(|(k, v)| (*k, *v)).collect();
+    diffs.sort_by_key(|a| a.0.to_bytes_be());
+    let events: Vec<EventRow> = Vec::new();
+    db.insert_block_data(&block, &diffs, &events, None, HEAD_NUMBER)
+        .unwrap();
+    db.meta_set("head_number", &HEAD_NUMBER.to_string())
+        .unwrap();
+    db.meta_set("head_hash", &strk20_feed::felt_hex(&block.hash))
+        .unwrap();
+}
+
+/// Upstream's own backend over the same slots, all written at `HEAD_NUMBER`.
+fn mock_over(slots: &HashMap<Felt, Felt>) -> MockBackend {
+    let mut mock = MockBackend::empty();
+    for (k, v) in slots {
+        mock.insert_with_block(*k, *v, HEAD_NUMBER);
+    }
+    mock
+}
 
 /// Engine over DbBackend == engine over MockBackend, same 48 fixture slots.
 #[tokio::test(flavor = "multi_thread")]
@@ -21,24 +58,7 @@ async fn engine_over_sqlite_equals_engine_over_mock() {
     let f = load_devnet_fixture();
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("conformance.db");
-    {
-        let mut db = Db::open(&db_path).unwrap();
-        let block = BlockRow {
-            number: 46,
-            hash: Felt::from(0xb10cu64),
-            parent_hash: Felt::from(0xb0ffu64),
-            timestamp: 1046,
-            l1_accepted: true,
-        };
-        let mut diffs: Vec<(Felt, Felt)> = f.slots.iter().map(|(k, v)| (*k, *v)).collect();
-        diffs.sort_by_key(|a| a.0.to_bytes_be());
-        let events: Vec<EventRow> = Vec::new();
-        db.insert_block_data(&block, &diffs, &events, None, 46)
-            .unwrap();
-        db.meta_set("head_number", "46").unwrap();
-        db.meta_set("head_hash", &strk20_feed::felt_hex(&block.hash))
-            .unwrap();
-    }
+    seed_db(&f.slots, &db_path);
     let backend = DbBackend::new(db_path, f.constants.contract_address);
     let snapshot = backend
         .snapshot(f.constants.contract_address, None)
@@ -46,10 +66,7 @@ async fn engine_over_sqlite_equals_engine_over_mock() {
         .unwrap();
 
     // MockBackend with the same write block for every slot
-    let mut mock = MockBackend::empty();
-    for (k, v) in &f.slots {
-        mock.insert_with_block(*k, *v, 46);
-    }
+    let mock = mock_over(&f.slots);
 
     for (owner, key) in [
         (f.constants.alice_address, f.constants.alice_viewing_key),
@@ -488,4 +505,144 @@ mod seam {
             "the two mirrors must still agree after the tail apply"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 5. The compat HTTP wire (#17)
+// ---------------------------------------------------------------------------
+//
+// `wire::IncomingSyncResponse` is built in exactly one place —
+// `compat::incoming` — and nothing above this line can see it: test 1 calls
+// the oracle straight against the two backends without crossing a handler,
+// and test 3 round-trips a cursor the test itself constructed. Acceptance
+// leg h does cross the handler, but since #17 asserts only that `notes` is
+// non-empty, which a wrong-recipient reply, a truncated page, a dropped or
+// renamed field and a wrong `block_ref` would all survive.
+//
+// So the wire keeps a carrier, at unit cost: the real compat router over a
+// seeded mirror on a loopback socket, POSTed the SAME body builder leg h
+// POSTs, reply decoded off the wire. It holds what the trimmed leg h stopped
+// holding — notes == the O1 oracle across every page, a `block_ref` pinned to
+// the head on each page, and the SERVER's cursor JSON parsed into the type
+// the client persists (interop; `cursor_reference_schema_round_trip` proves
+// schema identity, which is a different claim and never sees a served byte).
+#[tokio::test(flavor = "multi_thread")]
+async fn compat_incoming_wire_equals_oracle() {
+    let f = load_devnet_fixture();
+    let (alice, bob) = (f.constants.alice_address, f.constants.bob_address);
+    let bob_key = SecretFelt::new(f.constants.bob_viewing_key);
+    let strk = f.constants.strk_token;
+
+    // The fixture's only bob note is SPENT (the engine filters it), so bob
+    // would come back empty and a truncated page would be invisible. Mint two
+    // unspent notes into his existing channel with the engine's own crypto —
+    // the same construction acceptance leg g uses — so the comparison below
+    // has a multi-note set to disagree about.
+    let plain = MockBackend::new(f.slots.clone());
+    let bob_plain = oracle::incoming(&plain, bob, &bob_key).await;
+    let bob_ck = oracle::channel_key_of(&bob_plain, &alice);
+    let base_index = bob_plain
+        .cursor
+        .channels
+        .get(&alice)
+        .and_then(|c| c.subchannels.get(&strk))
+        .and_then(|s| s.total_n_notes)
+        .expect("fixture subchannel note total");
+    let mut slots = f.slots.clone();
+    for (i, amount) in [500u128, 600].into_iter().enumerate() {
+        let m = oracle::mint_note(&bob_ck, strk, base_index + i as u64, amount, &bob_key);
+        slots.insert(m.slot, m.packed_value);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("compat-wire.db");
+    seed_db(&slots, &db_path);
+    let mock = mock_over(&slots);
+
+    let pool = f.constants.contract_address;
+    let state = strk20_indexerd::compat::CompatState {
+        backend: DbBackend::new(db_path.clone(), pool),
+        db: std::sync::Arc::new(std::sync::Mutex::new(Db::open(&db_path).unwrap())),
+        pool,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = strk20_indexerd::compat::router(state);
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let http = reqwest::Client::new();
+    let pool_hex = strk20_feed::felt_hex(&pool);
+    let mut served = 0usize;
+
+    for (owner, key) in [
+        (alice, f.constants.alice_viewing_key),
+        (bob, f.constants.bob_viewing_key),
+    ] {
+        let first = e2e_tests::compat_body::incoming_state_body(
+            &pool_hex,
+            owner,
+            &strk20_feed::felt_hex(&key),
+        );
+        let mut body: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        let mut notes = Vec::new();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(
+                pages <= 50,
+                "compat pagination did not converge in 50 pages"
+            );
+            let resp = http
+                .post(format!("http://{addr}/v1/sync/incoming_state"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.headers()
+                    .get(strk20_indexerd::compat::MODE_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(strk20_indexerd::compat::MODE_VALUE)
+            );
+            assert!(resp.status().is_success(), "compat {}", resp.status());
+            let raw: serde_json::Value = resp.json().await.unwrap();
+
+            // Every page pins its reads at the seeded head and says so in the
+            // field the SDK feeds back for consistency.
+            assert_eq!(
+                raw["block_ref"],
+                serde_json::json!(format!("{:#x}", Felt::from(HEAD_HASH))),
+                "block_ref must pin the head hash: {raw}"
+            );
+            // The field names and types are the reference ones: decode into
+            // the vendored response struct, not merely into free-form JSON.
+            let typed: strk20_indexerd::compat::wire::IncomingSyncResponse =
+                serde_json::from_value(raw.clone()).expect("reply must be an IncomingSyncResponse");
+            // Interop: the cursor the SERVER emitted loads into the type the
+            // client persists between runs.
+            let client_cursor: discovery_core::discovery::DiscoveryCursor =
+                serde_json::from_value(raw["cursor"].clone())
+                    .expect("served cursor must load into the client's DiscoveryCursor");
+            notes.extend(typed.notes);
+            if client_cursor.is_complete() {
+                break;
+            }
+            body["cursor"] = raw["cursor"].clone();
+            body["block_ref"] = raw["block_ref"].clone();
+        }
+
+        let reference = oracle::incoming(&mock, owner, &SecretFelt::new(key)).await;
+        assert_eq!(
+            oracle::notes_canonical(&notes),
+            oracle::notes_canonical(&reference.notes),
+            "compat wire notes must equal the oracle for {}",
+            strk20_feed::felt_hex(&owner)
+        );
+        served += notes.len();
+    }
+    // Non-vacuity: two empty vectors compare equal, so state what the loop
+    // above actually compared — alice's one fixture note plus bob's two
+    // minted ones.
+    assert_eq!(served, 3, "compat wire must have served all three notes");
 }
