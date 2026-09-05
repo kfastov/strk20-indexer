@@ -13,7 +13,7 @@
 //!    can enter the subscription
 //! E3 a killed and then absent stream degrades to polling and converges
 
-use e2e_tests::bins::{bin, ensure_built, pick_free_port, spawn_with_logs, ChildGuard};
+use e2e_tests::bins::{bin, ensure_built, listening_port, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR};
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::oracle::{self, MintedNote};
@@ -217,7 +217,7 @@ async fn setup() -> Fx {
     let rpc = FixtureRpc::new(FixtureChain::build(&fixture), CHAIN_ID);
     let rpc_addr = rpc.serve().await;
     let dir = tempfile::tempdir().unwrap();
-    let port = pick_free_port();
+    let port = 0;
 
     let mut cmd = Command::new(bin("strk20"));
     cmd.arg("run")
@@ -244,6 +244,7 @@ async fn setup() -> Fx {
         .args(["--listen", &format!("127.0.0.1:{port}")])
         .args(["--poll-ms", "150"]);
     let indexer = spawn_with_logs(cmd, dir.path(), "indexer");
+    let port = listening_port(&indexer).await;
 
     let fx = Fx {
         rpc,
@@ -649,11 +650,14 @@ async fn e2_stream_is_identical_for_every_subscriber() {
     );
     assert_eq!(
         resumed_events.first().and_then(|e| e.id.clone()),
-        Some("1".to_owned()),
-        "ids are per-connection and start at 1 — a server that resumed from the \
-         supplied id would number differently: {:?}",
-        resumed_events.iter().map(|e| e.id.clone()).collect::<Vec<_>>()
+        a.events().first().and_then(|e| e.id.clone()),
+        "the same hello has a stable content ID across reconnects"
     );
+    let head_event = named(&resumed_events, "head").unwrap().json();
+    let http_head = fx.http.get(format!("http://127.0.0.1:{}/feed/head.ndjson", fx.port))
+        .send().await.unwrap().text().await.unwrap();
+    assert_eq!(head_event["payload"].as_str(), Some(http_head.as_str()),
+        "SSE carries the exact head payload, including diffs and events");
     // ...and a late joiner gets the same current-state burst the two
     // already-connected subscribers got, including the head they were poked
     // with. This is also the leg that proves connect replays state rather than
@@ -670,8 +674,8 @@ async fn e2_stream_is_identical_for_every_subscriber() {
     let secrets: Vec<(Felt, String)> = vec![
         (fx.bob_key, "bob-key".into()),
         (fx.alice_key, "alice-key".into()),
-        (fx.bob, "bob-address".into()),
-        (fx.alice, "alice-address".into()),
+        // Public event data may contain addresses; subscriber identity must
+        // never influence requests, which the two-client comparison checks.
     ];
     let hits = scanner::scan(a.bytes().as_slice(), &secrets);
     assert!(hits.is_empty(), "key/address material inside the SSE stream: {hits:?}");

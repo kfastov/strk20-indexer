@@ -58,6 +58,7 @@ pub fn spawn_with_logs(mut cmd: Command, log_dir: &std::path::Path, tag: &str) -
     let stderr_path = log_dir.join(format!("{tag}.stderr.log"));
     let out = std::fs::File::create(&stdout_path).expect("create stdout log");
     let err = std::fs::File::create(&stderr_path).expect("create stderr log");
+    isolate_logging(&mut cmd);
     let child = cmd
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
@@ -70,16 +71,22 @@ pub fn spawn_with_logs(mut cmd: Command, log_dir: &std::path::Path, tag: &str) -
     }
 }
 
-pub fn pick_free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Wait for the port the child actually bound. Reserving then releasing a
+/// "free" port before spawning is a race between parallel tests and services.
+pub async fn listening_port(child: &ChildGuard) -> u16 {
+    for _ in 0..200 {
+        let log=std::fs::read_to_string(&child.stderr_path).unwrap_or_default();
+        if let Some(line)=log.lines().find(|line|line.contains("http server listening")) {
+            if let Some(port)=line.split("addr=127.0.0.1:").nth(1).and_then(|s|s.split_whitespace().next()).and_then(|s|s.parse().ok()) {return port;}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("child never announced a bound port: {}",std::fs::read_to_string(&child.stderr_path).unwrap_or_default());
 }
 
 /// Run a short-lived command, capture stdout, assert exit status.
 pub fn run_capture(mut cmd: Command, expect_success: bool) -> (String, String, bool) {
+    isolate_logging(&mut cmd);
     let out = cmd.output().expect("run command");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -87,4 +94,12 @@ pub fn run_capture(mut cmd: Command, expect_success: bool) -> (String, String, b
         panic!("command failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
     }
     (stdout, stderr, out.status.success())
+}
+
+/// Tests choose their own logging. An inherited RUST_LOG must not erase the
+/// progress lines a fixture asserts; explicit per-command settings still win.
+fn isolate_logging(cmd: &mut Command) {
+    if !cmd.get_envs().any(|(key, _)| key == "RUST_LOG") {
+        cmd.env("RUST_LOG", "info");
+    }
 }

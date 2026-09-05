@@ -381,7 +381,7 @@ async fn feed_live(State(s): State<AppState>, RawQuery(query): RawQuery) -> Resp
     // Read the published files now, so the connect burst is the present and
     // not the last tick's past (§2.2: connect always replays CURRENT state).
     s.live.refresh();
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(2);
     let hub = s.live.clone();
     tokio::spawn(async move { crate::live::stream_to(hub, hello, tx).await });
     let stream = futures::stream::unfold(rx, |mut rx| async move {

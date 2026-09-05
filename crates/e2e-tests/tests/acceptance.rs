@@ -10,7 +10,7 @@
 //!   f. O(delta) resume + server-side scan
 
 use discovery_core::privacy_pool::types::SecretFelt;
-use e2e_tests::bins::{bin, ensure_built, pick_free_port, run_capture, spawn_with_logs, ChildGuard};
+use e2e_tests::bins::{bin, ensure_built, listening_port, run_capture, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{FixtureChain, FxEvent};
 use e2e_tests::compat_body;
 use e2e_tests::fixture::load_devnet_fixture;
@@ -244,11 +244,11 @@ async fn acceptance() {
     let rpc = FixtureRpc::new(chain, CHAIN_ID);
     let rpc_addr = rpc.serve().await;
 
-    let indexer_port = pick_free_port();
+    let indexer_port = 0;
     let dir = tempfile::tempdir().unwrap();
     let proxy = RecordingProxy::new(&format!("http://127.0.0.1:{indexer_port}"));
-    let proxy_addr = proxy.serve().await;
-    let ctx = Ctx {
+    let proxy_addr = "127.0.0.1:0".parse().unwrap();
+    let mut ctx = Ctx {
         rpc_addr,
         indexer_port,
         proxy,
@@ -265,6 +265,9 @@ async fn acceptance() {
     // against a half-published feed. wait_health(1) is what pins that, and it
     // is the whole of what the old leg a asserted.
     let indexer = ctx.spawn_indexer("indexer", &[]);
+    ctx.indexer_port=listening_port(&indexer).await;
+    ctx.proxy=RecordingProxy::new(&ctx.indexer_url());
+    ctx.proxy_addr=ctx.proxy.serve().await;
     ctx.wait_health(1).await;
 
     // Oracle O1 over the same 48 slots + committed write blocks.

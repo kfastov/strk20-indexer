@@ -39,7 +39,7 @@
 //! R4 repair  a re-cut with nothing changed is refused, nothing written
 //! R5 repair  verify-root MATCHes where it previously MISMATCHed
 
-use e2e_tests::bins::{bin, ensure_built, pick_free_port, run_capture, spawn_with_logs, ChildGuard};
+use e2e_tests::bins::{bin, ensure_built, listening_port, run_capture, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{ActiveBlock, FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR};
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::rpc_server::{FaultSpec, FixtureRpc};
@@ -2586,8 +2586,9 @@ async fn t22_one_closure_loop_attempt_repairs_an_eventless_divergence() {
         },
     );
 
-    let port = pick_free_port();
+    let port = 0;
     let indexer = spawn_run(dir.path(), &url, &pool_hex, port, "t22-indexer");
+    let port=listening_port(&indexer).await;
     let client = reqwest::Client::new();
     // Both halves must be observed: the loop RAN, and health came back. Waiting
     // on health alone would pass on the first poll, before the moved frontier
@@ -2662,8 +2663,9 @@ async fn t23_an_unrepairable_divergence_is_attempted_once_while_ingest_keeps_run
     let url = format!("http://{addr}/");
     let dir = tempfile::tempdir().unwrap();
 
-    let port = pick_free_port();
+    let port = 0;
     let indexer = spawn_run(dir.path(), &url, &pool_hex, port, "t23-indexer");
+    let port=listening_port(&indexer).await;
     let client = reqwest::Client::new();
     // Well past the three cycles the property is stated over. The predicate
     // never stops early: what is being measured is what happens when the loop

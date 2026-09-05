@@ -1,22 +1,8 @@
-//! `/feed/live` — the SSE notification plane (consumer-path.md §A2).
-//!
-//! It notifies; it never carries chain data. Every event is state-carrying and
-//! idempotent, never a delta, so a lost, duplicated, reordered or buffered
-//! event costs latency only and the polling fallback bounds it. On any event
-//! the client fetches the same files it would have polled, through the one
-//! existing verified path.
-//!
-//! Resume is the empty program (§2.3): `id:` exists for client-side dedup and
-//! debuggability, `Last-Event-ID` is deliberately ignored, and connect always
-//! replays current state. There is no replay buffer and no per-client cursor —
-//! which is itself a privacy property: at the protocol layer the server cannot
-//! be made to remember a client, because the protocol gives it nothing to
-//! remember. Nobody may later "fix" this into a journal.
-//!
-//! The emitter watches the PUBLISHED FILES rather than plumbing channels out of
-//! the ingest loop (§2.4). That makes ordering correct by construction: it can
-//! only announce artifacts already renamed into place and fetchable, which
-//! eliminates the announce-before-rename race class permanently.
+//! SSE transports the same canonical head and epoch payloads as HTTP.
+//! Each head replaces the mutable tail, so reconnect and coalesced updates
+//! need no per-client journal. A client missing immutable epochs catches up
+//! over HTTP before applying the tail. Hash-based event IDs deduplicate repeats.
+//! Published files are the source; a slow subscriber never blocks publishing.
 
 use crate::db::Db;
 use serde_json::{json, Value};
@@ -34,6 +20,8 @@ pub const RETRY_MS: u64 = 15_000;
 /// §2.2 keepalive cadence, and §2.5's watchdog budget on the client side.
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_secs(1);
+/// Oversized artifacts use HTTP catch-up; SSE queues stay bounded.
+const MAX_INLINE: usize = 2 * 1024 * 1024;
 
 /// The state every subscriber is shown. Each field is the `data:` payload of
 /// one event, already serialized, so every subscriber emits BYTE-IDENTICAL
@@ -141,6 +129,8 @@ pub async fn run_watcher(hub: Arc<LiveHub>) {
 struct HeadCache {
     etag: String,
     data: Option<String>,
+    epoch_entry: Option<Value>,
+    epoch_data: Option<String>,
 }
 
 fn read_state(feed_dir: &Path, db: &Arc<Mutex<Db>>, cache: &mut HeadCache) -> FeedState {
@@ -150,7 +140,14 @@ fn read_state(feed_dir: &Path, db: &Arc<Mutex<Db>>, cache: &mut HeadCache) -> Fe
     let manifest: Option<Value> = std::fs::read(feed_dir.join("manifest.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
-    let epoch = manifest.as_ref().and_then(epoch_event);
+    let epoch = manifest.as_ref().and_then(|m| {
+        let entry=m["epochs"].as_array()?.iter().find(|row|row["e"]==m["latest_epoch"])?;
+        if cache.epoch_entry.as_ref()!=Some(entry) {
+            cache.epoch_data=epoch_event(m,feed_dir);
+            cache.epoch_entry=Some(entry.clone());
+        }
+        cache.epoch_data.clone()
+    });
     let snapshot = manifest.as_ref().and_then(snapshot_event);
     let decode_state = manifest
         .as_ref()
@@ -180,12 +177,16 @@ fn head_event(bytes: &[u8], cache: &mut HeadCache) -> Option<String> {
         return cache.data.clone();
     }
     let head = strk20_feed::codec::parse_head(bytes).ok()?;
+    let payload = (bytes.len() <= MAX_INLINE)
+        .then(|| std::str::from_utf8(bytes).ok()).flatten();
     let data = json!({
         "head": head.header.head,
         "head_hash": strk20_feed::felt_hex(&head.header.head_hash),
         "l1_accepted": head.header.l1_accepted,
         "tail_from": head.header.tail_from,
         "etag": etag,
+        "payload": payload,
+        "resync": payload.is_none(),
     })
     .to_string();
     cache.etag = etag;
@@ -196,14 +197,22 @@ fn head_event(bytes: &[u8], cache: &mut HeadCache) -> Option<String> {
 /// Review finding 14d: the epoch index key is `"e"` on BOTH events that name an
 /// epoch, because the manifest — the identity source the client
 /// cross-references — uses `"e"`.
-fn epoch_event(manifest: &Value) -> Option<String> {
+fn epoch_event(manifest: &Value, feed_dir: &Path) -> Option<String> {
     let latest = manifest["latest_epoch"].as_u64()?;
     let entry = manifest["epochs"]
         .as_array()?
         .iter()
         .find(|e| e["e"].as_u64() == Some(latest))?;
+    let file = feed_dir.join(format!("epochs/{latest:08}.strk20e.zst"));
+    let payload = std::fs::read(file).ok()
+        .filter(|bytes| bytes.len() <= MAX_INLINE)
+        .and_then(|bytes| strk20_feed::decompress_capped(&bytes, MAX_INLINE as u64, "SSE epoch").ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
     Some(
         json!({
+            "entry": entry,
+            "payload": payload,
+            "resync": payload.is_none(),
             "e": latest,
             "from": entry["from"],
             "to": entry["to"],
@@ -234,7 +243,6 @@ pub async fn stream_to(
 ) {
     let _guard = hub.opened();
     let mut rx = hub.subscribe();
-    let mut id = 1u64;
     let mut sent = FeedState::default();
 
     let mut opening = String::with_capacity(PADDING_BYTES + 64);
@@ -242,7 +250,7 @@ pub async fn stream_to(
     opening.extend(std::iter::repeat_n(' ', PADDING_BYTES));
     opening.push_str("\n\n");
     opening.push_str(&format!("retry: {RETRY_MS}\n\n"));
-    opening.push_str(&event(&mut id, "hello", &hello));
+    opening.push_str(&event("hello", &hello));
     if send(&tx, opening).await.is_err() {
         return;
     }
@@ -251,14 +259,14 @@ pub async fn stream_to(
         let current = rx.borrow_and_update().clone();
         let mut out = String::new();
         for (name, next, prev) in [
-            ("head", &current.head, &sent.head),
             ("epoch", &current.epoch, &sent.epoch),
+            ("head", &current.head, &sent.head),
             ("snapshot", &current.snapshot, &sent.snapshot),
             ("status", &current.status, &sent.status),
         ] {
             if let Some(data) = next {
                 if Some(data) != prev.as_ref() {
-                    out.push_str(&event(&mut id, name, data));
+                    out.push_str(&event(name, data));
                 }
             }
         }
@@ -279,17 +287,17 @@ pub async fn stream_to(
     }
 }
 
-fn event(id: &mut u64, name: &str, data: &str) -> String {
-    let out = format!("event: {name}\nid: {id}\ndata: {data}\n\n", id = *id);
-    *id += 1;
-    out
+fn event(name: &str, data: &str) -> String {
+    let id = hex::encode(strk20_feed::payload_sha256(data.as_bytes()));
+    format!("event: {name}\nid: {name}:{id}\ndata: {data}\n\n")
 }
 
 async fn send(
     tx: &tokio::sync::mpsc::Sender<std::io::Result<axum::body::Bytes>>,
     text: String,
 ) -> Result<(), ()> {
-    tx.send(Ok(axum::body::Bytes::from(text)))
+    tokio::time::timeout(KEEPALIVE, tx.send(Ok(axum::body::Bytes::from(text))))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())
 }

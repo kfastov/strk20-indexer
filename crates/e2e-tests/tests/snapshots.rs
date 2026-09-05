@@ -49,7 +49,7 @@
 
 use discovery_core::privacy_pool::types::SecretFelt;
 use discovery_core::storage_backend::MockBackend;
-use e2e_tests::bins::{bin, ensure_built, pick_free_port, run_capture, spawn_with_logs, ChildGuard};
+use e2e_tests::bins::{bin, ensure_built, listening_port, run_capture, spawn_with_logs, ChildGuard};
 use e2e_tests::chain::{FixtureChain, FxEvent, ENC_NOTE_CREATED_SELECTOR, NOTE_USED_SELECTOR};
 use e2e_tests::fixture::load_devnet_fixture;
 use e2e_tests::oracle::{self, MintedNote};
@@ -560,10 +560,7 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
     let rpc = rpc_for(&seed.chain);
     let rpc_addr = rpc.serve().await;
     let dir = tempfile::tempdir().unwrap();
-    let indexer_port = pick_free_port();
-    let proxy = RecordingProxy::new(&format!("http://127.0.0.1:{indexer_port}"));
-    let proxy_addr = proxy.serve().await;
-    let feed_url = format!("http://{proxy_addr}/feed");
+    let indexer_port = 0;
 
     let mut cmd = Command::new(bin("strk20"));
     cmd.arg("run")
@@ -575,6 +572,10 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
         .args(["--listen", &format!("127.0.0.1:{indexer_port}")])
         .args(["--poll-ms", "150"]);
     let _indexer: ChildGuard = spawn_with_logs(cmd, dir.path(), "indexer");
+    let indexer_port=listening_port(&_indexer).await;
+    let proxy=RecordingProxy::new(&format!("http://127.0.0.1:{indexer_port}"));
+    let proxy_addr=proxy.serve().await;
+    let feed_url=format!("http://{proxy_addr}/feed");
 
     // ---------------------------------------------------------- oracle O1
     let o1 = {
@@ -1288,13 +1289,14 @@ async fn s6_retention_keeps_the_newest_snapshots_without_404ing_the_previous_man
     );
 
     // ... and it is still SERVED, not merely present on disk
-    let port = pick_free_port();
+    let port = 0;
     let mut cmd = Command::new(bin("strk20"));
     cmd.arg("run")
         .args(base_args(dir.path(), &url, &seed.pool_hex))
         .args(["--listen", &format!("127.0.0.1:{port}")])
         .args(["--poll-ms", "5000"]);
     let _server = spawn_with_logs(cmd, dir.path(), "retention-server");
+    let port=listening_port(&_server).await;
     let http = reqwest::Client::new();
     let mut served = None;
     for _ in 0..100 {
