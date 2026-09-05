@@ -46,12 +46,13 @@ checkpoint on a reorg. The binaries share no secret-bearing code: the client doe
 the server crate, `SecretFelt` refuses serialization (compile-fail-tested), and the
 transport trait has no method that could carry an address or a key.
 
-**The browser path.** `crates/wasm` compiles the same engine to WebAssembly (892 KB raw,
-411 KB gzip). `ts/strk20-discovery` wraps it as an npm package with two clients,
-`KeylessClient` (feed only, key never leaves the page) and `DelegatedClient`. `ts/demo`
-has three lanes: REPLAY (a synthetic feed for the mock engine, regenerated at build time), MAINNET (a
-local feed) and LIVE (any running indexer). It measures cold and warm start in-page and
-shows every URL it fetched. The npm package is not published yet.
+**The browser path.** `crates/wasm` runs the same consumer in a Worker.
+`ts/strk20-discovery` implements the official `DiscoveryProviderInterface` and
+exports an account-bound convenience API. It verifies the complete pool state,
+returns actual SDK spend witnesses and persists folded state for fast reopening.
+`ts/demo` is a real mainnet/Sepolia wallet flow: fund, deploy, shield, discover,
+transfer and withdraw. The default build contains no synthetic replay or mock
+engine. The npm package is not published yet.
 
 **Modes, labeled.**
 
@@ -66,6 +67,21 @@ Compat is wire-identical to the reference service for its four POST routes:
 8-line diff, all of it a header comment and two imports. With `INDEXER_URL` it is a drop-in
 for key-holding backends; not yet for a browser SDK app, because those routes send no CORS
 headers by design.
+
+## Verification and local cache
+
+A hash chain authenticates feed consistency, not completeness against Starknet. The client
+must match the entire pool storage state to an independently selected block checkpoint,
+after verifying the contract path and state commitment. This proves state at that block;
+it does not prove intermediate event history or exact slot creation times. The implemented default trusts an accepted Starknet RPC header. An Ethereum-finalized
+checkpoint mode is deferred.
+
+For the demo we explicitly trust the browser's local cache. Its checksum detects accidental
+corruption, not malicious replacement. The restart target is ≤2 seconds to restore saved
+verified state and notes; network catch-up is measured separately. The first visit without
+cache has a separate cold-start measurement. Authenticated cache encryption (AEAD) is the
+next task after the main implementation. Wallet recovery material is stored separately
+from disposable feed data, and clearing the feed cache must preserve the wallet.
 
 ## What is proven
 
@@ -106,17 +122,25 @@ cargo build --release --workspace
 # client; the key stays here
 echo 0x<viewing_key> > key.txt
 ./target/release/strk20-sync sync --feed http://127.0.0.1:8080/feed \
-    --address 0x<your_address> --key-file key.txt --json
+    --address 0x<your_address> --key-file key.txt --json \
+    --verify-anchor https://rpc.starknet.lava.build
 
-# browser demo (REPLAY lane needs no indexer)
-cd ts && npm ci && npm run dev
+# browser demo against the public mainnet/Sepolia feeds
+./examples/mainnet/setup.sh  # Node 24+, builds the pinned official SDK
+./crates/wasm/build.sh
+cd ts && npm ci && npm run dev --workspace strk20-demo
 ```
 
 `strk20 backfill` ingests to finality and exits. `status`, `epoch-verify`, `verify-root`,
 `audit-coverage` and `enumerate-slots` audit; `rescan` and `recut-epochs` repair;
-`mirror-pull` bootstraps from another instance. `strk20-sync verify --rpc <your-own-node>`
-checks discovered notes against Starknet state roots, keeping the indexer out of the trust
-path.
+`mirror-pull` bootstraps from another instance. For authenticated complete state,
+use `strk20-sync sync --verify-anchor <trusted-rpc>`. The older per-note `verify`
+command is a diagnostic and does not establish whole-state completeness.
+
+A local Chrome measurement on 2026-09-06 verified full mainnet state at block
+14,420,590: cold download, verification and discovery took 37.85 s; fresh Worker
+restores took 292–299 ms. The test identity had no notes. Network catch-up is
+separate. See [demo verification evidence](docs/spec/demo-app.md).
 
 ## Status
 
@@ -138,9 +162,17 @@ Hosted instance as of 2026-09-02: <https://strk20.nullref.cc> serves Sepolia and
   is gated at 256 blocks, so a mirror further behind gets no sweep at all, which is exactly
   when the misses pile up. verify-root, not the sweep, is the backstop. Repair is
   `strk20 rescan` then `recut-epochs`.
-- **Feed completeness is not provable to a consumer.** It is auditable instead:
-  hash-chained content-addressed epochs make an omission a visible fork across mirrors, and
-  the client spot-checks against your own RPC. The fallback is self-hosting.
+- **State verification has a precise scope.** A successful complete-root check proves
+  state at the selected checkpoint, including absence of slots. It does not prove
+  all intermediate events or publisher write timestamps. Note maturity therefore
+  uses a conservative verified-by block and may wait longer on a cold start.
+- **Cold verification remains expensive.** Folded cache avoids repeating it; a first
+  visit still hashes the complete storage tree. Local cache is trusted until AEAD
+  and its key-management threat model are implemented.
+- **The new demo's funded flow is not yet live-validated.** Browser initialization,
+  actual mainnet state verification and SDK builder consumption have been checked.
+  A recorded shield/transfer/withdraw run remains required. Hosted proving receives
+  proving inputs; local discovery alone does not make the write path private from it.
 - **Raw targeted mode leaks what direct RPC leaks**, including your address, and compat mode
   receives viewing keys by definition. Run either for yourself, not strangers.
 - **The engine is consumed with zero source changes, but through a fork.** One commit

@@ -1,376 +1,74 @@
-/**
- * Rendering. Pure functions from state to DOM, no measurement taken here.
- *
- * The two rules this file exists to keep:
- *   1. no number is displayed that was not produced in this session. A column
- *      that has not been run reads `not run yet` — never `0`, never a
- *      last-known value. If a measurement cannot be taken the slot reads
- *      `unavailable` AND WHY.
- *   2. the recorded reference numbers are grey, dated, sourced, and outside
- *      every live readout.
- */
+import type { Operation } from "./operations.ts";
+import type { Network } from "./network.ts";
 
-import type { RequestRecord } from 'strk20-discovery';
-import { REFERENCE, REFERENCE_SOURCE, DERIVED } from './reference-numbers.generated.ts';
-import { shortAddress } from './identities.ts';
-import type { DemoState, LogLine, RunCard } from './state.ts';
-
-export function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  ...children: (Node | string | null | false)[]
-): HTMLElementTagNameMap[K] {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') n.className = v;
-    else n.setAttribute(k, v);
+export const element = <T extends HTMLElement>(id: string) =>
+  document.getElementById(id) as T;
+export function mount(network: Network): void {
+  element<HTMLDivElement>("app").innerHTML = `
+    <header><a class="brand" href="https://github.com/kfastov/strk20-indexer" target="_blank" rel="noreferrer">STRK20 <span>/ local discovery</span></a>
+      <select id="network" aria-label="Network"><option value="sepolia">Sepolia testnet</option><option value="mainnet">Starknet mainnet</option></select></header>
+    <main><div class="intro"><span class="eyebrow">YOUR NOTES. YOUR BROWSER.</span><h1>Make a private transfer.<br>Discover it locally.</h1>
+      <p>One real transaction flow, from funding to withdrawal.</p></div>
+      <section class="activity" aria-label="Activity"><div class="section-title"><h2>Activity</h2><button id="metrics" class="text-button">Export timings</button></div><div id="log" aria-live="polite"></div></section>
+      <section class="flow" aria-label="Transaction flow">
+        <div class="flow-top"><span id="step">GET STARTED</span><span id="connection" class="status">Starting</span></div>
+        <h2 id="title">Create a demo wallet</h2><p id="description"></p>
+        <div id="wallet" hidden><label>Demo wallet address <button id="copy" class="text-button">Copy</button></label>
+          <a id="address" class="address" target="_blank" rel="noreferrer"></a>
+          <div class="balances"><div><span>Public</span><strong id="public-balance">—</strong></div><div><span>Private</span><strong id="private-balance">—</strong></div></div>
+          <div class="backup-row"><button id="backup" class="text-button">Export wallet backup</button><span>Keys are stored in this browser. Use small amounts.</span></div>
+        </div>
+        <div id="amount-row" class="field" hidden><label for="amount">Amount · STRK</label><input id="amount" value="0.01" inputmode="decimal" autocomplete="off" /></div>
+        <div id="recipient-row" class="field" hidden><label id="recipient-label" for="recipient">Recipient</label><input id="recipient" placeholder="0x…" autocomplete="off" spellcheck="false" /></div>
+        <p id="error" role="alert" hidden></p><button id="next" class="primary"><span id="button-text">Create demo wallet</span><span class="spinner" aria-hidden="true"></span></button>
+        <div class="secondary"><button id="import" class="text-button">Restore wallet backup</button><input id="backup-file" type="file" accept="application/json" hidden /></div>
+      </section>
+      <details class="options"><summary>Compare discovery &amp; verification details</summary>
+        <label class="check"><input id="compare" type="checkbox" /> Compare with the official indexer</label>
+        <p>This sends this demo wallet’s viewing key to the official discovery service. It sees the same transaction and block. No duplicate transaction is sent. Local discovery reuses any saved state; the reference starts without a supplied cursor. This comparison includes those cache conditions.</p>
+        <div id="benchmark"></div><p id="verification">No state verified yet.</p>
+        <p>Private transactions use the official hosted prover, which receives the proving inputs. Local storage is trusted in this demo. Checkpoint verification proves pool state at one block; it does not authenticate earlier write timestamps.</p>
+      </details>
+    </main><footer>Public feed → verified pool state → private discovery in a Worker.</footer>`;
+  element<HTMLSelectElement>("network").value = network;
+}
+const escape = (value: string) =>
+  value.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        char
+      ]!,
+  );
+export function renderOperations(entries: Operation[]): void {
+  const root = element<HTMLDivElement>("log");
+  const open = new Set(
+    [...root.querySelectorAll("details[open]")].map(
+      (node) => (node as HTMLElement).dataset.id,
+    ),
+  );
+  function row(operation: Operation, id: string): string {
+    const duration =
+      operation.elapsedMs === undefined
+        ? "In progress"
+        : `${(operation.elapsedMs / 1000).toFixed(2)} s`;
+    const detail = operation.detail?.startsWith("https://")
+      ? `<a target="_blank" rel="noreferrer" href="${escape(operation.detail)}">View transaction ↗</a>`
+      : escape(operation.detail ?? "");
+    return `<details class="operation ${operation.error ? "failed" : ""}" data-id="${id}" ${open.has(id) ? "open" : ""}><summary><span class="dot ${operation.elapsedMs === undefined ? "running" : ""}"></span><span>${escape(operation.label)}</span><time>${duration}</time></summary>
+      <div class="operation-body">${detail}${operation.error ? `<p class="failure">${escape(operation.error)}</p>` : ""}${operation.children.map((child, i) => row(child, `${id}.${i}`)).join("")}</div></details>`;
   }
-  for (const c of children) {
-    if (c === null || c === false) continue;
-    n.append(typeof c === 'string' ? document.createTextNode(c) : c);
-  }
-  return n;
+  root.innerHTML =
+    entries.map((operation, i) => row(operation, String(i))).join("") ||
+    '<p class="empty">Your actions will appear here.</p>';
 }
-
-export function ms(v: number | null | undefined): string {
-  if (v === null || v === undefined) return '—';
-  if (v < 1000) return `${v.toFixed(v < 10 ? 1 : 0)} ms`;
-  return `${(v / 1000).toFixed(2)} s`;
-}
-
-export function bytes(v: number | null | undefined): string {
-  if (v === null || v === undefined) return '—';
-  if (v < 1024) return `${v} B`;
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} kB`;
-  return `${(v / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function num(v: number | null | undefined): string {
-  return v === null || v === undefined ? '—' : v.toLocaleString('en-US');
-}
-
-// ------------------------------------------------------------------- cards
-
-function cardRow(label: string, value: string, opts: { struck?: boolean; note?: string } = {}): HTMLElement {
-  return el(
-    'div',
-    { class: `row${opts.struck ? ' struck' : ''}` },
-    el('span', { class: 'row-label' }, label),
-    el('span', { class: 'row-value' }, value),
-    opts.note ? el('span', { class: 'row-note' }, opts.note) : null,
+export function downloadJson(value: unknown, name: string): void {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }),
   );
-}
-
-export function renderCard(c: RunCard, title: string, subtitle: string): HTMLElement {
-  const body: HTMLElement[] = [];
-  // The reload run is timed from performance.timeOrigin, so engine boot and the
-  // IndexedDB open are INSIDE its total. Every other run times sync() alone.
-  const bootInTotal = c.kind === 'warm-reload';
-
-  if (c.unavailable) {
-    body.push(el('div', { class: 'unavailable' }, `unavailable — ${c.unavailable}`));
-  } else if (c.totalMs === null) {
-    body.push(el('div', { class: 'not-run' }, 'not run yet'));
-  } else {
-    body.push(cardRow('total', ms(c.totalMs)));
-    // Both columns carry the SAME phase rows, so the reader watches the
-    // subtraction happen. The warm column still fetches genesis, manifest and
-    // head, so its fetch row is a real measurement; the struck row is the one
-    // that actually vanished.
-    body.push(cardRow(' fetch', ms(c.fetchMs)));
-    body.push(cardRow(' inflate', ms(c.inflateMs)));
-    body.push(cardRow(' verify+fold', ms(c.applyMs)));
-    if (c.kind !== 'cold' && c.epochs === 0 && c.bytesSaved !== null && c.bytesSaved > 0) {
-      body.push(
-        cardRow(' epochs refetched', 'none', { struck: true, note: `${bytes(c.bytesSaved)} saved` }),
-      );
-    }
-    body.push(cardRow(' load', c.loadMs === null || c.loadMs === 0 ? '—' : ms(c.loadMs)));
-    body.push(cardRow(' discover', ms(c.discoverMs)));
-    body.push(
-      cardRow(
-        'requests',
-        `${num(c.networkRequests)} network${c.cacheRequests ? ` · ${num(c.cacheRequests)} cache` : ''}`,
-      ),
-    );
-    body.push(cardRow('bytes', bytes(c.bytes)));
-    body.push(cardRow('epochs fetched', num(c.epochs)));
-    body.push(cardRow('epochs folded', num(c.epochsApplied)));
-    body.push(
-      cardRow('engine boot', c.bootMs === null ? 'not measured' : ms(c.bootMs), {
-        note: bootInTotal ? 'in total' : 'not in total',
-      }),
-    );
-  }
-
-  return el(
-    'section',
-    { class: `card card-${c.kind}` },
-    el('h3', {}, title, el('small', {}, bootInTotal ? 'after reload' : subtitle)),
-    el('div', { class: 'card-body' }, ...body),
-    c.ranAt
-      ? el('div', { class: 'card-stamp' }, `${c.ranAt} · ${c.lane ?? ''} · ${c.feedUrl ?? ''}`)
-      : el('div', { class: 'card-stamp' }, ''),
-  );
-}
-
-// --------------------------------------------------------------------- log
-
-export function renderLog(s: DemoState): HTMLElement {
-  const rows = s.log.map((l) => renderLogLine(l));
-  return el('div', { class: 'log' }, ...rows);
-}
-
-function renderLogLine(l: LogLine): HTMLElement {
-  const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-  const right =
-    l.status === 'pending'
-      ? el('span', { class: 'log-elapsed pending', 'data-since': String(l.at) }, '')
-      : el('span', { class: 'log-elapsed' }, l.elapsedMs === undefined ? '' : ms(l.elapsedMs));
-  const metrics = l.metrics?.length
-    ? el(
-        'div',
-        { class: 'log-metrics' },
-        ...l.metrics.map((m) =>
-          el('span', { class: `metric prov-${m.provenance}` }, `${m.label} ${m.value}`),
-        ),
-      )
-    : null;
-  return el(
-    'div',
-    { class: `log-line status-${l.status}`, 'data-seq': String(l.seq) },
-    el('span', { class: 'log-time' }, l.status === 'pending' ? '' : `[${time}]`),
-    el('span', { class: 'log-stage' }, l.stage),
-    el('span', { class: 'log-text' }, l.status === 'pending' ? `▸ ${l.text}` : l.text),
-    el('span', { class: 'log-dots' }, ''),
-    right,
-    metrics,
-    l.detail ? el('div', { class: 'log-detail' }, l.detail) : null,
-  );
-}
-
-// ----------------------------------------------------------- network panel
-
-const GROUP_AFTER = 50;
-
-export function renderNetwork(s: DemoState, onSelfTest: () => void): HTMLElement {
-  const rows: HTMLElement[] = [];
-  const epochRows = s.records.filter((r) => r.artifact === 'epoch');
-  const grouped = epochRows.length > GROUP_AFTER;
-
-  let epochGroupInserted = false;
-  for (const r of s.records) {
-    if (grouped && r.artifact === 'epoch') {
-      if (!epochGroupInserted) {
-        epochGroupInserted = true;
-        rows.push(renderEpochGroup(epochRows));
-      }
-      continue;
-    }
-    rows.push(renderRequestRow(r));
-  }
-
-  const network = s.records.filter((r) => r.source !== 'idb-cache');
-  const cache = s.records.length - network.length;
-  const total = s.records.reduce((n, r) => n + r.bytes, 0);
-
-  return el(
-    'section',
-    { class: 'card card-net' },
-    el('h3', {}, 'C · network'),
-    el('code', { class: 'csp' }, readCsp()),
-    el('div', { class: 'net-rows' }, ...(rows.length ? rows : [el('div', { class: 'not-run' }, 'no requests yet')])),
-    el(
-      'div',
-      { class: 'net-totals' },
-      el('div', {}, `${network.length} network · ${cache} from IndexedDB · ${bytes(total)}`),
-      el(
-        'div',
-        { class: 'module-hash' },
-        'request-log sha256 ',
-        el('code', {}, s.feed?.network.requestLogSha256.slice(0, 16) || '—'),
-      ),
-    ),
-    renderAb(s),
-    renderScanner(s, onSelfTest),
-    renderArithmetic(s),
-  );
-}
-
-function renderEpochGroup(epochRows: RequestRecord[]): HTMLElement {
-  const b = epochRows.reduce((n, r) => n + r.bytes, 0);
-  const first = epochRows[0]?.url.split('/').pop() ?? '';
-  const last = epochRows[epochRows.length - 1]?.url.split('/').pop() ?? '';
-  const details = el('details', { class: 'net-group' });
-  details.append(el('summary', {}, `epochs ${first} – ${last} · ${epochRows.length} requests · ${bytes(b)}`));
-  for (const r of epochRows) details.append(renderRequestRow(r));
-  return details;
-}
-
-function renderRequestRow(r: RequestRecord): HTMLElement {
-  const hasQuery = r.url.includes('?');
-  return el(
-    'div',
-    { class: `net-row src-${r.source} purpose-${r.purpose}` },
-    el('span', { class: 'nr-method' }, r.method),
-    // The full URL, never truncated in the middle: truncation is exactly where
-    // a query string would hide.
-    el('span', { class: 'nr-url' }, r.url),
-    el('span', { class: `nr-query ${hasQuery ? 'bad' : 'good'}` }, hasQuery ? '?present' : 'no ?'),
-    el('span', { class: 'nr-body' }, `body ${r.requestBodyBytes} B`),
-    el('span', { class: 'nr-status' }, r.status === 0 ? 'open' : String(r.status)),
-    el('span', { class: 'nr-bytes' }, bytes(r.bytes)),
-    el('span', { class: 'nr-ms' }, ms(r.ms)),
-    el('span', { class: 'nr-src' }, r.source),
-    el(
-      'span',
-      { class: 'nr-transfer' },
-      r.transferBytes === null ? 'transfer n/a' : `transfer ${bytes(r.transferBytes)}`,
-    ),
-  );
-}
-
-function renderAb(s: DemoState): HTMLElement {
-  if (!s.ab) return el('div', { class: 'ab not-run' }, 'A/B: not run yet');
-  const a = s.ab;
-  const verdict =
-    a.status === 'identical'
-      ? el('span', { class: 'ok' }, '✓ IDENTICAL')
-      : a.status === 'different'
-        ? el('span', { class: 'fail' }, '✗ DIFFERENT')
-        : el('span', { class: 'warn' }, 'no verdict');
-  return el(
-    'div',
-    { class: `ab ab-${a.status}` },
-    el('div', {}, 'A/B request-log hash ', verdict),
-    el('div', { class: 'ab-hash' }, `A ${a.hashA.slice(0, 16)}…`),
-    el('div', { class: 'ab-hash' }, `B ${a.hashB.slice(0, 16)}…`),
-    el(
-      'div',
-      { class: 'ab-bytes' },
-      `bytes ${bytes(a.bytesA)} / ${bytes(a.bytesB)} · requests ${a.requestsA} / ${a.requestsB}`,
-    ),
-  );
-}
-
-function renderScanner(s: DemoState, onSelfTest: () => void): HTMLElement {
-  const btn = el('button', { class: 'small' }, 'self-test');
-  if (s.identity) btn.addEventListener('click', onSelfTest);
-  else {
-    btn.setAttribute('disabled', 'disabled');
-    btn.setAttribute('title', 'needs an identity');
-  }
-  return el(
-    'div',
-    { class: 'scanner' },
-    el(
-      'div',
-      { class: s.scanHits === 0 ? 'ok' : 'fail' },
-      `key + address: ${s.scanHits} hits · ${s.scanSurfaces} surfaces · ${s.records.length} requests · 13 encodings`,
-    ),
-    el(
-      'div',
-      { class: 'selftest' },
-      btn,
-      el(
-        'span',
-        { class: s.selfTestFired === null ? 'dim' : s.selfTestFired ? 'ok' : 'fail' },
-        s.selfTestFired === null ? ' not run' : s.selfTestFired ? ' caught ✓' : ' MISSED ✗',
-      ),
-    ),
-  );
-}
-
-function renderArithmetic(s: DemoState): HTMLElement {
-  return el(
-    'details',
-    { class: 'arithmetic' },
-    el('summary', {}, 'arithmetic · recorded numbers'),
-    el(
-      'pre',
-      {},
-      `this session:   1 genesis + 1 manifest + N epochs + 1 head\n` +
-        `mainnet:        ${DERIVED.mainnetRequests!.formula} = ${DERIVED.mainnetRequests!.value}   [arithmetic]\n` +
-        `with snapshots: 1 + 1 + 1 snapshot + 1 anchor + (0–1 epochs) + 1 head ≈ 5   [arithmetic]\n` +
-        `this run:       ${s.records.filter((r) => r.source !== 'idb-cache').length} network requests   [measured]`,
-    ),
-    el(
-      'table',
-      { class: 'refs' },
-      ...Object.values(REFERENCE).map((r) =>
-        el(
-          'tr',
-          {},
-          el('td', {}, r.name),
-          el('td', {}, r.value),
-          el('td', {}, `${REFERENCE_SOURCE}:${r.sourceLine}`),
-        ),
-      ),
-    ),
-  );
-}
-
-function readCsp(): string {
-  const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
-  return meta?.getAttribute('content') ?? '(no CSP meta tag on this page)';
-}
-
-// -------------------------------------------------------------- trust card
-
-export function renderTrust(s: DemoState): HTMLElement {
-  const f = s.feed;
-  const grade = f?.verified ?? null;
-  const gradeEl = el(
-    'span',
-    { class: `grade grade-${grade ?? 'none'}` },
-    grade ?? 'not run yet',
-  );
-  return el(
-    'section',
-    { class: 'card card-trust' },
-    el('h3', {}, 'B · trust'),
-    el(
-      'div',
-      { class: 'trust-line' },
-      'verified = ',
-      gradeEl,
-      f
-        ? ` · head ${num(f.head)} · l1 ${num(f.l1Accepted)} · lastEpoch ${f.lastEpoch} · floor ${num(f.historyFrom)} · staleness ${f.staleness}`
-        : '',
-    ),
-    el(
-      'div',
-      { class: 'persistence' },
-      `persistence: ${s.persistence} · persisted() = ${s.persisted}`,
-    ),
-  );
-}
-
-// ------------------------------------------------------------------ badges
-
-/**
- * Derived from ENGINE.kind, so a mock run cannot be screenshotted without it.
- * The full provenance is the title attribute — available on hover, never prose
- * on the page.
- */
-export function renderEngineBadge(s: DemoState): HTMLElement {
-  return el(
-    'span',
-    { class: `engine-badge engine-${s.engine.kind}`, title: s.engine.provenance },
-    s.engine.kind === 'mock' ? 'MOCK ENGINE' : 'WASM ENGINE',
-  );
-}
-
-export function renderIdentity(s: DemoState): HTMLElement {
-  if (!s.identity) return el('div', { class: 'identity none' }, 'none');
-  return el(
-    'div',
-    { class: 'identity' },
-    `${shortAddress(s.identity.address)} · keyId ${s.identity.keyIdPrefix}…`,
-    el(
-      'span',
-      { class: s.scanHits === 0 ? 'ok' : 'fail' },
-      s.scanHits === 0 ? ' · key in 0 requests' : ` · key in ${s.scanHits} REQUESTS`,
-    ),
-  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

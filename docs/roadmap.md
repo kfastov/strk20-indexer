@@ -1,112 +1,63 @@
-# Roadmap — TypeScript consumer path
+# Implementation status and next work
 
-Written 2026-08-30. Scope: turn the working read path into something a TypeScript
-web-app developer (or an agent writing one) can adopt without touching Rust.
+Updated 2026-09-06. Work is paused at the user's request after committing and
+pushing the current SDK and demo stages. Resume only on the user's instruction.
+The current contracts are [consumer path](spec/consumer-path.md),
+[SDK API](../ts/strk20-discovery/README.md), and [demo](spec/demo-app.md).
 
-## Architecture
+## Completed in this implementation
 
-Two blocks, one seam.
+- Complete pool-state verification at an independently selected accepted
+  Starknet RPC checkpoint; contract Patricia proof and global state commitment.
+- Cached Patricia updates and atomic candidate application. Failed verification
+  cannot replace the previous verified cache.
+- Folded WASM cache: restore state and discovery cursors without replaying epochs.
+  Local storage is explicitly trusted; SHA-256 is corruption detection only.
+- Actual official `DiscoveryProviderInterface`, spend witnesses and account-bound
+  convenience API. The official builder consumes our discovered note in a
+  fixture test; the proof/signature submission path is not executed in that test.
+- Full head/epoch SSE payloads, bounded queues and HTTP catch-up. The actual WASM
+  Worker test verifies an epoch advance with no follow-up artifact GET.
+- Browser wallet flow: create/backup/import, public funding, deploy, shield,
+  local discovery, private transfer and withdraw. Heavy state work is in a Worker.
+- Optional same-block dual observation, explicit viewing-key disclosure consent,
+  failures and cache conditions recorded. One transaction serves both observers.
+- Removed the mock engine, duplicate wrappers, synthetic replay bundle and stale
+  generated reference metrics. Test servers reserve ephemeral ports themselves;
+  child logging no longer depends on the parent environment.
 
-**Block A — ingest.** Node -> SQLite mirror -> feed (epochs, head, snapshots).
-Backend only; never runs in a browser.
+## Resume here
 
-**Block B — consumer state machine.** Fold the feed into a local mirror, run the
-unmodified upstream `discovery-core` over it, emit notes/balances/spent-state.
-Runs in two hosts: the backend (keyed mode, for self-hosters) and the browser
-(keyless mode, via WASM).
+1. Run the funded demo flow with the user and record the video. No funded
+   transaction was signed or submitted during implementation checks. The current
+   evidence covers unfunded wallet creation, real public checkpoint verification,
+   cache restoration and SDK builder consumption of a real fixture note.
+2. Migrate `examples/mainnet/lib.mjs` from the official remote discovery provider
+   to ours. A small Node host for the shared WASM runtime is still needed; the
+   browser demo already uses our provider. Keep storage and HTTP ownership clear.
+3. Measure incremental catch-up and discovery on a funded account. Full-mainnet
+   empty-account measurements: cold 37.85 s; fresh Worker/cache restores
+   292–299 ms. The repeat-start target is met for that measurement; this is not
+   a cold-start or all-device guarantee.
+4. Complete transaction failure/recovery review, including a lost submission
+   response without a transaction hash. The page currently blocks automatic
+   resubmission and retains the keys; there is no unknown-outcome recovery UI.
+5. Review Worker responsibility boundaries and remaining stale documentation,
+   then deploy and verify the hosted page. Git push is not a production deployment.
+6. Finish the hackathon video and submission metadata against the current rules.
+   External wallet adoption or upstream acceptance is not implied by a demo.
 
-**The seam is `FeedTransport`** (`crates/client/src/transport.rs`), already in
-place with `HttpTransport` and `DirTransport`. Block B does not know where bytes
-come from. Two impls to add: in-process (server reads its own DB directly) and,
-for the browser, none at all — TypeScript does the fetching and hands bytes to
-WASM.
+## After the main plan
 
-**Browser split.** WASM is a pure synchronous computer: bytes in, notes out. No
-network, no storage, no async JS inside Rust. IndexedDB, SSE, caching and every
-`await` live in the TypeScript wrapper. This is what keeps the engine's `Send`
-bounds satisfiable and the module testable.
+- AEAD for local state with an explicit key and attacker model. A replaceable key
+  stored beside the cache does not authenticate the cache against that attacker.
+- Ethereum-finalized checkpoint selection. Current mode trusts an accepted
+  Starknet RPC header; it does not prove L1 finality or intermediate history.
+- WebSocket measurements against full-payload SSE under identical conditions.
+- PIR/private cold-loading research: identify which state can be skipped while
+  preserving complete discovery and verifiable state. No unmeasured speed claim.
 
-## Two APIs, deliberately
-
-| | key | who computes | positioning |
-|---|---|---|---|
-| **Keyless** (default) | stays in the browser | client | the thing we sell |
-| **Delegated** | goes to a server you run | server | self-host / SDK compat |
-
-npm package: `KeylessClient` and `DelegatedClient` behind one interface
-(`getNotes(key)`, `subscribe(key)`).
-
-## Spike results (2026-08-30) — item 0, DONE
-
-Run against upstream at the pinned tag `CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08`
-(rev `74841ca`, same rev as `Cargo.lock`).
-
-- `starknet-providers` is declared in `discovery-core/Cargo.toml` but **used
-  nowhere** in its `src` or `tests` at that rev. Making it optional behind a
-  default-on `providers` feature is a two-line change — the shape of the
-  upstream PR.
-- With that gate, `cargo build -p discovery-core --no-default-features
-  --target wasm32-unknown-unknown` **succeeds** (43 s cold).
-- `strk20-feed` builds for `wasm32` with no features and with `mpt`. So MPT root
-  verification — the snapshot anchor check — can run client-side.
-- `strk20-feed` with `compress` does **not** build for wasm32 here: `zstd-sys`
-  shells out to Apple clang, which has no wasm backend ("No available targets
-  are compatible with triple wasm32-unknown-unknown"). Fixable with LLVM/wasi-sdk,
-  but the cleaner answer is to decompress in TypeScript and hand raw NDJSON to
-  the module.
-- `crates/client` is **not** wasm-portable as written: `rusqlite` (bundled C
-  SQLite) and `tokio::task::spawn_blocking` inside `ClientView`'s
-  `RawStorageAccess` impl. The browser needs an in-memory view, not this one.
-- End-to-end proof: a spike crate wrapping `sync_incoming_state` over
-  `MockBackend`, built with `wasm-pack --target nodejs`, run from Node against
-  `fixtures/upstream/devnet-state.json`:
-  `alice: slots=48 complete=true notes=1 in 32 ms`, `bob: ... notes=0 in 16 ms`.
-  Module size 427 KB raw, **231 KB gzip / 210 KB brotli**.
-
-Not yet measured: fold time for a realistic mirror (full mainnet history) inside
-the browser. That is the remaining sizing question.
-
-## Plan
-
-| # | What | Why | Size |
-|---|---|---|---|
-| 0 | ~~WASM spike~~ | done, see above | — |
-| 1 | Snapshots in the cutter + storage-root anchor, verified client-side | cold start O(1) instead of replaying all history; the anchor keeps the trust story the hash chain gave us | M |
-| 2 | SSE on the indexer: new head diffs, epoch-cut events | subscription instead of polling | M |
-| 3 | Package Block B as a pure WASM computer (bytes in, notes out); in-memory view replacing `ClientView` | prerequisite for the browser client | M |
-| 4 | npm `KeylessClient` + `DelegatedClient`, IndexedDB persistence, SSE, zstd in TS | the layer everything else exists for | L |
-| 5 | `strk20-sync serve`: keyed HTTP + SSE on the client binary; third `FeedTransport` impl reading the DB in-process | the self-host surface `DelegatedClient` talks to | M |
-| 6 | Sepolia config + test wallets/keys (pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`) | debugging without mainnet funds | S |
-| 7 | Upstream PR: feature-gate `starknet-providers` in `discovery-core` | removes our need for a patched fork | S |
-
-Order: 1 -> 2 -> 3 -> 4, with 5/6/7 parallel.
-
-## Deferred, with triggers
-
-- **OHTTP** for the delegated/compat mode (hides who is asking). Not needed in
-  keyless mode — every client fetches identical bytes. Trigger: delegated mode
-  gets non-self-hosted users.
-- **Prefix-bucket endpoint, then PIR.** See `docs/research/q9-pir.md` (git
-  history, removed 2026-09-02). Trigger:
-  snapshot exceeds ~50 MB, i.e. roughly 8x10^5 records.
-- **Write path in our binary.** Cut deliberately. Signing, key custody and a
-  prover are exactly the surface this project exists to avoid. We are instead
-  the read half of every write: the SDK cannot build a spend without knowing
-  your notes, and that is what we supply keylessly — plus post-submit
-  confirmation (nullifier landed, no reorg) through the subscription.
-
-## Protocol facts that constrain the above
-
-- Every pool write goes through `apply_actions`, which always validates a proof
-  and collects the fee. There is no separate `deposit`/`register` entry point.
-- Deposit screening: only deposits. `_apply_actions` returns a screening subject
-  for `TransferFrom` and open-note deposits; for everything else the contract
-  asserts `screening.is_none()`. The attestation is a SNIP-12
-  `DepositorValidation{depositor, issued_at}` signed by FPI, max age 300 s.
-- The hosted prover mints that attestation itself (its `proof-interceptor`
-  sidecar). A self-hosted prover cannot, so **self-hosting can do everything
-  except shield**.
-- The proving service and the preflight RPC both receive the pool private key in
-  `compile_actions` calldata. A hosted prover is therefore a permanent
-  confidentiality dependency — which is why the write path, if it ever happens,
-  belongs behind a self-hosted prover, and why shield stays in the user's wallet.
+Custom recoverable accounts and automatic recovery allowances remain out of
+scope. Demo keys are backed up together so both public and shielded funds remain
+recoverable. The hosted prover receives proving inputs; local discovery does not
+make that write-path service private.
