@@ -36,4 +36,4 @@ tokio = { workspace = true }
 # root-only), so size comes from wasm-opt instead — which is where most of it
 # was going to come from anyway.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

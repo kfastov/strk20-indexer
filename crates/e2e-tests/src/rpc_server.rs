@@ -384,7 +384,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
                     "block_hash": felt_hex(&chain.block_hash(n)),
                     "parent_hash": felt_hex(&chain.parent_hash(n)),
                     "timestamp": chain.timestamp(n),
-                    "new_root": "0x0",
+                    "new_root": felt_hex(&fixture_commitment(&chain, n, rpc.faults.hidden_slot).1),
                     "status": if n <= chain.l1_accepted { "ACCEPTED_ON_L1" } else { "ACCEPTED_ON_L2" },
                     "sequencer_address": "0x1",
                     "starknet_version": "0.14.0",
@@ -590,6 +590,8 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
             }
             let root = strk20_feed::mpt::storage_root(&set);
             let class = chain.class_at(n).unwrap_or(Felt::ZERO);
+            let leaf = strk20_feed::checkpoint::contract_leaf_hash(&class,&root,&Felt::ZERO);
+            let contracts_root = strk20_feed::mpt::edge_hash(&leaf,&chain.pool,251);
             // A proof from the anonymous pool that does not belong to the
             // block it names: the storage root is a real root, the block hash
             // is not this block's. Only the §12 chain binding separates the
@@ -624,7 +626,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
                 json!({
                     "classes_proof": [],
                     "contracts_proof": {
-                        "nodes": [],
+                        "nodes": [{"node_hash":felt_hex(&contracts_root),"node":{"child":felt_hex(&leaf),"path":felt_hex(&chain.pool),"length":251}}],
                         "contract_leaves_data": [{
                             "nonce": "0x0",
                             "class_hash": felt_hex(&class),
@@ -633,8 +635,8 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
                     },
                     "contracts_storage_proofs": [storage_proof],
                     "global_roots": {
-                        "contracts_tree_root": "0x0",
-                        "classes_tree_root": "0x0",
+                        "contracts_tree_root": felt_hex(&contracts_root),
+                        "classes_tree_root": "0x1",
                         "block_hash": felt_hex(&proof_block_hash),
                     }
                 }),
@@ -660,4 +662,15 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
         }
         other => rpc_err(id, -32601, &format!("method not found: {other}")),
     }
+}
+
+// The header and proof commit to the fixture chain, including slots deliberately
+// hidden from the indexer's event scan. This exercises the complete proof path.
+fn fixture_commitment(chain:&FixtureChain, block:u64, hidden:Option<(Felt,Felt)>) -> (Felt,Felt) {
+    let mut slots=chain.state_at(block);
+    if let Some(slot)=hidden {slots.push(slot);}
+    let root=strk20_feed::mpt::storage_root(&slots);
+    let leaf=strk20_feed::checkpoint::contract_leaf_hash(&chain.class_at(block).unwrap_or(Felt::ZERO),&root,&Felt::ZERO);
+    let contracts=strk20_feed::mpt::edge_hash(&leaf,&chain.pool,251);
+    (contracts,strk20_feed::checkpoint::state_commitment(&contracts,&Felt::ONE))
 }

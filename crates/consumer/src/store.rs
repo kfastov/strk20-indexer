@@ -26,7 +26,7 @@ use strk20_feed::codec::BlockLine;
 use strk20_feed::snapshot::SnapSlot;
 
 /// One row of the owner-scoped note registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NoteRow {
     pub note_id: Felt,
     pub owner: Felt,
@@ -70,15 +70,12 @@ pub struct ApplyOutcome {
     pub last_epoch_to: u64,
     /// basis block of the snapshot this mirror was cold-started from
     pub snapshot_basis: Option<u64>,
-    /// a snapshot was offered, failed verification, and `auto` fell back
-    pub snapshot_rejected: bool,
     /// lowest block for which this mirror holds EVENTS (§1.1)
     pub history_floor: u64,
 }
 
-/// How an empty mirror is populated (§1.7). `auto` is the default: the
-/// snapshot branch, with the C13 fallback to full epoch replay when the
-/// snapshot cannot be grounded.
+/// How to populate an empty mirror. Auto uses a published snapshot when
+/// present, otherwise epoch replay. Invalid supplied snapshots are errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColdStart {
     #[default]
@@ -124,6 +121,12 @@ pub trait ConsumerStore: Send + Sync {
     /// zero-value rows excluded) — the input a client folds into a storage
     /// root when checking an anchor.
     fn full_slot_set_as_of(&self, block: u64) -> Result<Vec<(Felt, Felt)>>;
+
+    fn storage_root_at(&self, block: u64) -> Result<Felt> {
+        Ok(strk20_feed::mpt::storage_root(
+            &self.full_slot_set_as_of(block)?,
+        ))
+    }
 
     /// A read view bound to `block` for the discovery engine. Implementations
     /// must refuse a bound below the snapshot basis; call

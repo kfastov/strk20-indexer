@@ -71,12 +71,8 @@ pub struct SyncReport {
     /// must never be answered with zeros (§1.1).
     pub history_from: u64,
     pub snapshot_basis: Option<u64>,
-    /// A snapshot was offered and refused; `auto` fell back to epoch replay.
-    pub snapshot_rejected: bool,
-    /// §1.5.1 — the integrity grade, surfaced rather than implied:
-    /// `"replayed"` (epoch chain from genesis), `"anchored"` (snapshot plus a
-    /// ring-6 check against the user's own RPC), `"server-asserted"` (snapshot
-    /// grounded only by reachability against an anchor the SERVER published).
+    /// `rpc-verified` authenticates complete state at the selected block.
+    /// `server-asserted` only validates the publisher's file format and hashes.
     pub verified: String,
 }
 
@@ -157,25 +153,28 @@ pub async fn run_incoming<S: ConsumerStore>(
     owner: Felt,
     key: &SecretFelt,
     mut cursor: DiscoveryCursor,
-) -> Result<(DiscoveryCursor, Vec<discovery_core::discovery::notes::DecryptedNote>)> {
+) -> Result<(
+    DiscoveryCursor,
+    Vec<discovery_core::discovery::notes::DecryptedNote>,
+)> {
     reopen_cursor(&mut cursor);
     let view = store.view(bound)?;
     let mut notes = Vec::new();
     for _ in 0..MAX_PASSES {
         let budget = IoBudget::new(PASS_BUDGET);
-        let out = sync_incoming_state(
-            &view,
-            owner,
-            key,
-            cursor,
-            CursorLimits::default(),
-            &budget,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("incoming discovery failed: {e}"))?;
+        let out = sync_incoming_state(&view, owner, key, cursor, CursorLimits::default(), &budget)
+            .await
+            .map_err(|e| anyhow::anyhow!("incoming discovery failed: {e}"))?;
         notes.extend(out.notes);
         cursor = out.cursor;
         if cursor.is_complete() {
+            // Upstream reports total=0 when a resumed scan finds no new notes.
+            // Our complete cursor describes the whole state, including old notes.
+            for channel in cursor.channels.values_mut() {
+                for sub in channel.subchannels.values_mut() {
+                    sub.total_n_notes = Some(sub.last_note_index.map_or(0, |n| n + 1));
+                }
+            }
             return Ok((cursor, notes));
         }
     }
@@ -278,10 +277,10 @@ pub fn register_scanned_notes<S: ConsumerStore>(
     cursor: &DiscoveryCursor,
     bound: u64,
 ) -> Result<usize> {
-    let known: std::collections::BTreeSet<[u8; 32]> = store
+    let known: std::collections::BTreeSet<([u8; 32], [u8; 32], u64)> = store
         .notes(owner)?
         .iter()
-        .map(|n| n.note_id.to_bytes_be())
+        .map(|n| (n.sender.to_bytes_be(), n.token.to_bytes_be(), n.index))
         .collect();
     let mut added = 0usize;
     for (sender, channel) in &cursor.channels {
@@ -294,10 +293,10 @@ pub fn register_scanned_notes<S: ConsumerStore>(
                 continue;
             };
             for index in 0..=last {
-                let note_id = compute_note_id(&channel.channel_key, *token, index);
-                if known.contains(&note_id.to_bytes_be()) {
+                if known.contains(&(sender.to_bytes_be(), token.to_bytes_be(), index)) {
                     continue;
                 }
+                let note_id = compute_note_id(&channel.channel_key, *token, index);
                 let (packed, block) =
                     store.read_slot_as_of(&storage_slots::notes(note_id), bound)?;
                 if packed == Felt::ZERO {
@@ -350,11 +349,7 @@ pub fn refresh_spent<S: ConsumerStore>(store: &S, owner: &Felt, block: u64) -> R
 /// precise reorg cleanup (covers both direct and masked tail replacements; a
 /// canonical note re-added by the new tail/epoch is rediscovered by the next
 /// engine pass).
-pub fn prune_missing_notes<S: ConsumerStore>(
-    store: &S,
-    owner: &Felt,
-    as_of: u64,
-) -> Result<usize> {
+pub fn prune_missing_notes<S: ConsumerStore>(store: &S, owner: &Felt, as_of: u64) -> Result<usize> {
     let notes = store.notes(owner)?;
     let mut pruned = 0;
     for n in notes {
@@ -374,7 +369,10 @@ pub fn prune_missing_notes<S: ConsumerStore>(
 pub async fn check_chain_id(transport: &dyn FeedTransport, expected: &str) -> Result<()> {
     let genesis = transport.fetch_genesis().await?;
     let manifest = transport.fetch_manifest().await?;
-    for (source, found) in [("genesis", &genesis.chain_id), ("manifest", &manifest.chain_id)] {
+    for (source, found) in [
+        ("genesis", &genesis.chain_id),
+        ("manifest", &manifest.chain_id),
+    ] {
         if found != expected {
             bail!("feed {source} chain id {found} is not the expected chain {expected}");
         }
@@ -391,6 +389,8 @@ pub fn full_resync<S: ConsumerStore>(store: &S, owner: &Felt) -> Result<()> {
         store.meta_set(&format!("ckpt_{kind}_{a}"), "")?;
         store.meta_set(&format!("ckpt_at_{kind}_{a}"), "")?;
     }
+    store.meta_set(&format!("sdk_{a}_stamp"), "")?;
+    store.meta_set(&format!("sdk_{a}_block"), "0")?;
     store.delete_owner_notes(owner)?;
     Ok(())
 }
@@ -420,70 +420,43 @@ pub async fn sync_once<S: ConsumerStore>(
 ) -> Result<SyncReport> {
     let outcome: ApplyOutcome = apply_feed(store, transport, opts.cold_start).await?;
 
-    // §1.5 ring 6 — the ONLY ring that grounds this mirror in the chain itself.
-    // Address-blind by construction: the request names a public pool and a
-    // public block, so it is identical for every user and the feed server stays
-    // outside the proof path.
-    //
-    // "Configured means mandatory" applies to the one outcome that is evidence
-    // about the data: a MISMATCH fails the sync. A capability gap is not that
-    // (§11.4/§11.5) — an endpoint that does not implement getStorageProof, or
-    // whose window has moved past every block we can ask about, has said
-    // nothing, and failing the sync for it is LIVE-6.
-    let grounded = match (&opts.anchor_proofs, outcome.snapshot_basis) {
-        (Some(proofs), Some(basis)) => {
-            let outcome6 = ground_mirror_against_rpc(
-                store,
-                transport,
-                proofs.as_ref(),
-                basis,
-                outcome.head,
-            )
-            .await;
-            let outcome6 = match outcome6 {
-                Ok(o) => o,
-                Err(e) => {
-                    // The user's own RPC has PROVEN this mirror is not the
-                    // chain's. Leaving the rows on disk is how one rejection
-                    // becomes a permanently poisoned db: the next sync sees a
-                    // non-empty mirror, never re-enters the snapshot branch,
-                    // and happily builds on the slot set that was just refuted.
-                    store.reset_mirror()?;
-                    return Err(e);
-                }
-            };
-            match outcome6 {
-                Grounding::Anchored(block) => {
-                    tracing::info!(block, "mirror grounded against your own RPC (ring 6)");
-                    true
-                }
-                Grounding::Unavailable(why) => {
-                    tracing::warn!(
-                        rpc = %proofs.label(),
-                        reason = %why,
-                        "ring 6 established no grounding: no candidate block could be \
-                         proved AND pinned to a block hash this mirror holds. That is a \
-                         statement about the ENDPOINT and the proof it offered, not about \
-                         the mirror's data, so the sync stands and the grade degrades to \
-                         server-asserted. It is NOT \"anchored, and the check passed\"."
-                    );
-                    false
-                }
+    let verified = if let Some(proofs) = &opts.anchor_proofs {
+        match ground_mirror_against_rpc(
+            store,
+            transport,
+            proofs.as_ref(),
+            outcome.snapshot_basis.unwrap_or(0),
+            outcome.head,
+        )
+        .await?
+        {
+            Grounding::Anchored(_) => "rpc-verified",
+            Grounding::Unavailable(reason) => {
+                bail!("CHECKPOINT_UNAVAILABLE: {reason}")
             }
         }
-        _ => false,
+    } else {
+        "server-asserted"
     };
-    let verified = match (outcome.snapshot_basis, grounded) {
-        (None, _) => "replayed",
-        (Some(_), true) => "anchored",
-        (Some(_), false) => "server-asserted",
-    };
-    if verified == "server-asserted" {
-        tracing::warn!(
-            "integrity grade is server-asserted: the snapshot's slot set is attested only \
-             by an anchor the feed itself published. Configure --verify-anchor <rpc> for \
-             \"anchored\", or --cold-start epochs for \"replayed\"."
-        );
+    anyhow::ensure!(store.meta_get("verification_failed")?.as_deref() != Some("1"),
+        "CHECKPOINT_FAILED: previous state verification failed; a successful checkpoint check is required");
+    discover_state(store, owner, key, outcome, verified).await
+}
+
+/// Discovery over already folded state; hosts choose the verified bound before
+/// calling. It never fetches or folds feed bytes.
+pub async fn discover_state<S: ConsumerStore>(
+    store: &S,
+    owner: Felt,
+    key: &SecretFelt,
+    outcome: ApplyOutcome,
+    verified: &str,
+) -> Result<SyncReport> {
+    let fingerprint = hex::encode(strk20_feed::payload_sha256(&key.to_bytes_be()));
+    let identity_key = format!("key_{}", strk20_feed::felt_hex(&owner));
+    if store.meta_get(&identity_key)?.as_deref() != Some(&fingerprint) {
+        full_resync(store, &owner)?;
+        store.meta_set(&identity_key, &fingerprint)?;
     }
     let in_keys = keys("in", &owner);
     let out_keys = keys("out", &owner);
@@ -514,7 +487,7 @@ pub async fn sync_once<S: ConsumerStore>(
     }
 
     // --------------------------- checkpoint pass (bound = last epoch end)
-    if outcome.last_epoch_to > 0 {
+    if verified == "server-asserted" && outcome.last_epoch_to > 0 {
         let stored_at: Option<u64> = store
             .meta_get(&in_keys.ckpt_at)?
             .and_then(|s| s.parse().ok());
@@ -539,7 +512,8 @@ pub async fn sync_once<S: ConsumerStore>(
         Some(json) => serde_json::from_str(&json)?,
         None => load_cursor(store, &in_keys.ckpt)?.unwrap_or_default(),
     };
-    let (in_cursor, in_notes) = run_incoming(store, outcome.head, owner, key, live_start_in).await?;
+    let (in_cursor, in_notes) =
+        run_incoming(store, outcome.head, owner, key, live_start_in).await?;
     register_notes(store, &owner, key, &in_cursor, &in_notes)?;
     register_scanned_notes(store, &owner, key, &in_cursor, outcome.head)?;
     save_cursor(store, &in_keys.live, &in_cursor)?;
@@ -560,9 +534,7 @@ pub async fn sync_once<S: ConsumerStore>(
     let notes = store.notes(&owner)?;
     let mut balances: std::collections::BTreeMap<String, u128> = Default::default();
     for n in notes.iter().filter(|n| !n.spent) {
-        *balances
-            .entry(strk20_feed::felt_hex(&n.token))
-            .or_default() += n.amount;
+        *balances.entry(strk20_feed::felt_hex(&n.token)).or_default() += n.amount;
     }
     Ok(SyncReport {
         address: strk20_feed::felt_hex(&owner),
@@ -594,7 +566,6 @@ pub async fn sync_once<S: ConsumerStore>(
         newly_spent: newly_spent.iter().map(strk20_feed::felt_hex).collect(),
         history_from: outcome.history_floor,
         snapshot_basis: outcome.snapshot_basis,
-        snapshot_rejected: outcome.snapshot_rejected,
         verified: verified.to_owned(),
     })
 }

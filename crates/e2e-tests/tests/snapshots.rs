@@ -70,6 +70,7 @@ const EPOCH_SIZE: u64 = 16;
 /// The snapshot the fixture publishes: epoch 1 = blocks [16, 31].
 const BASIS_EPOCH: u64 = 1;
 const BASIS_BLOCK: u64 = 31;
+const SNAPSHOT_ANCHOR_FILE: &str = "snapshots/00000001.anchor.json";
 const SNAPSHOT_FILE: &str = "snapshots/00000001.strk20s.zst";
 
 /// An endpoint whose trie retention really is narrow, scaled to the fixture.
@@ -857,10 +858,9 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
 /// comparison deletes exactly these and compares everything else, so a field
 /// added to the report later lands in the compared set by default and cannot
 /// silently fall out of the equality.
-const REPORT_EXEMPT: [&str; 4] = [
+const REPORT_EXEMPT: [&str; 3] = [
     "history_from",
     "snapshot_basis",
-    "snapshot_rejected",
     "verified",
 ];
 
@@ -892,7 +892,7 @@ fn assert_grades(replay: &Value, snapshot: &Value) {
     );
     assert_eq!(
         replay["verified"].as_str(),
-        Some("replayed"),
+        Some("server-asserted"),
         "§1.5.1: an epoch-replayed mirror carries the base §9 epoch-chain guarantee: {replay}"
     );
     assert_eq!(
@@ -905,10 +905,6 @@ fn assert_grades(replay: &Value, snapshot: &Value) {
         snapshot["snapshot_basis"].as_u64(),
         Some(BASIS_BLOCK),
         "the snapshot-started client must name its basis: {snapshot}"
-    );
-    assert_eq!(
-        snapshot["snapshot_rejected"], Value::Bool(false),
-        "the snapshot was accepted here: {snapshot}"
     );
     assert_eq!(
         snapshot["verified"].as_str(),
@@ -1075,7 +1071,7 @@ async fn s3_reachability_reproduces_the_anchor_root_across_the_snapshot_seam() {
     assert!(ok, "snapshot cold start with an anchor RPC failed: {grounded}");
     assert_eq!(
         grounded["verified"].as_str(),
-        Some("anchored"),
+        Some("rpc-verified"),
         "§11.3: an anchor is a server assertion until the client checks it against an \
          RPC it trusts. Recent anchors are exactly what the ~1024-block window serves, \
          so with --verify-anchor the grade rises to \"anchored\": {grounded}"
@@ -1083,210 +1079,25 @@ async fn s3_reachability_reproduces_the_anchor_root_across_the_snapshot_seam() {
     assert_reports_equal(&report, &grounded, "ring 6 grounding");
 }
 
-// ------------------------------------------------------------------- S4
-
-/// S4 — the negative of S3, so S3 cannot pass vacuously.
-///
-/// (i) corruption is caught by the transport hash, named;
-/// (ii) the case rings 1-5 CANNOT catch — a server that alters a slot and
-///      recomputes every root it publishes so the file is internally perfect
-///      — is caught by reachability against the anchors log, because the
-///      anchor's root is a claim about the CHAIN that the altered slot set
-///      cannot reproduce. This is what §11.3 buys over the superseded
-///      point-proof sidecar.
+// Transport corruption is rejected before discovery, in both cold modes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s4_tampered_and_unreachable_snapshots_are_rejected_by_name() {
+async fn s4_corrupt_snapshot_is_rejected_without_silent_fallback() {
     ensure_built();
-    let seed = seed_chain().await;
-    let (_rpc, dir) = backfilled_feed(&seed).await;
-    assert_snapshot_published(dir.path());
-    let feed = feed_dir(dir.path()).display().to_string();
-    let file = feed_dir(dir.path()).join(SNAPSHOT_FILE);
-    let manifest_path = feed_dir(dir.path()).join("manifest.json");
-    let original_zst = std::fs::read(&file).unwrap();
-    let original_manifest = std::fs::read(&manifest_path).unwrap();
-
-    // control: the untouched snapshot is accepted, so every rejection below
-    // is about the tamper and not about a client that refuses everything
-    let (control, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "control.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(ok, "the untouched snapshot must be accepted: {control}");
-    let good_notes = client_notes(&control);
-
-    // ---------------------------------------------- (i) transport corruption
-    let mut flipped = original_zst.clone();
-    let mid = flipped.len() / 2;
-    flipped[mid] ^= 0xff;
-    std::fs::write(&file, &flipped).unwrap();
-    let (err, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "flip.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(!ok, "a corrupted snapshot file must be rejected: {err}");
-    let text = err["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("FEED_HASH_MISMATCH"),
-        "§1.5 ring 1: the .zst sha256 is verified BEFORE decompression and the failure \
-         is named FEED_HASH_MISMATCH (R-I). Got:\n{text}"
-    );
-    std::fs::write(&file, &original_zst).unwrap();
-
-    // ------------------------------- (ii) the consistently-recomputed lie
-    let payload = strk20_feed::decompress(&original_zst).unwrap();
-    let mut doc = snapshot_fmt::parse(&payload).expect("snapshot parses");
-    let victim = doc.slots[0];
-    assert!(
-        seed.chain.write_block_of(&victim.k).unwrap_or(0) <= BASIS_BLOCK,
-        "the altered slot must not be rewritten above the basis, or folding the feed \
-         would silently repair it"
-    );
-    doc.slots[0].v = victim.v + Felt::ONE;
-    let slot_pairs: Vec<(Felt, Felt)> = doc.slots.iter().map(|s| (s.k, s.v)).collect();
-    doc.header.storage_root = strk20_feed::mpt::storage_root(&slot_pairs);
-    let forged_payload = snapshot_fmt::encode(&doc);
-    let forged_zst = strk20_feed::compress(&forged_payload);
-    std::fs::write(&file, &forged_zst).unwrap();
-    {
-        let mut manifest: Value = serde_json::from_slice(&original_manifest).unwrap();
-        manifest["snapshot"]["hash"] = Value::String(sha256_hex(&forged_payload));
-        manifest["snapshot"]["zst"] = Value::String(sha256_hex(&forged_zst));
-        manifest["snapshot"]["bytes"] = Value::from(forged_zst.len() as u64);
-        manifest["snapshot"]["storage_root"] = Value::String(felt_hex(&doc.header.storage_root));
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let seed=seed_chain().await;
+    let (_rpc,dir)=backfilled_feed(&seed).await;
+    let feed=feed_dir(dir.path()).display().to_string();
+    let file=feed_dir(dir.path()).join(SNAPSHOT_FILE);
+    let original=std::fs::read(&file).unwrap();
+    let mut corrupt=original.clone(); corrupt[10]^=1;
+    std::fs::write(&file,corrupt).unwrap();
+    for mode in ["snapshot","auto"] {
+        let (error,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b",&format!("{mode}.db"),&["--cold-start",mode]);
+        assert!(!ok,"corruption must not trigger a silent replay: {error}");
+        assert!(error.to_string().contains("FEED_HASH_MISMATCH"),"{error}");
     }
-
-    let (err, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "forged.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(
-        !ok,
-        "a snapshot whose slot set cannot reach the published anchor must be refused. \
-         Rings 1-5 all PASS on this file — every root it can be compared against was \
-         recomputed by the same forger — so only the §11.3 reachability check stands \
-         between a client and an altered slot set: {err}"
-    );
-    let text = err["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("SNAPSHOT_UNREACHABLE"),
-        "§11.3: the failure is a reachability failure and must be named \
-         SNAPSHOT_UNREACHABLE, naming the anchor block it could not reproduce. Got:\n{text}"
-    );
-    assert!(
-        !text.contains("FEED_HASH_MISMATCH"),
-        "the forged file is internally consistent: a hash error here means the test \
-         forged it wrong, not that the client caught the lie:\n{text}"
-    );
-
-    // ---- the refusal must not leave the refused rows behind
-    //
-    // `apply_snapshot` COMMITS the slot set long before §11.3 reachability can
-    // run — the epochs above the basis and the head tail have to land first,
-    // because reachability validates them too. So a rejected snapshot leaves a
-    // populated mirror unless something clears it, and a populated mirror is
-    // never empty again: the next sync skips the snapshot branch entirely and
-    // therefore skips the grounding, leaving the client permanently on a slot
-    // set it explicitly refused once. Re-running the same db is exactly what an
-    // operator does after seeing a rejection.
-    let (again, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "forged.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(
-        !ok,
-        "a second run against the same db must reject the same snapshot again. It \
-         succeeded, which means the refused slot set survived the first rejection and \
-         was then accepted with no grounding at all: {again}"
-    );
-    assert!(
-        again["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("SNAPSHOT_UNREACHABLE"),
-        "and for the same reason: {again}"
-    );
-    // The same db is also usable again once the operator asks for the honest
-    // path — proof the rejection cleaned up rather than wedging the mirror.
-    let (recovered, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "forged.db",
-        &["--cold-start", "epochs"],
-    );
-    assert!(ok, "epoch replay on the cleaned-up db must work: {recovered}");
-    assert_eq!(
-        recovered["snapshot_basis"],
-        Value::Null,
-        "no trace of the refused snapshot may remain: {recovered}"
-    );
-    assert_eq!(recovered["history_from"].as_u64(), Some(0), "{recovered}");
-    assert_eq!(recovered["verified"].as_str(), Some("replayed"), "{recovered}");
-    assert_eq!(client_notes(&recovered), good_notes);
-
-    // C13 fallback: `auto` degrades to epoch replay instead of failing
-    let (fallback, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "fallback.db",
-        &["--cold-start", "auto"],
-    );
-    assert!(
-        ok,
-        "§1.7 C13: under `auto` a rejected snapshot falls back to full epoch replay \
-         rather than failing the sync: {fallback}"
-    );
-    assert_eq!(
-        fallback["snapshot_rejected"],
-        Value::Bool(true),
-        "the fallback must be reported, not silent: {fallback}"
-    );
-    assert_eq!(
-        fallback["verified"].as_str(),
-        Some("replayed"),
-        "after falling back the mirror carries the epoch-chain guarantee: {fallback}"
-    );
-    assert_eq!(fallback["history_from"].as_u64(), Some(0), "{fallback}");
-    assert_eq!(
-        client_notes(&fallback),
-        good_notes,
-        "the fallback must reach the same discovery result as the honest snapshot path"
-    );
-
-    // control again on restored bytes
-    std::fs::write(&file, &original_zst).unwrap();
-    std::fs::write(&manifest_path, &original_manifest).unwrap();
-    let (restored, ok) = sync_with(
-        dir.path(),
-        &feed,
-        &seed.bob,
-        "0xb0b",
-        "restored.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(ok, "the restored snapshot must verify again: {restored}");
-    assert_eq!(client_notes(&restored), good_notes);
+    std::fs::write(&file,original).unwrap();
+    let (_,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b","auto.db",&["--cold-start","auto"]);
+    assert!(ok,"an uninstalled corrupt snapshot must not wedge the store");
 }
 
 // ------------------------------------------------------------------- S5
@@ -1383,7 +1194,7 @@ async fn s5_no_snapshot_until_the_publication_gate_is_met() {
         &["--cold-start", "auto"],
     );
     assert!(ok, "`auto` against a snapshot-less feed must simply replay: {fell_back}");
-    assert_eq!(fell_back["verified"].as_str(), Some("replayed"), "{fell_back}");
+    assert_eq!(fell_back["verified"].as_str(), Some("server-asserted"), "{fell_back}");
 
     // ---- the endpoint regains the capability and the head moves on
     rpc.set_proofs_supported(true);
@@ -1553,300 +1364,45 @@ fn grow(rpc: &FixtureRpc, head: u64, l1_accepted: u64) {
     chain.l1_accepted = l1_accepted;
 }
 
-/// A feed server that answers `anchors.ndjson` DIFFERENTLY on its first
-/// request and every request after it, serving every other file straight from
-/// the mirror directory.
-///
-/// This exists to make one specific composition failure observable. Two
-/// separate checks used to read the anchors log through two separate GETs —
-/// §11.3 reachability compared the MIRROR against a record from its own fetch,
-/// and ring 6 compared a record from ITS own fetch against the chain — and
-/// those compose into "the mirror is the chain's" only if both fetches returned
-/// the same record. Nothing made them. Both are byte-identical parameterless
-/// GETs, so a server can simply answer them differently; an honest server
-/// breaks the same composition for free by appending an anchor in between.
-struct TwoFacedFeed {
-    dir: PathBuf,
-    first: Vec<u8>,
-    rest: Vec<u8>,
-    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl TwoFacedFeed {
-    async fn serve(self) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        use axum::extract::State;
-        use axum::http::{StatusCode, Uri};
-        use axum::response::{IntoResponse, Response};
-        use std::sync::atomic::Ordering;
-
-        let requests = self.requests.clone();
-        let state = std::sync::Arc::new(self);
-
-        async fn handler(
-            State(s): State<std::sync::Arc<TwoFacedFeed>>,
-            uri: Uri,
-        ) -> Response {
-            let path = uri.path().trim_start_matches('/');
-            let rel = path.strip_prefix("feed/").unwrap_or(path);
-            if rel == "anchors.ndjson" {
-                let n = s.requests.fetch_add(1, Ordering::SeqCst);
-                let body = if n == 0 { s.first.clone() } else { s.rest.clone() };
-                return (StatusCode::OK, body).into_response();
-            }
-            match std::fs::read(s.dir.join(rel)) {
-                Ok(b) => (StatusCode::OK, b).into_response(),
-                Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
-            }
-        }
-
-        let app = axum::Router::new()
-            .fallback(axum::routing::get(handler))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        (format!("http://{addr}/feed"), requests)
-    }
-}
-
-// ------------------------------------------------------------------- S7
-
-/// S7 — spec leg m(ii-b), in its §11 form: the malicious-server case that S4
-/// deliberately cannot reach.
-///
-/// S4's forgery rewrites the snapshot and every root INSIDE the content-addressed
-/// artifacts, and is caught by §11.3 reachability against `anchors.ndjson`. But
-/// the anchors log is NOT content-addressed and is not in the epoch hash chain —
-/// `crates/client/src/anchors.rs` says so in its own header: "a hostile feed can
-/// write whatever it likes there". A server that forges the log CONSISTENTLY
-/// with its forged snapshot therefore defeats reachability too, and only ring 6
-/// — the user's OWN RPC — is left.
-///
-/// The leg asserts both directions, because the reduced grade of §1.5.2/§11.3 is
-/// a claim about what is NOT caught as much as about what is:
-///
-///   - with no ring 6, NOTHING catches it: rings 1-5 pass, reachability passes,
-///     the client accepts the tampered slot set and reports
-///     `verified: "server-asserted"`. Asserted POSITIVELY, so any future claim
-///     that the offline ladder is proof-grade against the server turns this red.
-///   - with ring 6 configured, the user's own RPC catches it and `verified`
-///     never reaches `"anchored"`.
+// A self-consistent forged snapshot passes publisher checks, but fails an
+// independently selected header plus contract proof plus complete state root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s7_a_server_that_forges_the_anchors_log_too_is_caught_only_by_ring_6() {
+async fn s7_forged_state_fails_checkpoint_and_cannot_downgrade_after_failure() {
     ensure_built();
-    let seed = seed_chain().await;
-    let (rpc, dir) = backfilled_feed(&seed).await;
-    assert_snapshot_published(dir.path());
-    let feed = feed_dir(dir.path()).display().to_string();
-    let file = feed_dir(dir.path()).join(SNAPSHOT_FILE);
-    let manifest_path = feed_dir(dir.path()).join("manifest.json");
-    let anchors_path = feed_dir(dir.path()).join("anchors.ndjson");
-    let original_zst = std::fs::read(&file).unwrap();
-    let original_manifest = std::fs::read(&manifest_path).unwrap();
-    let original_anchors = std::fs::read(&anchors_path).unwrap();
-
-    // control: the honest feed is accepted at BOTH grades
-    let (control, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-control.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(ok, "the untouched snapshot must be accepted: {control}");
-    let honest_notes = client_notes(&control);
-    let rpc_url = format!("http://{}/", rpc.serve().await);
-    let (control6, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-control6.db",
-        &["--cold-start", "snapshot", "--verify-anchor", &rpc_url],
-    );
-    assert!(ok, "the untouched snapshot must ground against an honest RPC: {control6}");
-    assert_eq!(control6["verified"].as_str(), Some("anchored"), "{control6}");
-
-    // ---- forge the snapshot, then forge the anchors log to MATCH it
-    let payload = strk20_feed::decompress(&original_zst).unwrap();
-    let mut doc = snapshot_fmt::parse(&payload).expect("snapshot parses");
-    let victim = doc.slots[0];
-    assert!(
-        seed.chain.write_block_of(&victim.k).unwrap_or(0) <= BASIS_BLOCK,
-        "the altered slot must not be rewritten above the basis, or folding the feed \
-         would silently repair it"
-    );
-    let forged_value = victim.v + Felt::ONE;
-    doc.slots[0].v = forged_value;
-    let slot_pairs: Vec<(Felt, Felt)> = doc.slots.iter().map(|s| (s.k, s.v)).collect();
-    doc.header.storage_root = strk20_feed::mpt::storage_root(&slot_pairs);
-    let forged_payload = snapshot_fmt::encode(&doc);
-    let forged_zst = strk20_feed::compress(&forged_payload);
-    std::fs::write(&file, &forged_zst).unwrap();
-    {
-        let mut manifest: Value = serde_json::from_slice(&original_manifest).unwrap();
-        manifest["snapshot"]["hash"] = Value::String(sha256_hex(&forged_payload));
-        manifest["snapshot"]["zst"] = Value::String(sha256_hex(&forged_zst));
-        manifest["snapshot"]["bytes"] = Value::from(forged_zst.len() as u64);
-        manifest["snapshot"]["storage_root"] = Value::String(felt_hex(&doc.header.storage_root));
-        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let seed=seed_chain().await;
+    let (rpc,dir)=backfilled_feed(&seed).await;
+    let feed=feed_dir(dir.path()).display().to_string();
+    let rpc_url=format!("http://{}/",rpc.serve().await);
+    let checked=["--cold-start","snapshot","--verify-anchor",&rpc_url];
+    let (control,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b","control.db",&checked);
+    assert!(ok,"{control}");assert_eq!(control["verified"],"rpc-verified");
+    let file=feed_dir(dir.path()).join(SNAPSHOT_FILE);
+    let manifest_file=feed_dir(dir.path()).join("manifest.json");
+    let original=std::fs::read(&file).unwrap();
+    let mut manifest:Value=serde_json::from_slice(&std::fs::read(&manifest_file).unwrap()).unwrap();
+    let mut doc=snapshot_fmt::parse(&strk20_feed::decompress(&original).unwrap()).unwrap();
+    let victim=doc.slots[0];
+    assert!(seed.chain.write_block_of(&victim.k).unwrap_or(0)<=BASIS_BLOCK);
+    doc.slots[0].v+=Felt::ONE;
+    doc.header.storage_root=strk20_feed::mpt::storage_root(&doc.slots.iter().map(|s|(s.k,s.v)).collect::<Vec<_>>());
+    let payload=snapshot_fmt::encode(&doc);
+    let compressed=strk20_feed::compress(&payload);
+    manifest["snapshot"]["hash"]=sha256_hex(&payload).into();
+    manifest["snapshot"]["zst"]=sha256_hex(&compressed).into();
+    manifest["snapshot"]["bytes"]=compressed.len().into();
+    manifest["snapshot"]["storage_root"]=felt_hex(&doc.header.storage_root).into();
+    std::fs::write(&file,compressed).unwrap();
+    std::fs::write(&manifest_file,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let (unchecked,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b","unchecked.db",&["--cold-start","snapshot"]);
+    assert!(ok,"{unchecked}");assert_eq!(unchecked["verified"],"server-asserted");
+    for _ in 0..2 {
+        let (error,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b","checked.db",&checked);
+        assert!(!ok,"{error}");assert!(error.to_string().contains("CHECKPOINT_STATE_MISMATCH"),"{error}");
     }
-    // Every anchor's storage_root becomes the root the FORGED slot set folds to
-    // at that block — block hashes and classes left honest, because the forger
-    // has no reason to touch what the mirror can check another way.
-    let forged_anchor_blocks: Vec<u64> = {
-        let text = std::fs::read_to_string(&anchors_path).unwrap();
-        let mut out = String::new();
-        let mut blocks = Vec::new();
-        for line in text.lines() {
-            let mut v: Value = serde_json::from_str(line).unwrap();
-            let block = v["block"].as_u64().unwrap();
-            let mut set: Vec<(Felt, Felt)> = expected_slots(&seed.chain, block);
-            for (k, value) in set.iter_mut() {
-                if *k == victim.k {
-                    *value = forged_value;
-                }
-            }
-            v["storage_root"] = Value::String(felt_hex(&strk20_feed::mpt::storage_root(&set)));
-            out.push_str(&serde_json::to_string(&v).unwrap());
-            out.push('\n');
-            blocks.push(block);
-        }
-        std::fs::write(&anchors_path, out).unwrap();
-        blocks
-    };
-    assert!(
-        !forged_anchor_blocks.is_empty(),
-        "non-vacuity: there must be anchors to forge, or reachability had nothing to \
-         check in the first place"
-    );
-
-    // ---- (a) with NO ring 6, nothing catches it. This is the honest statement
-    // of the grade, asserted as an outcome rather than described in a comment.
-    let (accepted, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-nolodge.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(
-        ok,
-        "§1.5.2 / §11.3: rings 1-5 are self-consistency checks over values the SAME \
-         server produced, and reachability compares the mirror against a log that same \
-         server writes and that is outside content addressing. A server willing to forge \
-         both is not caught by any of them. If this now fails, the trust grade below is \
-         stale and §1.5.2 must be re-stated — do not 'fix' the test.\n{accepted}"
-    );
-    assert_eq!(
-        accepted["verified"].as_str(),
-        Some("server-asserted"),
-        "the grade must say exactly what was and was not established: {accepted}"
-    );
-    assert_eq!(
-        accepted["snapshot_basis"].as_u64(),
-        Some(BASIS_BLOCK),
-        "the snapshot path really was taken: {accepted}"
-    );
-    assert_eq!(
-        accepted["snapshot_rejected"], Value::Bool(false),
-        "nothing rejected it — that is the point of this half: {accepted}"
-    );
-
-    // ---- (b) with ring 6, the user's own RPC catches it
-    let (caught, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-grounded.db",
-        &["--cold-start", "snapshot", "--verify-anchor", &rpc_url],
-    );
-    assert!(
-        !ok,
-        "§1.5 ring 6 is the ONLY ring that grounds this mirror in the chain, and it is \
-         what must catch a server that forged the snapshot and the anchors log \
-         together: {caught}"
-    );
-    let text = caught["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("ANCHOR_NOT_ON_CHAIN"),
-        "the failure must be named ANCHOR_NOT_ON_CHAIN: it is the client's own RPC, not \
-         the feed, that disagrees. Got:\n{text}"
-    );
-    assert!(
-        !text.contains("SNAPSHOT_UNREACHABLE") && !text.contains("FEED_HASH_MISMATCH"),
-        "the forgery is internally consistent AND reachable against the forged log — an \
-         earlier-ring error here means the test forged it wrong, not that the offline \
-         ladder caught the lie:\n{text}"
-    );
-    assert!(
-        !text.contains("\"verified\": \"anchored\""),
-        "`anchored` must never be reported for a mirror the RPC refuted:\n{text}"
-    );
-
-    // ---- (c) and the refuted mirror does not survive to be reused ungrounded
-    let (rerun, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-grounded.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert_eq!(
-        rerun["verified"].as_str().unwrap_or("<failed>"),
-        if ok { "server-asserted" } else { "<failed>" },
-        "sanity on the re-run's shape"
-    );
-    assert_ne!(
-        rerun["verified"].as_str(),
-        Some("anchored"),
-        "a mirror the RPC refuted must never come back graded anchored: {rerun}"
-    );
-
-    // ---- (d) the two-faced server: forged anchors to the reachability fetch,
-    // HONEST anchors to ring 6's. Ring 6 must still catch the mirror, because
-    // what it grounds is the client's OWN recomputed root and not a record it
-    // re-downloaded. A ring 6 that compared anchor-against-chain would see the
-    // honest log agree with the honest chain and report `"anchored"` for a slot
-    // set that was never compared to anything.
-    let forged_anchors = std::fs::read(&anchors_path).unwrap();
-    let (two_faced, anchor_hits) = TwoFacedFeed {
-        dir: feed_dir(dir.path()),
-        first: forged_anchors.clone(),
-        rest: original_anchors.clone(),
-        requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    }
-    .serve()
-    .await;
-    let (two_faced_out, ok) = sync_with(
-        dir.path(), &two_faced, &seed.bob, "0xb0b", "s7-twofaced.db",
-        &["--cold-start", "snapshot", "--verify-anchor", &rpc_url],
-    );
-    assert!(
-        anchor_hits.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "non-vacuity: the anchors log must have been fetched at least twice, or the two \
-         faces never both showed"
-    );
-    assert!(
-        !ok,
-        "ring 6 must ground the MIRROR, not a re-downloaded anchor record: with the \
-         honest log served to its fetch, an anchor-against-chain comparison passes and \
-         `anchored` is reported for a slot set nothing ever checked: {two_faced_out}"
-    );
-    let text = two_faced_out["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("ANCHOR_NOT_ON_CHAIN"),
-        "and the disagreement is between this mirror and the user's own RPC:\n{text}"
-    );
-
-    // restore and confirm the fixture was the tamper, not the client
-    std::fs::write(&file, &original_zst).unwrap();
-    std::fs::write(&manifest_path, &original_manifest).unwrap();
-    std::fs::write(&anchors_path, &original_anchors).unwrap();
-    let (restored, ok) = sync_with(
-        dir.path(), &feed, &seed.bob, "0xb0b", "s7-restored.db",
-        &["--cold-start", "snapshot", "--verify-anchor", &rpc_url],
-    );
-    assert!(ok, "the restored feed must verify again: {restored}");
-    assert_eq!(restored["verified"].as_str(), Some("anchored"), "{restored}");
-    assert_eq!(client_notes(&restored), honest_notes);
+    let (error,ok)=sync_with(dir.path(),&feed,&seed.bob,"0xb0b","checked.db",&["--cold-start","snapshot"]);
+    assert!(!ok,"{error}");assert!(error.to_string().contains("CHECKPOINT_FAILED"),"{error}");
 }
 
-// ------------------------------------------------------------------- S8
-
-/// The per-snapshot proof sidecar, `snapshots/{e:08}.anchor.json`.
-const SNAPSHOT_ANCHOR_FILE: &str = "snapshots/00000001.anchor.json";
-
-/// Serve a feed directory over HTTP: `GET /feed/<path>` → the file, 404 when
-/// it is absent. A keyless client only GETs static artifacts, so this is a
-/// complete server for it — and unlike `strk20 run` it publishes a FIXED feed,
-/// so a leg about which artifacts the client fetches has nothing racing it.
 async fn serve_feed_dir(root: PathBuf) -> std::net::SocketAddr {
     use axum::extract::{Path as AxPath, State};
     use axum::http::StatusCode;
@@ -1888,7 +1444,7 @@ async fn serve_feed_dir(root: PathBuf) -> std::net::SocketAddr {
 /// sidecar that disagrees with the snapshot's own slot set is REFUSED. Without
 /// the second half, publishing the file and ignoring it would pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn s8_the_snapshot_carries_a_basis_block_anchor_and_the_client_uses_it() {
+async fn s8_basis_sidecar_is_published_but_is_not_a_client_trust_root() {
     ensure_built();
     let seed = seed_chain().await;
     // No window — §12 retracts it. Proofs answer for any block, but only after
@@ -1990,108 +1546,16 @@ async fn s8_the_snapshot_carries_a_basis_block_anchor_and_the_client_uses_it() {
          about the retry that §12 B1 is entirely about"
     );
 
-    // ---- the client fetches it, inside the closed allowlist
-    let static_addr = serve_feed_dir(feed_dir(dir.path())).await;
-    let proxy = RecordingProxy::new(&format!("http://{static_addr}"));
-    let proxy_addr = proxy.serve().await;
-    let feed_url = format!("http://{proxy_addr}/feed");
-    proxy.take_captured();
-    let (report, ok) = sync_with(
-        dir.path(),
-        &feed_url,
-        &seed.bob,
-        "0xb0b",
-        "s8-snap.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(ok, "snapshot cold start failed: {report}");
-    assert_eq!(report["snapshot_basis"].as_u64(), Some(BASIS_BLOCK), "{report}");
-    let urls = assert_capture_allowed(&proxy.take_captured(), "snapshot cold start");
-    assert!(
-        urls.iter().any(|u| u == "/feed/snapshots/00000001.anchor.json"),
-        "§1.5 ring 5: the client must fetch the basis-block proof sidecar. It fetched \
-         {urls:?}"
-    );
-
-    // ---- and it is load-bearing: a sidecar that disagrees is refused
-    let honest_notes = client_notes(&report);
-    let original = std::fs::read(&sidecar_path).unwrap();
-    let mut forged: Value = serde_json::from_slice(&original).unwrap();
-    forged["contracts_proof"]["contract_leaves_data"][0]["storage_root"] =
-        Value::String(felt_hex(&(strk20_feed::mpt::storage_root(&expected_slots(
-            chain,
-            BASIS_BLOCK,
-        )) + Felt::ONE)));
-    std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
-    let (err, ok) = sync_with(
-        dir.path(),
-        &feed_url,
-        &seed.bob,
-        "0xb0b",
-        "s8-forged.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(
-        !ok,
-        "a snapshot whose anchor sidecar does not agree with its own slot set must be \
-         refused — otherwise the sidecar is decoration and §1.3 buys nothing: {err}"
-    );
-    let text = err["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("SNAPSHOT_ROOT_MISMATCH"),
-        "§1.5 ring 5 names this failure SNAPSHOT_ROOT_MISMATCH. Got:\n{text}"
-    );
-
-    // control: the honest bytes still verify, so the refusal was about the lie
-    std::fs::write(&sidecar_path, &original).unwrap();
-    let (restored, ok) = sync_with(
-        dir.path(),
-        &feed_url,
-        &seed.bob,
-        "0xb0b",
-        "s8-restored.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(ok, "the restored sidecar must verify again: {restored}");
-    assert_eq!(client_notes(&restored), honest_notes);
-
-    // ---- §12 B4: the manifest's grounding field is a CLAIM, and a claim with
-    // nothing behind it must be refused rather than silently downgraded.
-    // Server-side the anchor object and the grounding string come from one
-    // Option, so they can only disagree through corruption or malice; a client
-    // that accepts the disagreement reports "basis-anchor" in its own log while
-    // checking nothing of the kind.
-    let manifest_path = feed_dir(dir.path()).join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest_path).unwrap();
-    let mut tampered: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    tampered["snapshot"]["anchor"] = Value::Null;
-    assert_eq!(
-        tampered["snapshot"]["grounding"].as_str(),
-        Some("basis-anchor"),
-        "the point of this case is a manifest that still CLAIMS the stronger grounding"
-    );
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
-    let (err, ok) = sync_with(
-        dir.path(),
-        &feed_url,
-        &seed.bob,
-        "0xb0b",
-        "s8-nogrounding.db",
-        &["--cold-start", "snapshot"],
-    );
-    assert!(
-        !ok,
-        "a manifest declaring grounding \"basis-anchor\" with no anchor to check must be \
-         refused: accepting it downgrades every consumer to the fallback while both the \
-         manifest and the client log claim otherwise: {err}"
-    );
-    let text = err["error"].as_str().unwrap_or_default().to_owned();
-    assert!(
-        text.contains("FEED_MALFORMED"),
-        "the two fields are produced together server-side, so a disagreement is a \
-         malformed feed and must be named as one. Got:\n{text}"
-    );
-    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+    // Sidecars remain publisher diagnostics. They are not a client trust root,
+    // so discovery neither downloads nor depends on them.
+    std::fs::write(&sidecar_path,b"not a proof").unwrap();
+    let static_addr=serve_feed_dir(feed_dir(dir.path())).await;
+    let proxy=RecordingProxy::new(&format!("http://{static_addr}"));
+    let proxy_addr=proxy.serve().await;
+    let (report,ok)=sync_with(dir.path(),&format!("http://{proxy_addr}/feed"),&seed.bob,"0xb0b","sidecar.db",&["--cold-start","snapshot"]);
+    assert!(ok,"{report}");assert_eq!(report["verified"],"server-asserted");
+    let urls=assert_capture_allowed(&proxy.take_captured(),"sidecar independent discovery");
+    assert!(!urls.iter().any(|url|url.ends_with(".anchor.json") || url.ends_with("anchors.ndjson")),"{urls:?}");
 }
 
 // ------------------------------------------------------------------- S9

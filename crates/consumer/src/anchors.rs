@@ -1,18 +1,5 @@
-//! Anchor verification (spec §7.8): fold the local mirror to each published
-//! anchor block, recompute the pool storage root with the shared MPT, and
-//! compare.
-//!
-//! Trust meaning, precisely: `anchors.ndjson` is NOT content-addressed and is
-//! not part of the epoch hash chain, so a published record proves nothing on
-//! its own — a hostile feed can write whatever it likes there. What the check
-//! establishes is a CONSISTENCY claim: the mirror this client folded and the
-//! root the publisher claims to have read from a chain storage proof agree at
-//! block N. An operator who has independently obtained the chain's storage
-//! root at N (their own node, an explorer, another mirror) can therefore
-//! validate the whole mirror below N with one felt comparison, because pool
-//! slots are write-once: a root match at N subsumes every write below N.
-//! A mismatch means the mirror and the publisher's own proof disagree, which
-//! is always a defect on one side.
+//! Checkpoint verification shared by native and browser hosts.
+//! A root match proves state at B, not the history of writes leading to B.
 
 use crate::store::ConsumerStore;
 use crate::transport::FeedTransport;
@@ -34,6 +21,13 @@ pub trait ProofSource: Send + Sync {
     fn label(&self) -> String;
     /// The `result` object of `starknet_getStorageProof` for `pool` at `block`.
     async fn storage_proof(&self, pool: &Felt, block: u64) -> Result<Value>;
+    async fn checkpoint(
+        &self,
+        _pool: &Felt,
+        _block: u64,
+    ) -> Result<strk20_feed::checkpoint::TrustedCheckpoint> {
+        bail!("CHECKPOINT_UNAVAILABLE: proof source has no independent block header")
+    }
 }
 
 /// Check every published anchor at or below the mirror's head.
@@ -139,231 +133,71 @@ pub enum Grounding {
     Unavailable(String),
 }
 
-/// The hash the MIRROR itself holds for `block`, or `None` when it holds none.
-///
-/// Two sources, in this order:
-///
-/// * a tail row, when the head file covered `block` with a block line;
-/// * the `head_hash` meta value `apply_feed` writes from the head header,
-///   which is the only source for the case a tail row cannot cover — a head
-///   file whose `tail_from` is above `head` carries **no** block lines at all.
-///   That is the shape of a snapshot cold start with a quiet tail, i.e. exactly
-///   the configuration ring 6 exists for, and the reason a
-///   `store.block_hash(head)`-only lookup degrades to a no-op precisely where
-///   it is needed.
-///
-/// Both sources are the FEED's assertion about the block, not the chain's.
-/// That is the point: pinning the user's own proof to them is a cross-source
-/// agreement between the feed and the user's node, which is what ring 6 claims.
-/// Pinning it to a hash the caller passed in alongside the proof is not a
-/// binding at all — it is the caller agreeing with itself.
-pub fn mirror_block_hash<S: ConsumerStore>(store: &S, block: u64) -> Result<Option<Felt>> {
-    if let Some(h) = store.block_hash(block)? {
-        return Ok(Some(h));
-    }
-    let head: Option<u64> = store
+/// Validate a complete state at one independently chosen checkpoint. Check the
+/// cheap contract proof before calling this expensive state comparison.
+pub fn verify_state<S: ConsumerStore>(
+    store: &S,
+    checkpoint: &strk20_feed::checkpoint::TrustedCheckpoint,
+    expected_root: Felt,
+) -> Result<()> {
+    store.meta_set("verification_failed", "1")?;
+    crate::apply::check_bound_above_basis(store, checkpoint.block_number)?;
+    let head = store
         .meta_get("head_number")?
-        .and_then(|s| s.parse::<u64>().ok());
-    if head != Some(block) {
-        return Ok(None);
-    }
-    match store.meta_get("head_hash")? {
-        Some(hex) => Ok(Some(Felt::from_hex(&hex).map_err(|_| {
-            anyhow!("mirror meta head_hash {hex:?} is not a felt")
-        })?)),
-        None => Ok(None),
-    }
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    anyhow::ensure!(
+        checkpoint.block_number <= head,
+        "CHECKPOINT_AHEAD: feed has not reached checkpoint"
+    );
+    anyhow::ensure!(
+        store.meta_get("chain_id")?.as_deref() == Some(&checkpoint.chain_id),
+        "CHAIN_MISMATCH: checkpoint network"
+    );
+    let pool = store
+        .meta_get("pool")?
+        .ok_or_else(|| anyhow!("missing pool"))?;
+    anyhow::ensure!(
+        strk20_feed::felt_from_hex(&pool)? == checkpoint.pool,
+        "CHAIN_MISMATCH: checkpoint pool"
+    );
+    let root = store.storage_root_at(checkpoint.block_number)?;
+    anyhow::ensure!(
+        root == expected_root,
+        "CHECKPOINT_STATE_MISMATCH: complete pool state does not match block {}",
+        checkpoint.block_number
+    );
+    store.meta_set("verified_checkpoint", &serde_json::to_string(checkpoint)?)?;
+    store.meta_set("verification_failed", "0")?;
+    Ok(())
 }
 
-/// §1.5 ring 6 — chain grounding through the USER'S OWN RPC.
-///
-/// What is compared, and why it changed: the earlier form fetched
-/// `anchors.ndjson` a SECOND time and compared that record against the chain,
-/// while §11.3 reachability had compared the mirror against a record from its
-/// OWN fetch. Those two comparisons compose only if both fetches returned the
-/// same record — which a hostile feed can trivially prevent (serve a fabricated
-/// log to the first GET and the honest one to the second), and which an honest
-/// feed breaks by simply appending a new anchor between them. The mirror was
-/// then never compared to the chain at all, and `"anchored"` was forgeable.
-///
-/// So ring 6 no longer trusts the anchors log for anything but the CHOICE of
-/// block: it recomputes the storage root from the client's own folded slot set
-/// and compares that with the chain. The feed is out of the proof path
-/// entirely, which is what §1.5 ring 6 claims. Any block at or above the basis
-/// is a sound choice — pool slots are write-once, so a root match at B attests
-/// every write at or below B, the snapshot included — so letting the server
-/// name a recent block costs nothing.
-///
-/// ## What `anchored` requires, and why both halves are here
-///
-/// Two comparisons, both against values this mirror already holds:
-///
-/// 1. the client's recomputed storage root at `block` equals the root in the
-///    proof — the evidence about the DATA. A disagreement here is evidence
-///    against the mirror and fails the sync by name;
-/// 2. the proof's `global_roots.block_hash` equals [`mirror_block_hash`] for
-///    `block` — the evidence about the SUBJECT. Without it, (1) is a claim
-///    about whichever block the endpoint felt like answering for.
-///
-/// (2) used to be an `if let (Some, Some)` over `store.block_hash`, which has
-/// no row for the basis block on a snapshot cold start with a quiet tail — so
-/// it degraded to a no-op in exactly the configuration this ring exists for,
-/// and `anchored` came down to the caller's own say-so. It is now unconditional
-/// in the sense that matters: a block whose hash the mirror cannot supply
-/// **cannot earn `anchored`** and is reported as unavailable.
 pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
     store: &S,
-    transport: &dyn FeedTransport,
+    _transport: &dyn FeedTransport,
     proofs: &dyn ProofSource,
-    basis: u64,
+    _basis: u64,
     head: u64,
 ) -> Result<Grounding> {
-    let pool_hex = store
-        .meta_get("pool")?
-        .ok_or_else(|| anyhow!("mirror has no pool metadata; sync first"))?;
-    let pool = Felt::from_hex(&pool_hex).map_err(|_| anyhow!("bad pool metadata"))?;
-
-    let candidates = grounding_candidates(transport, basis, head).await?;
-    if candidates.is_empty() {
-        return Ok(Grounding::Unavailable(format!(
-            "no block at or above the snapshot basis {basis} is available to ground \
-             against (mirror head {head})"
-        )));
-    }
-
-    let mut mismatches: Vec<String> = Vec::new();
-    let mut unavailable: Vec<String> = Vec::new();
-    for block in candidates {
-        let result = match proofs.storage_proof(&pool, block).await {
-            Ok(v) => v,
-            Err(e) if is_proof_unavailable(&e) => {
-                unavailable.push(format!("{block}: {e}"));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        let leaf = &result["contracts_proof"]["contract_leaves_data"][0];
-        let chain_root = Felt::from_hex(
-            leaf["storage_root"]
-                .as_str()
-                .ok_or_else(|| anyhow!("storage proof has no storage_root"))?,
-        )
-        .map_err(|_| anyhow!("bad storage_root in storage proof"))?;
-        let local = strk20_feed::mpt::storage_root(&store.full_slot_set_as_of(block)?);
-        if local != chain_root {
-            mismatches.push(format!(
-                "block {block}: mirror storage root {} != chain {}",
-                strk20_feed::felt_hex(&local),
-                strk20_feed::felt_hex(&chain_root)
-            ));
-            continue;
-        }
-        // The root agrees — but a root is only evidence about `block` if the
-        // proof is actually ABOUT `block`. A public proof endpoint is an
-        // anonymous load-balanced pool, so the answer can be a lagging or
-        // forked replica's, and a pushed-in answer (the browser) is whatever
-        // the host handed over. So pin it to a hash this MIRROR holds. Not to
-        // one supplied alongside the proof: two values from the same source
-        // agreeing with each other is not a binding.
-        //
-        // A failure to pin is NOT evidence against the mirror — the root just
-        // matched — so it goes to `unavailable` and the grade degrades to
-        // server-asserted rather than nuking the mirror on a lagging replica.
-        //
-        // This is deliberately NOT the indexer's §12 B2 stance (e2e T19), and
-        // the difference is what the hash is compared against. There, both
-        // halves come from the same endpoint, so a disagreement means that
-        // endpoint lied and a hard error is right. Here the partner is the
-        // FEED's claim about block N, which can differ honestly — a tail reorg
-        // between the feed publishing head and the user's node answering. A
-        // hard error there would turn a routine reorg into `reset_mirror()`.
-        let Some(own_hash) = mirror_block_hash(store, block)? else {
-            unavailable.push(format!(
-                "{block}: this mirror holds no block hash of its own for that block, so a \
-                 storage proof about it cannot be pinned to the chain and cannot earn \
-                 \"anchored\""
-            ));
-            continue;
-        };
-        match result["global_roots"]["block_hash"]
-            .as_str()
-            .and_then(|s| Felt::from_hex(s).ok())
-        {
-            Some(chain_hash) if chain_hash == own_hash => {}
-            Some(chain_hash) => {
-                unavailable.push(format!(
-                    "{block}: the proof is about block hash {}, but this mirror's block \
-                     {block} is {} — the proof describes a different block (a lagging or \
-                     forked replica), so it attests nothing about this one",
-                    strk20_feed::felt_hex(&chain_hash),
-                    strk20_feed::felt_hex(&own_hash)
-                ));
-                continue;
-            }
-            None => {
-                unavailable.push(format!(
-                    "{block}: the proof carries no usable global_roots.block_hash, so it \
-                     cannot be pinned to a block and must not be believed"
-                ));
-                continue;
-            }
-        }
-        return Ok(Grounding::Anchored(block));
-    }
-
-    if mismatches.is_empty() {
-        return Ok(Grounding::Unavailable(format!(
-            "no candidate block was provable by {}: {}",
-            proofs.label(),
-            unavailable.join("; ")
-        )));
-    }
-    // A tail block can be reorged between our head fetch and this call, so a
-    // single mismatch is not proof of tampering — every candidate the endpoint
-    // could answer has to disagree before the verdict is the mirror's.
-    bail!(
-        "ANCHOR_NOT_ON_CHAIN: your own RPC disagrees with this mirror at every block it \
-         could answer for, so the slot set it was cold-started from is not the chain's. \
-         {}",
-        mismatches.join("; ")
-    )
+    let pool = Felt::from_hex(
+        &store
+            .meta_get("pool")?
+            .ok_or_else(|| anyhow!("missing pool"))?,
+    )?;
+    let checkpoint = match proofs.checkpoint(&pool, head).await {
+        Ok(cp) => cp,
+        Err(e) if is_proof_unavailable(&e) => return Ok(Grounding::Unavailable(e.to_string())),
+        Err(e) => return Err(e),
+    };
+    let proof = match proofs.storage_proof(&pool, checkpoint.block_number).await {
+        Ok(proof) => proof,
+        Err(e) if is_proof_unavailable(&e) => return Ok(Grounding::Unavailable(e.to_string())),
+        Err(e) => return Err(e),
+    };
+    let root = strk20_feed::checkpoint::verify_checkpoint(&checkpoint, &proof.to_string())?;
+    verify_state(store, &checkpoint, root)?;
+    Ok(Grounding::Anchored(checkpoint.block_number))
 }
-
-/// The blocks ring 6 will ask the user's endpoint about, in the order it will
-/// ask — head first, then published anchors newest-first.
-///
-/// Split out of [`ground_mirror_against_rpc`] so a host that cannot make the
-/// call itself (the browser, where the proof is *pushed in* rather than
-/// fetched) can be told which blocks a proof has to cover. Two copies of this
-/// list would drift, and a drifted list degrades silently: the host stages a
-/// proof for a block ring 6 never asks about.
-pub async fn grounding_candidates(
-    transport: &dyn FeedTransport,
-    basis: u64,
-    head: u64,
-) -> Result<Vec<u64>> {
-    let mut candidates: Vec<u64> = Vec::new();
-    if head >= basis {
-        candidates.push(head);
-    }
-    if let Some(bytes) = transport.fetch_anchors().await? {
-        let mut blocks: Vec<u64> = strk20_feed::anchors::parse_anchors(&bytes)?
-            .iter()
-            .filter(|a| a.block >= basis && a.block <= head)
-            .map(|a| a.block)
-            .collect();
-        blocks.sort_unstable_by(|a, b| b.cmp(a));
-        candidates.extend(blocks);
-    }
-    candidates.dedup();
-    // Bound the RPC calls: the newest handful is all the window can serve
-    // anyway, and an unbounded list would let a feed dictate our request count.
-    candidates.truncate(MAX_GROUNDING_CANDIDATES);
-    Ok(candidates)
-}
-
-/// How many blocks ring 6 will ask the user's RPC about before giving up.
-const MAX_GROUNDING_CANDIDATES: usize = 4;
 
 /// Client-side twin of the indexer's `rpc::is_proof_unavailable` (§11.5): the
 /// answer is about the ENDPOINT, never about the data.
@@ -377,7 +211,8 @@ pub fn is_proof_unavailable(e: &anyhow::Error) -> bool {
     // one for. That is a gap in what the HOST offered, exactly like a window
     // that has moved — never evidence about the mirror. The wrapper still has
     // to notice a staged proof that nothing consumed; it does, loudly.
-    msg.contains("PROOF_NOT_STAGED")
+    msg.contains("CHECKPOINT_UNAVAILABLE")
+        || msg.contains("PROOF_NOT_STAGED")
         || msg.contains("too far in the past")
         || msg.contains("\"code\":42")
         || msg.contains("\"code\": 42")

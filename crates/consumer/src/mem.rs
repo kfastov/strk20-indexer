@@ -38,7 +38,7 @@ fn k(f: &Felt) -> Key {
     f.to_bytes_be()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BlockRec {
     hash: Felt,
     #[allow(dead_code)]
@@ -49,7 +49,7 @@ struct BlockRec {
     l1_final: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct EventRec {
     tx_index: u64,
     tx_hash: Felt,
@@ -57,8 +57,9 @@ struct EventRec {
     data: Vec<Felt>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Inner {
+    trie: strk20_feed::trie::CachedTrie,
     meta: BTreeMap<String, String>,
     blocks: BTreeMap<u64, BlockRec>,
     /// `(slot, write_block) -> value`, exactly the shape of the SQLite
@@ -223,6 +224,11 @@ impl ConsumerStore for MemStore {
         Ok(out)
     }
 
+    fn storage_root_at(&self, block: u64) -> Result<Felt> {
+        let entries = self.full_slot_set_as_of(block)?;
+        Ok(self.lock().trie.update(&entries)?)
+    }
+
     fn view(&self, block: u64) -> Result<MemView> {
         check_bound_above_basis(self, block)?;
         Ok(MemView {
@@ -236,6 +242,7 @@ impl ConsumerStore for MemStore {
         let mut g = self.lock();
         g.blocks.clear();
         g.storage.clear();
+        g.trie = Default::default();
         g.storage_max_block = 0;
         g.events.clear();
         g.notes.clear();
@@ -290,7 +297,8 @@ impl ConsumerStore for MemStore {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0)
                 + 1;
-            g.meta.insert("tail_generation".to_owned(), next.to_string());
+            g.meta
+                .insert("tail_generation".to_owned(), next.to_string());
         }
         Ok(())
     }
@@ -473,5 +481,78 @@ impl RawEventAccess for MemView {
 
     fn block_number(&self) -> u64 {
         self.bound
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheMeta {
+    meta: BTreeMap<String, String>,
+    blocks: Vec<(u64, BlockRec)>,
+    events: Vec<((u64, u64), EventRec)>,
+    notes: Vec<NoteRow>,
+}
+
+impl MemStore {
+    /// Independent candidate state: a failed proof cannot modify the last
+    /// successfully checked mirror or its per-account discovery cursors.
+    pub fn fork(&self) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(self.lock().clone())),
+        }
+    }
+
+    pub fn encode_cache(&self) -> Result<Vec<u8>> {
+        let g = self.lock();
+        let meta = serde_json::to_vec(&CacheMeta {
+            meta: g.meta.clone(),
+            blocks: g.blocks.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            events: g.events.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            notes: g.notes.values().cloned().collect(),
+        })?;
+        let mut bytes = Vec::new();
+        bytes.extend((meta.len() as u32).to_be_bytes());
+        bytes.extend(meta);
+        bytes.extend((g.storage.len() as u32).to_be_bytes());
+        for ((key, block), value) in &g.storage {
+            bytes.extend(key);
+            bytes.extend(block.to_be_bytes());
+            bytes.extend(value.to_bytes_be());
+        }
+        bytes.extend(g.trie.encode());
+        Ok(bytes)
+    }
+
+    /// Restores already verified local data. The outer container supplies a
+    /// corruption checksum, not a blockchain proof or authentication tag.
+    pub fn decode_cache(bytes: &[u8]) -> Result<Self> {
+        fn take<'a>(b: &mut &'a [u8], len: usize) -> Result<&'a [u8]> {
+            anyhow::ensure!(b.len() >= len, "STATE_CORRUPT: truncated cache");
+            let (a, rest) = b.split_at(len);
+            *b = rest;
+            Ok(a)
+        }
+        let mut bytes = bytes;
+        let len = u32::from_be_bytes(take(&mut bytes, 4)?.try_into()?) as usize;
+        let meta: CacheMeta = serde_json::from_slice(take(&mut bytes, len)?)?;
+        let count = u32::from_be_bytes(take(&mut bytes, 4)?.try_into()?) as usize;
+        anyhow::ensure!(count <= bytes.len() / 72, "STATE_CORRUPT: slot count");
+        let mut g = Inner {
+            meta: meta.meta,
+            blocks: meta.blocks.into_iter().collect(),
+            events: meta.events.into_iter().collect(),
+            notes: meta.notes.into_iter().map(|n| (k(&n.note_id), n)).collect(),
+            ..Default::default()
+        };
+        for _ in 0..count {
+            let key: Key = take(&mut bytes, 32)?.try_into()?;
+            let block = u64::from_be_bytes(take(&mut bytes, 8)?.try_into()?);
+            let value = Felt::from_bytes_be(&take(&mut bytes, 32)?.try_into()?);
+            g.storage.insert((key, block), value);
+            g.storage_max_block = g.storage_max_block.max(block);
+        }
+        g.trie = strk20_feed::trie::CachedTrie::decode(bytes)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(g)),
+        })
     }
 }

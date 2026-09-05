@@ -1,36 +1,4 @@
-//! §3.7's error model, at the strength this crate can actually deliver.
-//!
-//! Every throw is a `JsError` whose message is one canonical JSON object:
-//!
-//! ```json
-//! {"code":"FEED_HASH_MISMATCH","message":"…","retryable":false}
-//! ```
-//!
-//! # Two ways a code is found, and why
-//!
-//! `strk20-feed` has a typed error enum, so the errors it raises are
-//! **downcast** out of the `anyhow` chain and projected onto codes *and*
-//! `details` structurally — no string matching, no drift. §3.7 claims
-//! `FeedError` "maps 1:1 onto the `FEED_*` and `SNAPSHOT_*` codes"; it does
-//! not, because its `Display` strings spell none of them (only
-//! `DECOMPRESS_LIMIT`). This module is where that mapping actually exists.
-//!
-//! `strk20-consumer` has no error enum at all — it raises `anyhow!` with the
-//! code spelled at the head of a prose message. Those are matched on the code
-//! token, which is stable and machine-checkable, and their operands stay in the
-//! prose because there is no struct to read them from. Giving Block B a typed
-//! error enum would let `details` be populated everywhere; that is a
-//! `strk20-consumer` change, listed in the return notes.
-//!
-//! # Scrubbing
-//!
-//! No message reaching here can contain key material: the only type holding a
-//! viewing key is `SecretFelt`, whose `Debug` is `[REDACTED]` and which is
-//! never formatted into an error anywhere in Block B. Channel keys live inside
-//! cursors, which are never formatted into errors either. The `INTERNAL` path
-//! (panics) is the one place a raw string arrives, and it carries a Rust panic
-//! location and message, not user data.
-
+//! Convert typed feed errors and consumer error codes to the Worker ABI.
 use anyhow::Result;
 use wasm_bindgen::JsError;
 
@@ -38,6 +6,10 @@ use wasm_bindgen::JsError;
 /// is recognised when the message begins with it followed by `:` or ` `, which
 /// is exactly how `strk20-consumer` and `strk20-feed` spell them.
 const CODES: &[&str] = &[
+    "CHECKPOINT_REQUIRED",
+    "CHECKPOINT_FAILED",
+    "CHECKPOINT_AHEAD",
+    "CHECKPOINT_STATE_MISMATCH",
     "FEED_HASH_MISMATCH",
     "FEED_CHAIN_BROKEN",
     "FEED_MALFORMED",
@@ -115,10 +87,7 @@ impl ErrJson {
                 "DECOMPRESS_LIMIT",
                 serde_json::json!({"artifact": artifact, "cap": cap}),
             ),
-            F::Malformed(detail) => (
-                "FEED_MALFORMED",
-                serde_json::json!({"detail": detail}),
-            ),
+            F::Malformed(detail) => ("FEED_MALFORMED", serde_json::json!({"detail": detail})),
             F::Json(err) => (
                 "FEED_MALFORMED",
                 serde_json::json!({"detail": err.to_string(), "line": err.line()}),
@@ -127,10 +96,7 @@ impl ErrJson {
                 "FEED_MALFORMED",
                 serde_json::json!({"detail": format!("not a felt: {s}")}),
             ),
-            F::Decompress(s) => (
-                "FEED_MALFORMED",
-                serde_json::json!({"detail": s}),
-            ),
+            F::Decompress(s) => ("FEED_MALFORMED", serde_json::json!({"detail": s})),
         };
         Self {
             code: code.to_owned(),

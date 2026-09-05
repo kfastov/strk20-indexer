@@ -299,6 +299,28 @@ async fn generate_inner() -> Result<()> {
     };
     let genesis_json = serde_json::to_vec_pretty(&genesis)?;
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    // A deterministic contract proof binds the fixture's complete state to one
+    // independently supplied header, just like the captured mainnet regression.
+    let leaf =
+        strk20_feed::checkpoint::contract_leaf_hash(&Felt::from(CLASS), &storage_root, &Felt::ZERO);
+    let contracts_root = strk20_feed::mpt::edge_hash(&leaf, &pool, 251);
+    let checkpoint = strk20_feed::checkpoint::TrustedCheckpoint {
+        chain_id: CHAIN_ID.into(),
+        pool,
+        block_number: EPOCH_END,
+        block_hash: Felt::from_hex(&manifest.head.hash)?,
+        state_root: strk20_feed::checkpoint::state_commitment(&contracts_root, &Felt::ONE),
+    };
+    let proof = serde_json::json!({
+        "contracts_proof":{"nodes":[{"node_hash":contracts_root,"node":{"child":leaf,"path":pool,"length":251}}],
+            "contract_leaves_data":[{"class_hash":Felt::from(CLASS),"storage_root":storage_root,"nonce":"0x0"}]},
+        "global_roots":{"contracts_tree_root":contracts_root,"classes_tree_root":"0x1","block_hash":checkpoint.block_hash}
+    });
+    write(
+        &out.join("checkpoint.json"),
+        &serde_json::to_vec(&checkpoint)?,
+    )?;
+    write(&out.join("proof.json"), &serde_json::to_vec(&proof)?)?;
 
     // ------------------------------------------------------- write the feed
     write(&out.join("genesis.json"), &genesis_json)?;
@@ -355,14 +377,15 @@ async fn generate_inner() -> Result<()> {
                 cold_start: cold,
                 anchor_proofs: None,
             };
-            let report = sync_once(
-                &store,
-                &transport,
-                *owner,
-                &SecretFelt::new(*key),
-                &opts,
-            )
-            .await?;
+            let report =
+                sync_once(&store, &transport, *owner, &SecretFelt::new(*key), &opts).await?;
+            strk20_consumer::anchors::verify_state(&store, &checkpoint, storage_root)?;
+            let sdk =
+                strk20_consumer::sdk::discover(&store, *owner, &SecretFelt::new(*key)).await?;
+            write(
+                &out.join(format!("golden/{mode}/{name}-sdk.json")),
+                sdk.as_bytes(),
+            )?;
             total_notes += report.notes.len();
             println!(
                 "  golden {mode}/{name}: {} notes, verified={}, history_from={}",

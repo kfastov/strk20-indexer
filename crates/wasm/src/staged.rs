@@ -1,33 +1,5 @@
-//! `StagedFeed` — a [`FeedTransport`] that fetches nothing.
-//!
-//! Block B is written against `FeedTransport`: `apply_feed` and `sync_once`
-//! *pull* (`fetch_genesis`, `fetch_epoch`, `fetch_head`, …). The browser
-//! contract is the opposite — TypeScript owns fetch, and Rust is a pure
-//! synchronous computer. This type reconciles the two without changing Block B:
-//! TypeScript *pushes* already-fetched, already-inflated bytes in, and the
-//! transport hands them straight back when the state machine asks. Every method
-//! returns `Ready` on its first poll, which is what lets [`crate::drive`] run
-//! the whole async pipeline to completion with no executor.
-//!
-//! Nothing verification-bearing was moved out. The epoch hash chain, the epoch
-//! binding, the snapshot ladder and the reachability walk all still run inside
-//! `strk20-consumer` over these bytes. What moved is only *where the bytes came
-//! from*.
-//!
-//! ## Compressed vs raw
-//!
-//! `zstd-sys` compiles C and has no `wasm32-unknown-unknown` backend, so the
-//! module cannot inflate. `decompress` is therefore a **lookup, not a codec**:
-//! staging records `sha256(compressed) -> raw`, and `decompress` resolves the
-//! bytes Block B hands it through that map. Keying on the hash rather than on
-//! the artifact name means a mismatched pair cannot be silently substituted —
-//! `decompress` fails rather than returning some other artifact's payload.
-//!
-//! One consequence worth stating plainly: for a **snapshot**, ring 1 of the
-//! §1.5 ladder (`sha256(.zst) == manifest.snapshot.zst`) runs *in Rust*, so the
-//! caller must stage the compressed bytes alongside the inflated ones. For an
-//! **epoch** no `.zst` hash is checked anywhere in Block B — only the content
-//! hash of the payload — so epochs are staged raw and nothing is lost.
+//! In-memory transport for public bytes staged by the Worker. Rust validates
+//! payload identity and hashes; checkpoint verification establishes chain state.
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
@@ -50,9 +22,6 @@ struct Staged {
     epochs: BTreeMap<u64, Bytes>,
     /// epoch index -> compressed snapshot bytes (ring 1 is checked over these)
     snapshots: BTreeMap<u64, Bytes>,
-    /// epoch index -> basis-block proof sidecar
-    snapshot_anchors: BTreeMap<u64, Bytes>,
-    anchors: Option<Bytes>,
     head: Option<(Vec<u8>, String)>,
     /// `sha256(bytes as Block B will see them) -> inflated payload`
     inflated: BTreeMap<[u8; 32], Bytes>,
@@ -117,58 +86,19 @@ impl StagedFeed {
         g.snapshots.insert(e, Arc::new(zst));
     }
 
-    pub fn put_snapshot_anchor(&self, e: u64, json: Vec<u8>) {
-        self.lock().snapshot_anchors.insert(e, Arc::new(json));
-    }
-
-    pub fn put_anchors(&self, payload: Vec<u8>) {
-        self.lock().anchors = Some(Arc::new(payload));
-    }
-
     /// `head.ndjson` plus the ETag it was served with. Block B skips the tail
     /// rebuild when the ETag it already holds matches, exactly as over HTTP.
     pub fn put_head(&self, payload: Vec<u8>, etag: String) {
         self.lock().head = Some((payload, etag));
     }
 
-    /// Every raw artifact that belongs in a persisted state blob: genesis,
-    /// manifest, epochs, snapshot (both forms), the sidecar, anchors. The head
-    /// tail is deliberately excluded — see `crate::blob`.
-    pub fn snapshot_of_staged(&self) -> StagedExport {
-        let g = self.lock();
-        StagedExport {
-            genesis: g.genesis.clone(),
-            manifest: g.manifest.clone(),
-            // `Arc` clones: the export borrows the staged bytes rather than
-            // duplicating the whole feed a second time on its way out.
-            epochs: g.epochs.clone(),
-            snapshots: g
-                .snapshots
-                .iter()
-                .map(|(e, zst)| {
-                    let raw = g
-                        .inflated
-                        .get(&h(zst))
-                        .cloned()
-                        .unwrap_or_else(|| Arc::new(Vec::new()));
-                    (*e, (Arc::clone(zst), raw))
-                })
-                .collect(),
-            snapshot_anchors: g.snapshot_anchors.clone(),
-            anchors: g.anchors.clone(),
-        }
+    /// Staged artifacts are transient; folded state owns persistence.
+    pub fn clear_applied(&self) {
+        let mut g = self.lock();
+        g.epochs.clear();
+        g.snapshots.clear();
+        g.inflated.clear();
     }
-}
-
-/// The staged artifacts, detached from the lock — what `export_state` writes.
-pub struct StagedExport {
-    pub genesis: Option<Genesis>,
-    pub manifest: Option<Manifest>,
-    pub epochs: BTreeMap<u64, Bytes>,
-    /// epoch index -> (compressed, inflated)
-    pub snapshots: BTreeMap<u64, (Bytes, Bytes)>,
-    pub snapshot_anchors: BTreeMap<u64, Bytes>,
-    pub anchors: Option<Bytes>,
 }
 
 #[async_trait]
@@ -207,12 +137,11 @@ impl FeedTransport for StagedFeed {
         Ok(None)
     }
 
-    async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>> {
-        Ok(self.lock().snapshot_anchors.get(&e).map(|b| b.as_ref().clone()))
+    async fn fetch_snapshot_anchor(&self, _e: u64) -> Result<Option<Vec<u8>>> {
+        Ok(None)
     }
-
     async fn fetch_anchors(&self) -> Result<Option<Vec<u8>>> {
-        Ok(self.lock().anchors.as_ref().map(|b| b.as_ref().clone()))
+        Ok(None)
     }
 
     async fn fetch_head(&self, etag: Option<&str>) -> Result<Option<(Vec<u8>, String)>> {

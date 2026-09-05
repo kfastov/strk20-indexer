@@ -379,9 +379,6 @@ fn print_human(r: &strk20_client::sync::SyncReport) {
         ),
         None => eprintln!("  integrity: {} (full history)", r.verified),
     }
-    if r.snapshot_rejected {
-        eprintln!("  the published snapshot was refused; this mirror was replayed instead");
-    }
     eprintln!(
         "  incoming: {} sender(s), complete={}",
         r.incoming_senders.len(),

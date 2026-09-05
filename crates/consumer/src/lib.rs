@@ -35,3 +35,5 @@ pub mod transport;
 
 pub use store::{ApplyOutcome, ColdStart, ConsumerStore, NoteRow, Range};
 pub use sync::{SyncOptions, SyncReport};
+
+pub mod sdk;
