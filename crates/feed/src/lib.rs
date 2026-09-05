@@ -6,6 +6,8 @@
 //! and the head-tail grammar. Pure bytes-in/bytes-out; no IO, no async.
 
 pub mod anchors;
+#[cfg(feature = "mpt")]
+pub mod checkpoint;
 pub mod codec;
 pub mod manifest;
 #[cfg(feature = "mpt")]
@@ -96,8 +98,7 @@ pub fn decompress(bytes: &[u8]) -> Result<Vec<u8>, FeedError> {
 #[cfg(feature = "compress")]
 pub fn decompress_capped(bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>, FeedError> {
     use std::io::Read;
-    let decoder =
-        zstd::Decoder::new(bytes).map_err(|e| FeedError::Decompress(e.to_string()))?;
+    let decoder = zstd::Decoder::new(bytes).map_err(|e| FeedError::Decompress(e.to_string()))?;
     // Read one byte past the cap: a stream that yields cap+1 bytes is over the
     // limit, one that ends at exactly cap is not.
     let mut limited = decoder.take(cap + 1);
@@ -113,3 +114,6 @@ pub fn decompress_capped(bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u
     }
     Ok(out)
 }
+
+#[cfg(feature = "mpt")]
+pub mod trie;

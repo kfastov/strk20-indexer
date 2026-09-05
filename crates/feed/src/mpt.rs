@@ -32,6 +32,31 @@ fn key_bits(f: &Felt) -> Vec<bool> {
     (0..TREE_HEIGHT).map(|d| key_bit(&bytes, d)).collect()
 }
 
+/// True when every bit of `bytes` at LSB-index `bits` or above is clear, i.e.
+/// the big-endian integer is `< 2^bits`.
+fn fits_in_bits(bytes: &[u8; 32], bits: usize) -> bool {
+    if bits >= 256 {
+        return true;
+    }
+    (bits..256).all(|i| (bytes[31 - i / 8] >> (i % 8)) & 1 == 0)
+}
+
+/// A trie key must be `< 2^251`: the walk reads exactly 251 bits, so a larger
+/// felt would silently alias the key made of its low 251 bits.
+pub fn is_trie_key(f: &Felt) -> bool {
+    fits_in_bits(&f.to_bytes_be(), TREE_HEIGHT)
+}
+
+/// Hash of a binary node: `pedersen(left, right)`.
+pub fn binary_hash(left: &Felt, right: &Felt) -> Felt {
+    pedersen_hash(left, right)
+}
+
+/// Hash of an edge node: `pedersen(child, path) + length` (field addition).
+pub fn edge_hash(child: &Felt, path: &Felt, length: u64) -> Felt {
+    pedersen_hash(child, path) + Felt::from(length)
+}
+
 /// MSB-first bit path -> felt (bit 0 of the slice is the most significant).
 fn bits_to_felt(bits: &[bool]) -> Felt {
     let mut bytes = [0u8; 32];
@@ -109,8 +134,15 @@ pub fn storage_root(entries: &[(Felt, Felt)]) -> Felt {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ProofNodeBody {
-    Binary { left: String, right: String },
-    Edge { path: String, length: u64, child: String },
+    Binary {
+        left: String,
+        right: String,
+    },
+    Edge {
+        path: String,
+        length: u64,
+        child: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,20 +160,39 @@ pub enum ProofOutcome {
     NonMember,
 }
 
-/// Verify a `contracts_storage_proofs` node set against `storage_root` for
-/// `key`. Every visited node's claimed hash is recomputed from its contents;
-/// any mismatch or missing node is an error (an incomplete proof proves
-/// nothing).
+/// Verify a `contracts_storage_proofs` (or `contracts_proof.nodes`) node set
+/// against `root` for `key`. Every visited node's claimed hash is recomputed
+/// from its contents; any mismatch or missing node is an error (an incomplete
+/// proof proves nothing).
+///
+/// Structural rules enforced before any node is hashed:
+/// - `key < 2^251` (a larger felt would alias the key of its low 251 bits);
+/// - no `node_hash` appears twice (two bodies for one hash would make the walk
+///   depend on list order);
+/// - an edge has `1 <= length <= 251 - depth` and no path bit at or above
+///   `length` (a zero-length edge used to spin this loop forever: the hash
+///   check passes and `depth` never advances).
 pub fn verify_storage_proof(
     root: Felt,
     nodes: &[ProofNode],
     key: Felt,
 ) -> Result<ProofOutcome, FeedError> {
     use std::collections::HashMap;
+    if !is_trie_key(&key) {
+        return Err(FeedError::Malformed(format!(
+            "trie key {} is not below 2^251 and would alias another key",
+            crate::felt_hex(&key)
+        )));
+    }
     let mut by_hash: HashMap<[u8; 32], &ProofNode> = HashMap::with_capacity(nodes.len());
     for n in nodes {
         let h = crate::felt_from_hex(&n.node_hash)?;
-        by_hash.insert(h.to_bytes_be(), n);
+        if by_hash.insert(h.to_bytes_be(), n).is_some() {
+            return Err(FeedError::Malformed(format!(
+                "proof ambiguous: node {} is listed twice",
+                crate::felt_hex(&h)
+            )));
+        }
     }
     let key_bytes = key.to_bytes_be();
     let mut cur = root;
@@ -160,7 +211,7 @@ pub fn verify_storage_proof(
             ProofNodeBody::Binary { left, right } => {
                 let l = crate::felt_from_hex(left)?;
                 let r = crate::felt_from_hex(right)?;
-                let recomputed = pedersen_hash(&l, &r);
+                let recomputed = binary_hash(&l, &r);
                 if recomputed != cur {
                     return Err(FeedError::Malformed(format!(
                         "binary node hash mismatch at depth {depth}"
@@ -176,19 +227,30 @@ pub fn verify_storage_proof(
             } => {
                 let path_felt = crate::felt_from_hex(path)?;
                 let child_felt = crate::felt_from_hex(child)?;
-                let recomputed =
-                    pedersen_hash(&child_felt, &path_felt) + Felt::from(*length);
+                if *length == 0 {
+                    return Err(FeedError::Malformed(format!(
+                        "zero-length edge at depth {depth}"
+                    )));
+                }
+                if *length > (TREE_HEIGHT - depth) as u64 {
+                    return Err(FeedError::Malformed(format!(
+                        "edge of length {length} at depth {depth} overruns tree height"
+                    )));
+                }
+                let len = *length as usize;
+                let path_bytes = path_felt.to_bytes_be();
+                if !fits_in_bits(&path_bytes, len) {
+                    return Err(FeedError::Malformed(format!(
+                        "edge path at depth {depth} has bits above its length {length}"
+                    )));
+                }
+                let recomputed = edge_hash(&child_felt, &path_felt, *length);
                 if recomputed != cur {
                     return Err(FeedError::Malformed(format!(
                         "edge node hash mismatch at depth {depth}"
                     )));
                 }
-                let len = *length as usize;
-                if depth + len > TREE_HEIGHT {
-                    return Err(FeedError::Malformed("edge overruns tree height".into()));
-                }
                 // Compare the edge path bits against the key bits.
-                let path_bytes = path_felt.to_bytes_be();
                 let mut diverged = false;
                 for i in 0..len {
                     // bit i of the path, MSB-first within `len` bits
@@ -306,15 +368,13 @@ mod tests {
         .unwrap();
         let nodes: Vec<ProofNode> =
             serde_json::from_value(r["contracts_storage_proofs"][0].clone()).unwrap();
-        let key = felt_from_hex(
-            "0x18223681ac4182236a5f10794ec6fa3530a5cb1a18aff2005fbbed58772ec28",
-        )
-        .unwrap();
+        let key =
+            felt_from_hex("0x18223681ac4182236a5f10794ec6fa3530a5cb1a18aff2005fbbed58772ec28")
+                .unwrap();
         let outcome = verify_storage_proof(root, &nodes, key).unwrap();
-        let expected = felt_from_hex(
-            "0x1eed60b8d483b3bede62d1cc0f32874aea30747e6943437c858359b41801bf7",
-        )
-        .unwrap();
+        let expected =
+            felt_from_hex("0x1eed60b8d483b3bede62d1cc0f32874aea30747e6943437c858359b41801bf7")
+                .unwrap();
         assert_eq!(outcome, ProofOutcome::Member(expected));
     }
 
@@ -334,10 +394,9 @@ mod tests {
         // Flip a low bit of the proven key: the walk must either diverge on an
         // edge (NonMember) or fail on a missing node (incomplete proof) — it
         // must NOT return Member.
-        let key = felt_from_hex(
-            "0x18223681ac4182236a5f10794ec6fa3530a5cb1a18aff2005fbbed58772ec29",
-        )
-        .unwrap();
+        let key =
+            felt_from_hex("0x18223681ac4182236a5f10794ec6fa3530a5cb1a18aff2005fbbed58772ec29")
+                .unwrap();
         match verify_storage_proof(root, &nodes, key) {
             Ok(ProofOutcome::Member(_)) => panic!("must not prove membership for absent key"),
             Ok(ProofOutcome::NonMember) | Err(_) => {}
@@ -375,7 +434,7 @@ mod tests {
         let v0 = Felt::from(11u64);
         let v1 = Felt::from(22u64);
         let root = storage_root(&[(k1, v1), (k0, v0)]); // order-insensitive
-        // depth 250 binary node over the two leaves:
+                                                        // depth 250 binary node over the two leaves:
         let bin = pedersen_hash(&v0, &v1);
         // edge of length 250 down to it, path = top 250 bits of k0 (= k0 >> 1)
         let path = Felt::from(2u64); // 4 >> 1

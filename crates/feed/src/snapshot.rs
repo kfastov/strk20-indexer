@@ -269,7 +269,7 @@ pub fn check_zst_hash(
 /// caller that inflated first cannot skip ring 1 altogether; callers that can
 /// run it earlier must, via [`check_zst_hash`].
 #[cfg(feature = "mpt")]
-pub fn verify_snapshot_payload(
+pub fn decode_snapshot_payload(
     payload: &[u8],
     zst_sha256: &str,
     entry: &crate::manifest::ManifestSnapshot,
@@ -330,6 +330,20 @@ pub fn verify_snapshot_payload(
         });
     }
 
+    Ok(snap)
+}
+
+/// Checks file consistency including the publisher-declared root. For chain verification,
+/// use decode_snapshot_payload and check the final state at an independent checkpoint.
+#[cfg(feature = "mpt")]
+pub fn verify_snapshot_payload(
+    payload: &[u8],
+    zst_sha256: &str,
+    entry: &crate::manifest::ManifestSnapshot,
+    basis_epoch_hash: &str,
+    expect: &FeedIdentity,
+) -> Result<Snapshot, FeedError> {
+    let snap = decode_snapshot_payload(payload, zst_sha256, entry, basis_epoch_hash, expect)?;
     // ring 5 — self-consistency of the slot set against the declared root.
     // Every value compared here is produced by the same server, so this buys
     // integrity of the file and nothing at all against the publisher; the
