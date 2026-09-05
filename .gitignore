@@ -2,3 +2,6 @@ target/
 .env
 *.log
 data/
+
+# Generated browser WASM package assets
+ts/strk20-discovery/src/wasm/

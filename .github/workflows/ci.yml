@@ -141,21 +141,7 @@ jobs:
       # keys by job, so they do not fight over the same entry.
       - uses: Swatinem/rust-cache@v2
 
-      # 24, not 20, and not by preference: `ts/demo/scripts/gen-replay-feed.mjs`
-      # imports `zstdCompressSync` from `node:zlib`, which landed in 22.15 and
-      # 23.8. On 20 that import throws before it writes a byte, so `npm run
-      # build` — which runs the generator through the demo's `prebuild` — has
-      # never once succeeded in this job.
-      #
-      # Of the versions that have the API, 24 is the one this tree already
-      # assumes elsewhere: `ts/demo` type-checks against `@types/node` 24.13.3,
-      # so a Node 20 or 22 runtime here was checking the demo against API
-      # declarations newer than the interpreter running it. 24 is also the
-      # current Active LTS, where 22 entered maintenance in October 2025 — a
-      # pin worth making once rather than twice.
-      #
-      # The floor, as opposed to this choice, is declared in `ts/package.json`
-      # and `ts/demo/package.json` `engines`, so `npm ci` says it too.
+      # Match the Node version used by the checked-in SDK and TypeScript tests.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -177,32 +163,19 @@ jobs:
       - name: Install wasm-pack
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
-      # `ts/demo` cannot type-check, let alone build, without this: it imports
-      # `./engine/strk20_engine.js`, which `scripts/copy-engine.mjs` copies out of
-      # `crates/wasm/pkg/`. Both directories are gitignored, so on a fresh
-      # checkout they do not exist and `tsc` fails with TS2307.
-      #
-      # Only the wasm-pack build is needed here, not all of `crates/wasm/build.sh`
-      # — that script also regenerates a fixture and runs a native equality smoke
-      # test, which belong to the Rust job's concerns, and shells out to `brotli`
-      # for a size report.
+      # The SDK packages this actual browser WASM module.
       - name: Build the wasm engine
         working-directory: crates/wasm
         run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
+
+      - name: Build the pinned official SDK
+        run: ./examples/mainnet/setup.sh
 
       - name: npm ci
         working-directory: ts
         run: npm ci
 
-      # BUILD BEFORE TYPECHECK, and the order is load-bearing rather than
-      # stylistic. The demo's generated inputs — the copied wasm engine, the
-      # replay feed, and `src/reference-numbers.generated.ts` parsed out of
-      # docs/research/live/live-run-findings.md — are produced by `gen`, which is
-      # wired to `prebuild` and to nothing else. Run `npm run typecheck` first on
-      # a clean checkout and it fails on the missing engine module.
-      #
-      # `build` covers: strk20-discovery `tsc -p tsconfig.build.json`, then the
-      # demo's own `tsc --noEmit && vite build`.
+      # Build copies WASM assets and emits SDK typings before demo typechecking.
       - name: npm run build
         working-directory: ts
         run: npm run build
@@ -214,32 +187,10 @@ jobs:
         working-directory: ts
         run: npm run typecheck
 
-      # When this was written `npm test` in BOTH packages matched zero files, and
-      # `node --test` reports `tests 0` and exits 0. Wiring that in as a step
-      # would have manufactured a green tick that asserts nothing — the precise
-      # failure this workflow was added to correct.
-      #
-      # So the step refuses to run until there is something to run, and starts
-      # running by itself the moment a `*.test.ts` file is committed. Nobody has
-      # to remember to come back and enable it. It has since armed itself:
-      # `ts/strk20-discovery/test/` gained three files in 918193d and caee10f.
-      #
-      # `git ls-files`, NOT `find`. `find a b` exits 1 when `b` does not exist,
-      # and `demo/test/` does not exist in any checkout — git cannot track an
-      # empty directory, so the one on a laptop is a local artefact. Under
-      # `pipefail` that exit status failed this step, silently and before its
-      # first `echo`, for the one condition it exists to tolerate: a package with
-      # no tests yet. Nobody saw it because `npm run build` above had never got
-      # this far. Asking git also asks the better question — a test file counts
-      # once it is committed, not once it exists on somebody's disk.
-      - name: TypeScript tests (activates when test files exist)
+      # The Worker tests compare real WASM against these native SDK goldens.
+      - name: Generate WASM fixtures
+        run: cargo run --release --locked -p strk20-engine --example make_fixture
+
+      - name: TypeScript tests
         working-directory: ts
-        run: |
-          set -euo pipefail
-          files=$(git ls-files -- '*/test/*.test.ts' | wc -l | tr -d ' ')
-          if [ "$files" -eq 0 ]; then
-            echo "::notice title=No TypeScript tests::0 files match ts/*/test/**/*.test.ts. \`npm test\` would exit 0 having run nothing, so it is deliberately NOT executed here. This step runs itself as soon as a test file lands."
-            exit 0
-          fi
-          echo "$files TypeScript test file(s) found — running them."
-          npm test
+        run: npm test

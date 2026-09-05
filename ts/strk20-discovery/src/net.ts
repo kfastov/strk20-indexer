@@ -1,383 +1,167 @@
-/**
- * src/net.ts — the ONLY place this package touches the network (§4.10).
- *
- * `scripts/scan-chokepoint.mjs` asserts mechanically that no other file under
- * `src/` contains `fetch`, `XMLHttpRequest`, `EventSource`, `sendBeacon` or a
- * dynamic `import()` of a URL. TypeScript has no type-system move that
- * expresses "this module does no IO"; a scan over one filename is the checkable
- * substitute, and it is what makes `onRequest` honest rather than best-effort.
- *
- * Obligations, from §4.10:
- *   1. emit a RequestRecord for every call;
- *   2. build the URL as `base + step.path` with NO interpolation of any
- *      caller-supplied string beyond the base;
- *   3. set no request header beyond Accept, If-None-Match (head only) and, in
- *      delegated mode, Authorization; credentials:'omit';
- *   4. reject at runtime any path outside the closed allowlist — whole-path
- *      match, never a prefix.
- */
+import type { RequestRecord } from "./types.ts";
 
-import { Strk20Error } from './errors.ts';
-import type { RequestArtifact, RequestRecord } from './types.ts';
-
-/**
- * §2.8.1's closed whole-path allowlist, plus `/live`. Anchored at both ends, so
- * a query string is not merely forbidden, it is unmatched.
- *
- * These nine are the same nine the server enforces — `PATTERNS` in
- * `crates/e2e-tests/src/feed_urls.rs`, minus the `/feed` mount point, which
- * lives in the base URL here. Both snapshot artifacts are DIRECTORY + 8-digit
- * epoch index: `snapshots/{e:08}.strk20s.zst` is what the manifest's
- * `snapshot.file` names (consumer-path.md §C8/§706), what `cutter.rs` writes
- * and what `engine-wasm.ts` asks for. The singular `/snapshot.strk20s.zst`
- * spelling that stood here matched no artifact any server has ever published,
- * so every cold start against a feed WITH a snapshot — which is every feed
- * this repo publishes — died with SCOPE_VIOLATION before the first epoch.
- */
-export const FEED_PATH_ALLOWLIST: readonly RegExp[] = [
-  /^\/genesis\.json$/,
-  /^\/manifest\.json$/,
-  /^\/epochs\/[0-9]{8}\.strk20e\.zst$/,
-  /^\/epochs\/[0-9]{8}\.anchor\.json$/,
-  /^\/snapshots\/[0-9]{8}\.strk20s\.zst$/,
-  /^\/snapshots\/[0-9]{8}\.anchor\.json$/,
-  /^\/anchors\.ndjson$/,
-  /^\/head\.ndjson$/,
-  /^\/live$/,
-];
-
-export function isAllowedFeedPath(path: string): boolean {
-  return FEED_PATH_ALLOWLIST.some((re) => re.test(path));
-}
-
-export interface FetchSpec {
-  base: string;
-  /** Emitted by the module. The wrapper prefixes `base` and appends NOTHING. */
-  path: string;
-  artifact: RequestArtifact;
-  purpose: 'feed' | 'live' | 'anchor-rpc';
-  optional: boolean;
-  ifNoneMatch?: string | null;
-  signal?: AbortSignal | undefined;
-}
-
-export interface FetchOutcome {
-  status: number;
-  notModified: boolean;
-  absent: boolean;
-  etag: string | null;
-  bytes: Uint8Array | null;
-  record: RequestRecord;
-}
-
-/**
- * The type lives here too, so no other file needs to write `typeof fetch` — the
- * chokepoint scan is a text scan, and a package that has to carve exceptions
- * into it has already lost the property the scan protects.
- */
-export type FetchLike = typeof globalThis.fetch;
-
-export function resolveFetch(custom?: FetchLike): FetchLike {
-  const f = custom ?? globalThis.fetch?.bind(globalThis);
-  if (!f) throw new Strk20Error('CONFIG_INVALID', 'no fetch implementation is available', { option: 'fetch' });
-  return f;
-}
-
-export interface NetContext {
-  fetchImpl: FetchLike;
-  onRecord(r: RequestRecord): void;
-  now(): number;
-}
-
-function joinBase(base: string, path: string): string {
-  const b = base.endsWith('/') ? base.slice(0, -1) : base;
-  return b + path;
-}
-
-function transferBytesFor(url: string): number | null {
-  // PerformanceResourceTiming.transferSize is 0 on cache hits and null
-  // cross-origin without Timing-Allow-Origin. We report null rather than a
-  // wrong 0 — demo-app.md §9 prints `n/a` for exactly this reason.
-  const perf = (globalThis as { performance?: Performance }).performance;
-  if (!perf || typeof perf.getEntriesByName !== 'function') return null;
-  const entries = perf.getEntriesByName(url, 'resource');
-  const last = entries[entries.length - 1] as PerformanceResourceTiming | undefined;
-  if (!last) return null;
-  return typeof last.transferSize === 'number' && last.transferSize > 0 ? last.transferSize : null;
-}
-
-/** The one function. Every byte this package fetches goes through here. */
-export async function request(ctx: NetContext, spec: FetchSpec): Promise<FetchOutcome> {
-  if (!isAllowedFeedPath(spec.path)) {
-    throw new Strk20Error('SCOPE_VIOLATION', 'path is not in the closed feed allowlist', {
-      path: spec.path,
-    });
-  }
-  const url = joinBase(spec.base, spec.path);
-  const headers: Record<string, string> = { Accept: '*/*' };
-  if (spec.ifNoneMatch) headers['If-None-Match'] = spec.ifNoneMatch;
-
-  const started = ctx.now();
-  let status = 0;
-  let bytes: Uint8Array | null = null;
-  let etag: string | null = null;
-  let notModified = false;
-  let absent = false;
-
-  try {
-    const res = await ctx.fetchImpl(url, {
-      method: 'GET',
-      headers,
-      credentials: 'omit',
-      redirect: 'error',
-      ...(spec.signal ? { signal: spec.signal } : {}),
-    });
-    status = res.status;
-    etag = res.headers.get('etag');
-    if (status === 304) {
-      notModified = true;
-    } else if (status === 404 && spec.optional) {
-      absent = true;
-    } else if (status < 200 || status >= 300) {
-      throw new Strk20Error('TRANSPORT', `feed responded ${status}`, { path: spec.path, status });
-    } else {
-      bytes = new Uint8Array(await res.arrayBuffer());
-    }
-  } catch (e) {
-    if (e instanceof Strk20Error) {
-      emit(ctx, spec, url, started, status, 0, 'network');
-      throw e;
-    }
-    if ((e as { name?: string })?.name === 'AbortError') {
-      throw new Strk20Error('ABORTED', 'sync aborted', { path: spec.path });
-    }
-    emit(ctx, spec, url, started, 0, 0, 'network');
-    throw new Strk20Error('TRANSPORT', 'fetch failed', { path: spec.path });
-  }
-
-  const record = emit(
-    ctx,
-    spec,
-    url,
-    started,
-    status,
-    bytes?.length ?? 0,
-    notModified ? 'etag-304' : 'network',
+export function feedPath(path: string): boolean {
+  return /^(genesis\.json|manifest\.json|head\.ndjson|live|epochs\/\d{8}\.strk20e\.zst|snapshots\/\d{8}\.strk20s\.zst)$/.test(
+    path,
   );
-  return { status, notModified, absent, etag, bytes, record };
 }
-
-function emit(
-  ctx: NetContext,
-  spec: FetchSpec,
-  url: string,
-  started: number,
-  status: number,
-  bytes: number,
-  source: RequestRecord['source'],
-): RequestRecord {
-  const record: RequestRecord = {
-    url,
-    method: 'GET',
-    purpose: spec.purpose,
-    artifact: spec.artifact,
-    status,
-    bytes,
-    transferBytes: transferBytesFor(url),
-    requestBodyBytes: 0,
-    source,
-    ms: ctx.now() - started,
-    at: started,
-  };
-  ctx.onRecord(record);
-  return record;
-}
-
-/**
- * A record for bytes that came from IndexedDB rather than the wire. It is NOT a
- * network request and demo-app.md §9 forbids counting it as one; it is recorded
- * so the panel can show `network N · cache M` instead of a silent gap.
- */
-export function cacheRecord(
-  ctx: NetContext,
-  spec: Pick<FetchSpec, 'base' | 'path' | 'artifact' | 'purpose'>,
-  bytes: number,
-  ms: number,
-): RequestRecord {
-  const record: RequestRecord = {
-    url: joinBase(spec.base, spec.path),
-    method: 'GET',
-    purpose: spec.purpose,
-    artifact: spec.artifact,
-    status: 200,
-    bytes,
-    transferBytes: 0,
-    requestBodyBytes: 0,
-    source: 'idb-cache',
-    ms,
-    at: ctx.now() - ms,
-  };
-  ctx.onRecord(record);
-  return record;
-}
-
-export interface LiveStream {
-  close(): void;
-  readonly closed: boolean;
-  readonly record: RequestRecord;
-}
-
-/**
- * `/feed/live` — parameterless, no auth, no cookies. The SSE connection is a
- * row in the panel like everything else (demo-app.md §6.2 rule 2), which is why
- * it returns its RequestRecord and keeps the byte counter live.
- */
-export function openLive(
-  ctx: NetContext,
-  base: string,
-  handlers: { onPoke(): void; onError(): void },
-): LiveStream {
-  const url = joinBase(base, '/live');
-  const record: RequestRecord = {
-    url,
-    method: 'GET',
-    purpose: 'live',
-    artifact: 'live',
-    status: 0,
-    bytes: 0,
-    transferBytes: null,
-    requestBodyBytes: 0,
-    source: 'network',
-    ms: 0,
-    at: ctx.now(),
-  };
-  ctx.onRecord(record);
-
-  const ES = (globalThis as { EventSource?: typeof EventSource }).EventSource;
-  if (!ES) {
-    record.status = 0;
-    queueMicrotask(handlers.onError);
-    return { close: () => {}, closed: true, record };
+export class PublicTransport {
+  readonly base: string;
+  private readonly record: (r: RequestRecord) => void;
+  constructor(base: string, record: (r: RequestRecord) => void) {
+    this.base = base;
+    this.record = record;
+    const url = new URL(base);
+    if (url.search || url.hash || url.username || url.password)
+      throw new Error(
+        "CONFIG_INVALID: feed URL must not contain credentials or query parameters",
+      );
   }
-  const es = new ES(url, { withCredentials: false });
-  let closed = false;
-  es.onopen = () => {
-    record.status = 200;
-  };
-  /**
-   * The stream's events are NAMED — `hello`, `head`, `epoch`, `snapshot`,
-   * `status` (consumer-path.md §2.2, written by crates/indexerd/src/live.rs) —
-   * and `EventSource` routes a named event to a listener registered for that
-   * name. `onmessage` sees only UNNAMED events. Hooking `onmessage` alone is
-   * why a subscription against this server opened, never poked and never
-   * errored either: no error means no fall back to polling, so the toggle read
-   * ON while nothing at all happened. Measured against the live mainnet stream
-   * over 70 s: onmessage 0, head 5, hello 1, error 0.
-   *
-   * `head`, `epoch` and `snapshot` announce bytes that changed and poke.
-   * `hello` (chain identity) and `status` (decode-state transition) announce
-   * no new artifact and do not. All of them are counted, because §6.2 rule 2
-   * hides no request from the panel, the SSE connection included.
-   */
-  const count = (ev: MessageEvent<string>): void => {
-    record.bytes += typeof ev.data === 'string' ? ev.data.length : 0;
-    record.ms = ctx.now() - record.at;
-  };
-  es.onmessage = (ev: MessageEvent<string>) => {
-    count(ev);
-    handlers.onPoke();
-  };
-  for (const name of ['head', 'epoch', 'snapshot'] as const) {
-    es.addEventListener(name, (ev: Event) => {
-      count(ev as MessageEvent<string>);
-      handlers.onPoke();
+  async get(path: string): Promise<{ bytes: Uint8Array; etag: string }> {
+    if (!feedPath(path) || path === "live")
+      throw new Error("SCOPE_VIOLATION: non-public feed path");
+    return this.request(`${this.base.replace(/\/$/, "")}/${path}`);
+  }
+  async rpc(
+    url: string,
+    method:
+      | "starknet_chainId"
+      | "starknet_getBlockWithTxHashes"
+      | "starknet_getStorageProof",
+    params: unknown[],
+  ): Promise<unknown> {
+    const result = await this.request(
+      url,
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    );
+    const json = JSON.parse(new TextDecoder().decode(result.bytes)) as {
+      result?: unknown;
+      error?: { code: number; message: string };
+    };
+    if (json.error)
+      throw new Error(
+        `RPC_UNAVAILABLE: ${json.error.code} ${json.error.message}`,
+      );
+    if (json.result === undefined)
+      throw new Error("RPC_UNAVAILABLE: missing result");
+    return json.result;
+  }
+  private async request(
+    url: string,
+    body?: string,
+  ): Promise<{ bytes: Uint8Array; etag: string }> {
+    const start = performance.now();
+    const res = await fetch(url, {
+      method: body ? "POST" : "GET",
+      credentials: "omit",
+      redirect: "error",
+      ...(body
+        ? { body, headers: { "content-type": "application/json" } }
+        : {}),
+      signal: AbortSignal.timeout(30_000),
     });
+    if (!res.ok) throw new Error(`TRANSPORT: HTTP ${res.status}`);
+    const bytes = await readBounded(res, 32 * 1024 * 1024);
+    this.record({
+      url,
+      method: body ? "POST" : "GET",
+      bytes: bytes.length,
+      ms: performance.now() - start,
+    });
+    return { bytes, etag: res.headers.get("etag") ?? "" };
   }
-  for (const name of ['hello', 'status'] as const) {
-    es.addEventListener(name, (ev: Event) => count(ev as MessageEvent<string>));
+  async live(
+    onEvent: (name: string, data: string) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const url = `${this.base.replace(/\/$/, "")}/live`;
+    const started = performance.now();
+    const idle = new AbortController();
+    let timer = setTimeout(() => idle.abort(), 30_000);
+    const res = await fetch(url, {
+      credentials: "omit",
+      redirect: "error",
+      signal: AbortSignal.any([signal, idle.signal]),
+      headers: { Accept: "text/event-stream" },
+    }).catch((error: unknown) => {
+      clearTimeout(timer);
+      throw error;
+    });
+    if (!res.ok || !res.body) {
+      clearTimeout(timer);
+      await res.body?.cancel();
+      throw new Error(`TRANSPORT: SSE HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "",
+      count = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        clearTimeout(timer);
+        timer = setTimeout(() => idle.abort(), 30_000);
+        count += value.length;
+        buffer = (buffer + decoder.decode(value, { stream: true })).replace(
+          /\r\n/g,
+          "\n",
+        );
+        if (buffer.length > 6 * 1024 * 1024)
+          throw new Error("SSE message exceeds limit");
+        let end: number;
+        while ((end = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const lines = frame.split("\n");
+          const name =
+            lines
+              .find((l) => l.startsWith("event:"))
+              ?.slice(6)
+              .trim() ?? "message";
+          const data = lines
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).replace(/^ /, ""))
+            .join("\n");
+          if (data) onEvent(name, data);
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel().catch(() => {});
+      this.record({
+        url,
+        method: "GET",
+        bytes: count,
+        ms: performance.now() - started,
+      });
+    }
   }
-  es.onerror = () => {
-    record.ms = ctx.now() - record.at;
-    if (!closed) handlers.onError();
-  };
-  return {
-    close() {
-      closed = true;
-      es.close();
-      record.ms = ctx.now() - record.at;
-    },
-    get closed() {
-      return closed;
-    },
-    record,
-  };
 }
-
-/**
- * Delegated mode only (§4.8): the chain-identity probe that runs BEFORE any key
- * is sent. Here rather than in delegated.ts so the chokepoint holds.
- */
-export async function healthGet(
-  ctx: NetContext,
-  serverUrl: string,
-): Promise<{ chain_id?: string; pool?: string }> {
-  const url = serverUrl.replace(/\/$/, '') + '/health';
-  const started = ctx.now();
-  const res = await ctx.fetchImpl(url, { credentials: 'omit', redirect: 'error' });
-  const text = await res.text();
-  ctx.onRecord({
-    url,
-    method: 'GET',
-    purpose: 'feed',
-    artifact: 'rpc',
-    status: res.status,
-    bytes: text.length,
-    transferBytes: null,
-    requestBodyBytes: 0,
-    source: 'network',
-    ms: ctx.now() - started,
-    at: started,
-  });
+async function readBounded(
+  response: Response,
+  limit: number,
+): Promise<Uint8Array> {
+  if (!response.body) throw new Error("TRANSPORT: empty response");
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
   try {
-    return JSON.parse(text) as { chain_id?: string; pool?: string };
-  } catch {
-    throw new Strk20Error('TRANSPORT', '/health did not return JSON', { status: res.status });
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > limit) throw new Error("TRANSPORT: response too large");
+      parts.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
   }
-}
-
-/**
- * Delegated mode only (§4.8). Separate function so the keyless path cannot
- * reach a code branch that attaches an Authorization header or a POST body.
- */
-export async function delegatedPost(
-  ctx: NetContext,
-  opts: { serverUrl: string; path: string; body: string; authToken?: string | undefined },
-): Promise<{ status: number; text: string; record: RequestRecord }> {
-  const url = opts.serverUrl.replace(/\/$/, '') + opts.path;
-  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
-  if (opts.authToken) headers['Authorization'] = `Bearer ${opts.authToken}`;
-  const started = ctx.now();
-  const res = await ctx.fetchImpl(url, {
-    method: 'POST',
-    headers,
-    body: opts.body,
-    credentials: 'omit',
-    redirect: 'error',
-  });
-  const text = await res.text();
-  const record: RequestRecord = {
-    url,
-    method: 'POST',
-    purpose: 'feed',
-    artifact: 'rpc',
-    status: res.status,
-    bytes: text.length,
-    transferBytes: null,
-    requestBodyBytes: opts.body.length,
-    source: 'network',
-    ms: ctx.now() - started,
-    at: started,
-  };
-  ctx.onRecord(record);
-  return { status: res.status, text, record };
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const p of parts) {
+    result.set(p, offset);
+    offset += p.length;
+  }
+  return result;
 }

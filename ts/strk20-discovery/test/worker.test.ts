@@ -1,0 +1,414 @@
+import { Signer, constants } from "starknet";
+import {
+  createPrivateTransfers,
+  ProvingServiceProofProvider,
+} from "@starkware-libs/starknet-privacy-sdk";
+import {
+  MockProofInvocationFactory,
+  compute_note_id,
+} from "@starkware-libs/starknet-privacy-sdk/testing";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import "fake-indexeddb/auto";
+import init, { Engine } from "../../../crates/wasm/pkg/strk20_engine.js";
+import { Witness, AddressMap } from "@starkware-libs/starknet-privacy-sdk";
+import { WorkerRuntime, installWorker } from "../src/worker.ts";
+import { notesResult, LocalDiscoveryProvider } from "../src/provider.ts";
+import type { DiscoveryResult, RuntimeOptions } from "../src/types.ts";
+
+const file = (name: string) =>
+  new Uint8Array(
+    readFileSync(
+      new URL(`../../../crates/wasm/fixture/${name}`, import.meta.url),
+    ),
+  );
+const doc = (name: string) => JSON.parse(new TextDecoder().decode(file(name)));
+await init({
+  module_or_path: readFileSync(
+    new URL("../../../crates/wasm/pkg/strk20_engine_bg.wasm", import.meta.url),
+  ),
+});
+const genesis = doc("genesis.json"),
+  checkpoint = doc("checkpoint.json"),
+  owners = doc("owners.json") as { name: string; owner: string; key: string }[];
+const options: RuntimeOptions = {
+  network: {
+    name: "fixture",
+    chainId: genesis.chain_id,
+    pool: genesis.pool,
+    genesisBlock: genesis.genesis_block,
+    epochSize: genesis.epoch_size,
+    feedFormat: 1,
+  },
+  feedUrl: "https://feed.test",
+  rpcUrl: "https://header.test",
+  proofRpcUrl: "https://proof.test",
+};
+const key = (owner: (typeof owners)[number]) =>
+  new Uint8Array(Buffer.from(owner.key, "hex"));
+
+test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and checkpoint failure", async (t) => {
+  let manifest = doc("manifest.json"),
+    badProof = false;
+  const requests: { url: string; body: string }[] = [];
+  let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let connected: (() => void) | undefined;
+  let head = file("head.ndjson");
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input),
+        body = String(init?.body ?? "");
+      requests.push({ url, body });
+      if (body) {
+        const call = JSON.parse(body);
+        let result: unknown;
+        if (call.method === "starknet_chainId")
+          result = `0x${Buffer.from(genesis.chain_id).toString("hex")}`;
+        else if (call.method === "starknet_getBlockWithTxHashes")
+          result = {
+            block_number: call.params[0].block_number,
+            block_hash: `0x${(0xb10c0000 + call.params[0].block_number).toString(16)}`,
+            new_root: checkpoint.state_root,
+            status: "ACCEPTED_ON_L2",
+          };
+        else if (call.method === "starknet_getStorageProof") {
+          result = doc("proof.json");
+          (
+            result as { global_roots: { block_hash: string } }
+          ).global_roots.block_hash = call.params[0].block_hash;
+          if (badProof)
+            (
+              result as { global_roots: { block_hash: string } }
+            ).global_roots.block_hash = "0x123";
+        } else throw new Error(`unexpected RPC ${call.method}`);
+        return Response.json({ jsonrpc: "2.0", id: 1, result });
+      }
+      const path = new URL(url).pathname.slice(1);
+      if (path === "live")
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              stream = controller;
+              init?.signal?.addEventListener(
+                "abort",
+                () => controller.close(),
+                { once: true },
+              );
+              connected?.();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      if (path === "genesis.json") return Response.json(genesis);
+      if (path === "manifest.json") return Response.json(manifest);
+      if (path === "head.ndjson")
+        return new Response(head, {
+          headers: { etag: "fixture-head" },
+        });
+      if (path === manifest.snapshot?.file)
+        return new Response(file("snapshots/0.zst"));
+      if (path === "epochs/00000000.strk20e.zst")
+        return new Response(file("epochs/0.zst"));
+      throw new Error(`unexpected GET ${path}`);
+    },
+  );
+  for (const mode of ["snapshot", "epochs"]) {
+    const tasks: (() => Promise<void>)[] = [];
+    const runtime = new WorkerRuntime(
+      { Engine },
+      options,
+      () => {},
+      (task) => tasks.push(task),
+    );
+    await runtime.init();
+    await runtime.clear();
+    manifest = doc("manifest.json");
+    if (mode === "epochs") manifest.snapshot = null;
+    const state = await runtime.sync();
+    assert.equal(state.verifiedAt, 99);
+    for (const owner of owners) {
+      const buffer = key(owner);
+      const result = (await runtime.discover(
+        owner.owner,
+        buffer,
+        99,
+      )) as DiscoveryResult;
+      assert(buffer.every((b) => b === 0));
+      assert.deepEqual(
+        result,
+        doc(
+          `golden/${mode === "epochs" ? "epochs" : "auto"}/${owner.name}-sdk.json`,
+        ),
+      );
+      const sdk = notesResult(result);
+      assert(sdk.notes instanceof AddressMap);
+      assert.equal(sdk.timestamp, 99);
+      for (const [token, notes] of sdk.notes) {
+        for (const note of notes) {
+          assert(note.witness instanceof Witness);
+          assert(note.amount > 0n);
+          assert.equal(note.created, 99);
+          assert(
+            sdk.cursor.incomingChannels
+              .get(BigInt(result.notes[0]!.sender))
+              ?.noteIndexes.has(token),
+          );
+        }
+      }
+      if (owner.name === "alice") {
+        const channels = runtime.channels(owner.owner, key(owner), null) as {
+          total: number;
+          channels: { tokens: { noteNonce: number }[] }[];
+        };
+        assert.equal(channels.total, 2);
+        assert(
+          channels.channels.every(
+            (channel) => channel.tokens[0]?.noteNonce === 1,
+          ),
+        );
+        assert.equal(
+          runtime.requirement(
+            owner.owner,
+            key(owner),
+            owner.owner,
+            result.notes[0]!.token,
+          ),
+          3,
+        );
+        assert.equal(
+          runtime.requirement(
+            owner.owner,
+            key(owner),
+            "0x987",
+            result.notes[0]!.token,
+          ),
+          1,
+        );
+      }
+    }
+    await runtime.save();
+    const restored = new WorkerRuntime(
+      { Engine },
+      options,
+      () => {},
+      (task) => tasks.push(task),
+    );
+    requests.length = 0;
+    assert.equal((await restored.init()).verifiedAt, 99);
+    const again = await restored.discover(
+      owners[0]!.owner,
+      key(owners[0]!),
+      undefined,
+      true,
+    );
+    assert(again);
+    assert.equal(
+      requests.length,
+      0,
+      "warm restore performs no network or epoch replay",
+    );
+    badProof = true;
+    await assert.rejects(() => restored.sync(), /block hash|block_hash|proof/i);
+    await assert.rejects(
+      () =>
+        restored.discover(owners[0]!.owner, key(owners[0]!), undefined, true),
+      /CHECKPOINT_FAILED/,
+    );
+    badProof = false;
+    await restored.close();
+    await runtime.close();
+  }
+  // The public SDK adapter and actual dispatcher; only signing/proving is replaced.
+  const scope = globalThis as unknown as {
+    postMessage: (data: unknown) => void;
+    onmessage: (event: MessageEvent) => void;
+  };
+  const port = {
+    onmessage: null as ((event: MessageEvent) => void) | null,
+    onerror: null,
+    postMessage: (data: unknown) => scope.onmessage({ data } as MessageEvent),
+    terminate: () => {},
+  };
+  scope.postMessage = (data) =>
+    queueMicrotask(() => port.onmessage?.({ data } as MessageEvent));
+  installWorker(async () => ({ Engine }));
+  const provider = new LocalDiscoveryProvider({
+    ...options,
+    workerFactory: () => port as unknown as Worker,
+  });
+  const owner = owners[0]!,
+    viewingKey = BigInt(`0x${owner.key}`);
+  const mine = provider.forAccount({ address: owner.owner, viewingKey });
+  const found = await mine.discoverNotes({ blockIdentifier: 99 });
+  const [token, items] = [...found.notes][0]!;
+  const note = items[0]!;
+  assert.equal(
+    BigInt(note.id),
+    compute_note_id(note.witness.channelKey, token, note.witness.nonce),
+  );
+  const transfers = createPrivateTransfers({
+    account: { address: owner.owner, signer: new Signer("0x1") },
+    viewingKeyProvider: { getViewingKey: async () => viewingKey },
+    poolContractAddress: genesis.pool,
+    discoveryProvider: provider.atBlock(99),
+    provingProvider: new ProvingServiceProofProvider(
+      "https://prover.invalid",
+      constants.StarknetChainId.SN_SEPOLIA,
+    ),
+    proofInvocationFactory: new MockProofInvocationFactory(),
+  });
+  const invocation = await transfers
+    .build({
+      autoRegister: true,
+      autoSetup: true,
+      autoDiscover: { notes: "refresh", channels: "refresh" },
+      autoSelectNotes: "naive",
+    })
+    .surplusTo(owner.owner)
+    .with(token, (builder) =>
+      builder.transfer({ amount: 10n, recipient: owner.owner }),
+    )
+    .createProofInvocation({ provingBlockId: 99 });
+  const actions = JSON.parse(invocation.invocation.calldata[2]!) as {
+    type: string;
+    input: { channel_key: string; index: number };
+  }[];
+  const spend = actions.find((action) => action.type === "UseNote");
+  assert(spend, "the official builder must spend our discovered note");
+  assert.equal(spend.input.channel_key, `__bigint__${note.witness.channelKey}`);
+  assert.equal(spend.input.index, note.witness.nonce);
+  await provider.close();
+
+  // An actual epoch advance arrives entirely in SSE; only the independent
+  // checkpoint RPCs are allowed before the new state becomes visible.
+  const liveTasks: (() => Promise<void>)[] = [];
+  let notify: (() => void) | undefined;
+  const live = new WorkerRuntime(
+    { Engine },
+    options,
+    () => {},
+    (task) => {
+      liveTasks.push(task);
+      notify?.();
+    },
+  );
+  await live.init();
+  await live.sync();
+  const connection = new Promise<void>((resolve) => {
+    connected = resolve;
+  });
+  live.subscribe();
+  await connection;
+  const original = doc("manifest.json");
+  const payload = [
+    {
+      t: "hdr",
+      v: 1,
+      kind: "strk20-epoch",
+      chain_id: genesis.chain_id,
+      pool: genesis.pool,
+      epoch: 1,
+      from: 100,
+      to: 199,
+      prev: original.epochs[0].hash,
+    },
+    { t: "end", blocks: 0, diffs: 0, events: 0, class: "0xc1a55" },
+  ]
+    .map((row) => JSON.stringify(row) + "\n")
+    .join("");
+  const entry = {
+    e: 1,
+    from: 100,
+    to: 199,
+    hash: createHash("sha256").update(payload).digest("hex"),
+    zst: "0".repeat(64),
+    bytes: 0,
+    anchor: null,
+  };
+  head = new TextEncoder().encode(
+    [
+      {
+        t: "hdr",
+        v: 1,
+        kind: "strk20-head",
+        tail_from: 200,
+        head: 199,
+        head_hash: "0xb10c00c7",
+        l1_accepted: 199,
+      },
+      { t: "end", blocks: 0, diffs: 0, events: 0, class: "0xc1a55" },
+    ]
+      .map((row) => JSON.stringify(row) + "\n")
+      .join(""),
+  );
+  const send = (name: string, data: unknown) =>
+    stream!.enqueue(
+      new TextEncoder().encode(
+        `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`,
+      ),
+    );
+  const update = {
+    head: 199,
+    head_hash: "0xb10c00c7",
+    l1_accepted: 199,
+    etag: "live-199",
+    payload: new TextDecoder().decode(head),
+    resync: false,
+  };
+  requests.length = 0;
+  const queued = new Promise<void>((resolve) => {
+    notify = resolve;
+  });
+  send("epoch", { entry, payload });
+  send("head", update);
+  await queued;
+  while (liveTasks.length) await liveTasks.shift()!();
+  assert.equal(live.info().verifiedAt, 199);
+  assert.equal(live.info().last_epoch, 1);
+  assert.equal(
+    requests.filter((r) => !r.body).length,
+    0,
+    "inline SSE never re-downloads head or epochs",
+  );
+
+  // A bounded resync signal uses the same HTTP apply path.
+  manifest = {
+    ...original,
+    latest_epoch: 1,
+    epochs: [...original.epochs, entry],
+    head: {
+      ...original.head,
+      number: 199,
+      hash: update.head_hash,
+      l1_accepted: 199,
+    },
+  };
+  requests.length = 0;
+  const resync = new Promise<void>((resolve) => {
+    notify = resolve;
+  });
+  send("head", { ...update, payload: null, resync: true });
+  await resync;
+  while (liveTasks.length) await liveTasks.shift()!();
+  assert.equal(live.info().verifiedAt, 199);
+  assert(requests.some((r) => r.url.endsWith("/manifest.json")));
+  assert(requests.some((r) => r.url.endsWith("/head.ndjson")));
+  await live.close();
+  for (const request of requests) {
+    if (request.body) {
+      const rpc = JSON.parse(request.body);
+      assert(
+        [
+          "starknet_chainId",
+          "starknet_getBlockWithTxHashes",
+          "starknet_getStorageProof",
+        ].includes(rpc.method),
+      );
+      assert(!request.body.includes("viewing_key"));
+    }
+  }
+});

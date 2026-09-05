@@ -1,80 +1,89 @@
 # strk20-discovery
 
-Keyless STRK20 note discovery. The viewing key stays in your application, which
-fetches a public verified feed any mirror can serve and folds it locally by
-running the upstream `strk20-consumer` engine, compiled to WebAssembly, in the
-same process. The fetch plan is a pure function of the feed's `manifest.json`,
-so clients holding different keys issue the same requests in the same order and
-the server learns nothing about who is asking. The caller pins chain identity
-before a byte is requested, so a hostile mirror cannot switch the pool.
+STRK20 discovery over public pool state. The Worker downloads the snapshot and
+incremental diffs, verifies the complete pool storage root at a trusted checkpoint,
+and runs upstream discovery locally. Viewing keys and account-specific reads stay
+in the browser. The feed still sees IP addresses and request timing.
 
-## Install
+## Build
 
-Not published to npm. Depend on the directory and build it:
+This package is not published to npm. From the repository root:
 
-```json
-{ "dependencies": { "strk20-discovery": "file:../strk20-indexer/ts/strk20-discovery" } }
+```sh
+# Node 24+, Rust and wasm-pack; the SDK is built from its pinned public tag.
+./examples/mainnet/setup.sh
+./crates/wasm/build.sh
+cd ts
+npm ci
+npm run build --workspace strk20-discovery
 ```
 
-The WASM module is not bundled either. Build it with `cd crates/wasm &&
-wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine`,
-copy `pkg/` next to your app, and hand the glue to the factory below. This
-package never imports a URL itself; the host does the import and passes it in.
+The package includes its Worker and WASM assets. Its official SDK dependency is
+built by `examples/mainnet/setup.sh` into an ignored vendor directory. Build
+from the repository, then consume the package
+with a bundler that supports module Workers, such as Vite.
 
-## KeylessClient
-
-The default: the key stays here and so does the computation.
+## Use
 
 ```ts
-import { KeylessClient, staticAccount } from 'strk20-discovery';
-import { wasmEngineFactory, type WasmGlue } from 'strk20-discovery/engine/wasm';
+import { LocalDiscoveryProvider } from 'strk20-discovery';
 
-const client = new KeylessClient({
-  feedUrl: 'https://feed.example.org/sepolia',
-  network: 'sepolia',
-  engine: wasmEngineFactory({
-    loadGlue: () => import('./pkg/strk20_engine.js') as unknown as Promise<WasmGlue>,
-  }),
+const discovery = new LocalDiscoveryProvider({
+  network: 'mainnet',
+  feedUrl: 'https://strk20.nullref.cc/mainnet/feed',
 });
-const { notes, balances } = await client.getNotes(staticAccount('0x1234', viewingKey32));
+const mine = discovery.forAccount({ address, viewingKey });
+
+// Restore previously verified results immediately, without network access.
+const cached = await mine.restore();
+// Catch up and verify against a newly selected accepted RPC checkpoint.
+const { notes, cursor } = await mine.discoverNotes();
+await discovery.subscribe();
 ```
 
-## DelegatedClient
+`LocalDiscoveryProvider` implements the official `DiscoveryProviderInterface`:
+`discoverNotes`, `discoverChannels` and `discoverRequirement`. Notes contain actual
+SDK `Witness` objects, channels contain token and note nonces, and cursors contain
+real progress positions. The Worker owns the incremental cursor; caller-provided
+cursors do not replace it. The returned note set contains all currently unspent
+notes matching the token filter.
 
-A different trust boundary: the key travels to a server you run, so it sits at a
-separate import path. The wire calls are not built yet; the construction-time
-refusals are, and a plaintext non-loopback `serverUrl` is rejected.
+Pass the provider to `createPrivateTransfers({ discoveryProvider: discovery, ... })`.
+For a proof builder, use `discovery.atBlock(blockNumber)` so every discovery method,
+including requirement checks, uses the same proving block. Explicit numbers and
+`latest` are supported; unsupported block tags fail rather than select another block.
 
-```ts
-import { DelegatedClient } from 'strk20-discovery/delegated';
+## Verification and persistence
 
-const delegated = new DelegatedClient({ serverUrl: 'https://sync.internal', network: 'sepolia' });
-await delegated.verifyChainIdentity();
+The default trust root is an independently fetched, accepted Starknet RPC header.
+The verifier checks its block hash and state commitment, contract Patricia path,
+class hash, nonce and storage root, then compares the root of the complete locally
+reconstructed pool state. `rpcUrl` and `proofRpcUrl` can be supplied separately.
+A missing or invalid proof prevents discovery from an updated state.
+
+This proves state at one block B. It does not authenticate intermediate history or
+publisher-supplied last-write timestamps. SDK note `created` is the conservative
+block by which the note value was verified, so a cold discovery may require extra
+maturity blocks before spending. No Ethereum L1-finality claim is made.
+
+The demo explicitly trusts its same-origin IndexedDB cache. Its SHA-256 checksum
+catches corruption; it does not authenticate a malicious cache. The cache includes
+folded storage, cached tree nodes, discovery cursors and witnesses. A failed candidate
+cannot replace the last verified state. Clearing discovery cache must not delete
+wallet signing or viewing keys. AEAD is deferred until after the main implementation.
+
+SSE carries complete head and epoch payloads. The same decoder handles HTTP catch-up
+following a gap or oversized event. Routine stream updates need no GET for their
+data; independent checkpoint RPC requests are still necessary. Queues are bounded.
+
+## Checks
+
+```sh
+npm run typecheck --workspace strk20-discovery
+npm test --workspace strk20-discovery
+npm run scan:chokepoint --workspace strk20-discovery
 ```
 
-## Errors
-
-Everything thrown is a `Strk20Error` with a code from a closed union, faults
-inside the WASM adapter included.
-
-```ts
-import { isStrk20Error } from 'strk20-discovery';
-
-try { await client.sync(); }
-catch (e) { if (isStrk20Error(e)) report(e.code, e.retryable); else throw e; }
-```
-
-## TypeScript
-
-Floor is 5.6. The published typings avoid the generic `Uint8Array<T>` form
-introduced in 5.7, so `skipLibCheck` is not required.
-
-## Not yet
-
-- Not an SDK `DiscoveryProviderInterface`: `discoverNotes`, `discoverChannels`
-  and `discoverRequirement` are not implemented. `client.provider()` returns a
-  smaller shape of this package's own.
-- Notes carry no witness, so they cannot fund a spend. Balances and history only.
-- No round-trippable cursor and no history: `export_reference_cursor` throws
-  `SESSION_INCOMPLETE` and `history()` throws `HISTORY_UNAVAILABLE`.
-- Not published to npm. Licensed under Apache-2.0, like the rest of the repo.
+Tests run the actual compiled WASM against native discovery goldens, exercise both
+cold modes, real SDK objects, cache-only restart, verification failures, decompression
+limits and public request paths. The WASM smoke also checks key-buffer zeroization.

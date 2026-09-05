@@ -3,29 +3,28 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "The demo that exists to be criticised: cold vs warm side by side, every URL the page fetched, and a second identity producing the same list.",
+  "description": "Real-chain STRK20 wallet flow with locally verified private note discovery.",
   "scripts": {
-    "gen": "node scripts/copy-engine.mjs && node scripts/gen-replay-feed.mjs && node scripts/parse-reference-numbers.mjs",
-    "gen:small": "node scripts/copy-engine.mjs && node scripts/gen-replay-feed.mjs --small && node scripts/parse-reference-numbers.mjs",
-    "gen:engine": "node scripts/copy-engine.mjs",
-    "predev": "npm run gen",
+    "predev": "npm run build --workspace strk20-discovery",
     "dev": "vite",
-    "prebuild": "npm run gen",
+    "prebuild": "npm run build --workspace strk20-discovery",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "pretest": "node scripts/parse-reference-numbers.mjs",
     "test": "tsc --noEmit && node --test --experimental-strip-types \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "strk20-discovery": "*"
+    "strk20-discovery": "*",
+    "starknet": "10.5.0",
+    "@starkware-libs/starknet-privacy-sdk": "file:../../examples/mainnet/vendor/starknet-privacy-sdk"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "5.9.2",
-    "vite": "^7.1.5"
+    "vite": "^7.1.5",
+    "fake-indexeddb": "6.2.5"
   },
   "engines": {
-    "node": "^22.15.0 || >=23.8.0"
+    "node": ">=24"
   }
 }

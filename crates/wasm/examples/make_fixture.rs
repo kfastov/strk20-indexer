@@ -326,6 +326,7 @@ async fn generate_inner() -> Result<()> {
     write(&out.join("genesis.json"), &genesis_json)?;
     write(&out.join("manifest.json"), &manifest_json)?;
     write(&out.join("epochs/0.ndjson"), &epoch_payload)?;
+    write(&out.join("epochs/0.zst"), &epoch_zst)?;
     write(&out.join("snapshots/0.ndjson"), &snap_payload)?;
     write(&out.join("snapshots/0.zst"), &snap_zst)?;
     write(&out.join("anchors.ndjson"), &anchors)?;
