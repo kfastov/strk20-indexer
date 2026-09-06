@@ -354,8 +354,12 @@ async fn run(
         tracing::warn!("HTTP polling compatibility mode; configure STRK20_RPC_WS_URL for low latency");
     }
     let rpc_ref = &rpc;
+    let mut demand = live.catchup_requests();
+    let mut catchup = false;
     loop {
-        let target = heads.as_mut().and_then(|rx| rx.borrow_and_update().clone());
+        let target = if catchup { None } else {
+            heads.as_mut().and_then(|rx| rx.borrow_and_update().clone())
+        };
         let started = std::time::Instant::now();
         let outcome = {
             let mut ingestor = Ingestor {
@@ -413,7 +417,16 @@ async fn run(
             Err(e) => tracing::error!(error = %e, "ingest cycle failed"),
         }
         if let Some(rx) = &mut heads {
-            rx.changed().await.context("head subscription task stopped")?;
+            tokio::select! {
+                changed = rx.changed() => {
+                    changed.context("head subscription task stopped")?;
+                    catchup = false;
+                }
+                changed = demand.changed() => {
+                    changed.context("catchup requests stopped")?;
+                    catchup = true;
+                }
+            }
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
         }

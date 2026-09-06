@@ -36,6 +36,7 @@ pub struct FeedState {
 pub struct LiveHub {
     tx: watch::Sender<Arc<FeedState>>,
     connections: AtomicUsize,
+    catchup: watch::Sender<()>,
     source: Mutex<Source>,
 }
 
@@ -48,8 +49,10 @@ struct Source {
 impl LiveHub {
     pub fn new(feed_dir: PathBuf, db: Arc<Mutex<Db>>) -> Self {
         let (tx, _rx) = watch::channel(Arc::new(FeedState::default()));
+        let (catchup, _) = watch::channel(());
         Self {
             tx,
+            catchup,
             connections: AtomicUsize::new(0),
             source: Mutex::new(Source {
                 feed_dir,
@@ -70,6 +73,21 @@ impl LiveHub {
         let state = read_state(feed_dir, db, cache);
         // Keep ordering across concurrent connects and writer notifications.
         self.publish(state);
+    }
+
+    pub fn catchup_requests(&self) -> watch::Receiver<()> {
+        self.catchup.subscribe()
+    }
+
+    /// A public head read is also demand for fresh data. Coalesce requests
+    /// once per publication, so slow upstream notifications need not stall a
+    /// waiting client and a burst of readers cannot create a burst of RPCs.
+    pub fn request_catchup(&self) {
+        let mut src = self.source.lock().expect("live source");
+        if !src.cache.catchup_requested {
+            src.cache.catchup_requested = true;
+            self.catchup.send_replace(());
+        }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<FeedState>> {
@@ -111,6 +129,7 @@ impl Drop for ConnectionGuard<'_> {
 
 #[derive(Default)]
 struct HeadCache {
+    catchup_requested: bool,
     etag: String,
     data: Option<String>,
     epoch_entry: Option<Value>,
@@ -173,6 +192,7 @@ fn head_event(bytes: &[u8], cache: &mut HeadCache) -> Option<String> {
         "resync": payload.is_none(),
     })
     .to_string();
+    cache.catchup_requested = false;
     cache.etag = etag;
     cache.data = Some(data.clone());
     Some(data)

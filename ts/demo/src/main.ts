@@ -48,7 +48,8 @@ const operations = new Operations(() => {
 });
 mount(network);
 const text = (id: string, value: string) => {
-  element(id).textContent = value;
+  const node = element(id);
+  if (node.textContent !== value) node.textContent = value;
 };
 function latestPrivateTransaction() {
   return Object.entries(wallet?.completed ?? {})

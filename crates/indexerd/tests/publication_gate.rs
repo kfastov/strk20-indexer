@@ -580,6 +580,36 @@ async fn publication_wakes_existing_subscribers_without_a_timer() {
 }
 
 #[tokio::test]
+async fn reader_demand_is_coalesced_until_the_next_published_head() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, cfg) = gated_mirror(dir.path(), Some(ANCHOR_BLOCK));
+    let feed = dir.path().join("feed");
+    let hub = strk20_indexerd::live::LiveHub::new(feed.clone(), Arc::new(Mutex::new(db.reopen().unwrap())));
+    let mut demand = hub.catchup_requests();
+    let rpc = RpcClient::new("http://127.0.0.1:1/unused".into(), None);
+    let publish = |db: &Db| {
+        let cutter = Cutter { db, cfg: &cfg, rpc: &rpc, feed_dir: feed.clone() };
+        cutter.ensure_layout().unwrap();
+        cutter.regen_head().unwrap();
+        hub.refresh();
+    };
+    publish(&db);
+    hub.request_catchup();
+    assert!(demand.has_changed().unwrap());
+    demand.borrow_and_update();
+    for _ in 0..100 { hub.request_catchup(); }
+    hub.refresh();
+    hub.request_catchup();
+    assert!(!demand.has_changed().unwrap(), "readers must not amplify requests for one version");
+    db.insert_block_data(&block(ANCHOR_BLOCK + 1), &[], &[], None, ANCHOR_BLOCK + 1).unwrap();
+    db.meta_set("head_number", &(ANCHOR_BLOCK + 1).to_string()).unwrap();
+    publish(&db);
+    hub.request_catchup();
+    assert!(demand.has_changed().unwrap(), "new publication must rearm demand");
+}
+
+#[tokio::test]
 async fn announced_height_is_fetched_explicitly_and_wrong_heights_are_rejected() {
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let latest_calls = Arc::new(AtomicUsize::new(0));
@@ -680,10 +710,12 @@ async fn unavailable_announcements_do_not_starve_available_blocks_or_regress_the
 }
 
 #[tokio::test]
-async fn feeder_ingests_a_silent_write_before_rpc_can_serve_the_announced_block() {
+async fn feeder_ingests_a_silent_write_without_a_subscription_or_available_rpc() {
     use axum::{routing::{get, post}, Json, Router};
     use serde_json::{json, Value};
-    let router = Router::new().route("/get_state_update", get(|| async {
+    let router = Router::new().route("/get_state_update", get(|axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+        assert!(matches!(query.get("blockNumber").map(String::as_str), Some("10" | "latest")));
+        assert_eq!(query.get("includeBlock").map(String::as_str), Some("true"));
         Json(json!({"block":{"block_number":10,"block_hash":"0xa","parent_block_hash":"0x9",
             "state_root":"0xb","timestamp":10,"status":"ACCEPTED_ON_L2",
             "transactions":[],"transaction_receipts":[]},
@@ -716,7 +748,7 @@ async fn feeder_ingests_a_silent_write_before_rpc_can_serve_the_announced_block(
     let mut wrong = header.clone(); wrong.new_root = Some("0xc".into());
     assert!(ingest.run_cycle_announced(Some(&wrong)).await.unwrap_err().to_string().contains("subscription state root"));
     assert_eq!(ingest.db.ingest_cursor().unwrap(), Some(9));
-    let result = ingest.run_cycle_announced(Some(&header)).await.unwrap();
+    let result = ingest.run_cycle_announced(None).await.unwrap();
     assert_eq!(result.head_number, 10);
     assert_eq!(result.blocks_ingested, 1);
     assert_eq!(ingest.db.blocks_in_range(10, 10).unwrap().len(), 1);

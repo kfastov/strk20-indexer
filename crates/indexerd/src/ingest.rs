@@ -203,7 +203,12 @@ impl<'a> Ingestor<'a> {
                 }
             },
             self.rpc.get_block(BlockRef::L1Accepted),
-            self.detect_reorg(announced),
+            async {
+                match announced {
+                    Some(head) => self.detect_reorg(Some(head)).await,
+                    None => Ok(None),
+                }
+            },
         )?;
         if let Some(head) = announced.filter(|h| h.block_number == latest.block_number) {
             anyhow::ensure!(normalize_hex(&head.block_hash)? == normalize_hex(&latest.block_hash)?,
@@ -214,6 +219,12 @@ impl<'a> Ingestor<'a> {
                 == latest.new_root.as_deref().map(normalize_hex).transpose()?,
                 "block data disagrees with subscription state root");
         }
+        // A demand-triggered latest read has no subscription header. Use the
+        // acquired header for canonicity too, rather than consulting a lagging
+        // RPC about a parent that the complete block already identifies.
+        let reorg = if announced.is_none() {
+            self.detect_reorg(Some(&latest)).await?
+        } else { reorg };
         if reorg.is_none() {
             anyhow::ensure!(
                 self.db.ingest_cursor()?.is_none_or(|n| latest.block_number >= n),
@@ -409,8 +420,12 @@ impl<'a> Ingestor<'a> {
         // A direct successor already identifies its parent. Re-fetching that
         // parent from a lagging RPC can falsely classify a fresh stored head
         // as orphaned. The acquired successor is bound to this header before writes.
-        if announced.is_some_and(|h| h.block_number.checked_sub(1) == Some(head_num)
-            && normalize_hex(&h.parent_hash).ok().as_deref() == Some(stored_hash.as_str())) {
+        if announced.is_some_and(|h| {
+            let hash = if h.block_number == head_num { Some(&h.block_hash) }
+                else if h.block_number.checked_sub(1) == Some(head_num) { Some(&h.parent_hash) }
+                else { None };
+            hash.and_then(|h| normalize_hex(h).ok()).as_deref() == Some(stored_hash.as_str())
+        }) {
             return Ok(None);
         }
         let gone = match self.rpc.get_block(BlockRef::Number(head_num)).await {

@@ -245,6 +245,46 @@ versus 1.15 and 0.44 s official, with matching notes and witnesses: the requeste
 state was already verified by the subscription. These are cache-hit examples,
 not evidence of faster fresh checkpoint verification.
 
+### Source latency and coherent block ingestion (2026-09-06)
+
+Paired observations on the production VPS remove the home network from the
+comparison. Both the actual Node/WASM provider and official SDK queried the
+same fixed block and independent empty identity. Before feeder ingestion,
+20 observations included local delays of 1,061 and 1,676 ms while the warmed
+official endpoint took 116–125 ms. Checkpoint prefetch alone still left waits
+of 1,165, 1,595 and 2,602 ms.
+
+Backend `778849f` acquires the sequencer feeder's complete accepted block,
+receipts and state diff in one request, bound to the subscription header.
+It includes silent storage writes; events alone are insufficient. Samples
+returned 20/20 valid bundles on each network (Sepolia median 138 ms, mainnet
+126 ms). Comparison against eight real pool-active Sepolia blocks matched all
+27 storage writes and 25 events, including transaction hashes and event indices.
+This input transport does not replace the client's independent checkpoint proof.
+
+In the subsequent 20 paired observations, local results ranged from 2 to
+1,910 ms; the official warmed results were 124–130 ms. The 1,910 ms observation
+at 14640800 waited for a late source notification: the official result finished
+at 11:51:56.453 UTC, the feed arrived around 11:51:58.038. Its prepared proof
+had already completed. Local verification took 85 ms and an intervening cache
+save 97 ms. Separately, 24 observed notification-to-SSE times were mostly
+126–160 ms, with a 575 ms maximum. This latter metric excludes time before
+the notification and cannot stand in for transaction discovery latency.
+Two parallel PublicNode subscriptions delivered the same 28 heads within
+9 ms of each other; duplicating that connection would not remove source lag.
+
+A public `head.ndjson` read now also requests an ingestion cycle against the
+latest complete feeder block. Requests coalesce once per published version;
+there is no timer, wallet-specific parameter or extra client request. This
+provides a second wakeup when a subscriber's target precedes a delayed source
+notification. It is not a guarantee that upstream has published the target yet.
+
+Chrome extension verification after `778849f` restored the funded browser
+wallet and discovery in 0.26 s. A read at 14640897 showed local 0.00 s versus
+official 0.39 s, with matching notes and witnesses; this was another cached
+checkpoint, not a fresh-path speed claim. Browser tests use tab-scoped extension
+control and screenshots without activating the user's browser window.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it

@@ -251,6 +251,7 @@ async fn feed_anchors(State(s): State<AppState>, headers: HeaderMap) -> Response
 }
 
 async fn feed_head(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    s.live.request_catchup();
     revalidated_ndjson(s.feed_dir.join("head.ndjson"), headers).await
 }
 

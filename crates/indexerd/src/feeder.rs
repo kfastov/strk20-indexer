@@ -1,6 +1,6 @@
 //! One coherent accepted block, receipts and state diff from the sequencer.
 //! This is input data, not a proof: normal mirror/root verification still applies.
-use crate::rpc::{BlockHeader, RpcEvent, StateUpdate};
+use crate::rpc::{BlockHeader, BlockRef, RpcEvent, StateUpdate};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use starknet_types_core::felt::Felt;
@@ -15,13 +15,19 @@ pub struct BlockData {
 pub async fn fetch(
     http: &reqwest::Client,
     base: &str,
-    number: u64,
+    target: BlockRef,
     pool: &Felt,
 ) -> Result<Option<BlockData>> {
+    let number = match target {
+        BlockRef::Number(n) => Some(n),
+        BlockRef::Latest => None,
+        BlockRef::L1Accepted => return Ok(None),
+    };
+    let query = number.map_or_else(|| "latest".into(), |n| n.to_string());
     let request = async {
         let mut response = http
             .get(format!(
-                "{}/get_state_update?blockNumber={number}&includeBlock=true",
+                "{}/get_state_update?blockNumber={query}&includeBlock=true",
                 base.trim_end_matches('/')
             ))
             .timeout(Duration::from_secs(2))
@@ -49,18 +55,16 @@ pub async fn fetch(
         Err(error) => {
             // One fallback, no timer or availability polling. RPC remains usable
             // when the optional feeder is down; malformed data is never hidden.
-            tracing::warn!(number, %error, "feeder unavailable; using RPC");
+            tracing::warn!(?target, %error, "feeder unavailable; using RPC");
             Ok(None)
         }
     }
 }
 
-fn decode(mut data: Value, number: u64, pool: &Felt) -> Result<BlockData> {
+fn decode(mut data: Value, expected: Option<u64>, pool: &Felt) -> Result<BlockData> {
     let block = data.get_mut("block").context("feeder block missing")?;
-    ensure!(
-        block["block_number"].as_u64() == Some(number),
-        "feeder returned another block"
-    );
+    let number = block["block_number"].as_u64().context("feeder block number missing")?;
+    ensure!(expected.is_none_or(|n| n == number), "feeder returned another block");
     ensure!(
         matches!(
             block["status"].as_str(),
@@ -184,7 +188,7 @@ mod tests {
     }
     #[test]
     fn complete_bundle_preserves_pool_events_silent_storage_and_class_changes() {
-        let result = decode(bundle(), 10, &Felt::ONE).unwrap();
+        let result = decode(bundle(), Some(10), &Felt::ONE).unwrap();
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].transaction_hash, "0xc");
         assert_eq!(
@@ -199,7 +203,7 @@ mod tests {
         let mut silent = bundle();
         silent["block"]["transaction_receipts"][0]["events"] = serde_json::json!([]);
         assert_eq!(
-            decode(silent, 10, &Felt::ONE)
+            decode(silent, Some(10), &Felt::ONE)
                 .unwrap()
                 .update
                 .state_diff
@@ -229,7 +233,7 @@ mod tests {
         ] {
             let mut data = bundle();
             *data.pointer_mut(path).unwrap() = value;
-            assert!(decode(data, 10, &Felt::ONE).is_err(), "accepted {path}");
+            assert!(decode(data, Some(10), &Felt::ONE).is_err(), "accepted {path}");
         }
     }
 }
