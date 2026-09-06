@@ -115,6 +115,7 @@ export interface RuntimeOptions {
   proofRpcUrl: string;
 }
 export type WorkerEvent =
+  | { event: "head"; value: number }
   | { event: "span"; value: Span }
   | { event: "request"; value: RequestRecord }
   | { event: "state"; value: EngineInfo }

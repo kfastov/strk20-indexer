@@ -232,7 +232,7 @@ async function initialize(): Promise<void> {
         proofRpcUrl: config.proofRpc,
         onEvent: (event) => {
           if (event.event === "span")
-            operations.detail(event.value.name, event.value.ms);
+            operations.detail(event.value.name, event.value.ms, event.value.bytes);
           if (event.event === "state") {
             info = event.value;
             render();

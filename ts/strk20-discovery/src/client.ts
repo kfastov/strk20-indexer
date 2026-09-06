@@ -28,6 +28,8 @@ export class KeylessClient {
   private failure: Error | undefined;
   private sequence = 0;
   private closed = false;
+  private feedHead = -1;
+  private headWaiters = new Set<(head: number | Error) => void>();
   private pending = new Map<
     number,
     { resolve: (value: unknown) => void; reject: (reason: Error) => void }
@@ -43,6 +45,12 @@ export class KeylessClient {
     this.worker.onmessage = (event) => {
       const message = event.data;
       if ("event" in message) {
+        if (message.event === "head" && Number.isSafeInteger(message.value) && message.value >= 0) {
+          this.feedHead = message.value;
+          for (const notify of this.headWaiters) notify(this.feedHead);
+        }
+        if (message.event === "error" && /CHAIN_MISMATCH|CHECKPOINT_FAILED/.test(message.value))
+          for (const notify of this.headWaiters) notify(new Error(message.value));
         options.onEvent?.(message as WorkerEvent);
         return;
       }
@@ -54,6 +62,7 @@ export class KeylessClient {
     };
     this.worker.onerror = () => {
       this.failure = new Error("Discovery worker failed");
+      for (const notify of this.headWaiters) notify(this.failure);
       for (const waiter of this.pending.values()) waiter.reject(this.failure);
       this.pending.clear();
     };
@@ -140,6 +149,27 @@ export class KeylessClient {
     await this.ready;
     await this.call("subscribe");
   }
+  /** Wait for advertised feed availability, not verification. Discovery still
+   * checks the complete state against an independently fetched checkpoint. */
+  async waitForHead(block: number): Promise<void> {
+    await this.subscribe();
+    if (this.feedHead >= block) return;
+    if (this.failure) throw this.failure;
+    if (this.closed) throw new Error("Discovery provider is closed");
+    await new Promise<void>((resolve, reject) => {
+      const notify = (head: number | Error) => {
+        if (typeof head === "number" && head < block) return;
+        clearTimeout(timer);
+        this.headWaiters.delete(notify);
+        if (head instanceof Error) reject(head);
+        else resolve();
+      };
+      const timer = setTimeout(() => notify(new Error(
+        "BOUND_UNAVAILABLE: timed out waiting for feed subscription",
+      )), 120_000);
+      this.headWaiters.add(notify);
+    });
+  }
   async clearCache(): Promise<void> {
     await this.ready;
     await this.call("clear");
@@ -150,6 +180,7 @@ export class KeylessClient {
       if (!this.failure) await this.call("close");
     } finally {
       this.closed = true;
+      for (const notify of this.headWaiters) notify(new Error("Closed"));
       this.worker.terminate();
       for (const w of this.pending.values()) w.reject(new Error("Closed"));
       this.pending.clear();

@@ -140,6 +140,9 @@ export class LocalDiscoveryProvider implements DiscoveryProviderInterface {
         this.discoverRequirement(address, key, recipient, token, block),
     };
   }
+  waitForBlock(block: number) {
+    return this.client.waitForHead(block);
+  }
   subscribe() {
     return this.client.subscribe();
   }

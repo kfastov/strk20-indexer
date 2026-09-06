@@ -11,9 +11,10 @@ export interface Operation {
 export class Operations {
   readonly entries: Operation[] = [];
   active: Operation | undefined;
-  detail(name: string, ms: number): void {
+  detail(name: string, ms: number, bytes?: number): void {
     this.active?.children.push({
       label: name,
+      ...(bytes === undefined ? {} : { detail: `${bytes.toLocaleString()} bytes` }),
       started: performance.now() - ms,
       elapsedMs: ms,
       children: [],

@@ -6,7 +6,9 @@ import type { Wallet } from "./wallet.ts";
 import { NETWORKS } from "./network.ts";
 
 type Notes = Awaited<ReturnType<DiscoveryProviderInterface["discoverNotes"]>>;
-type NotesProvider = Pick<DiscoveryProviderInterface, "discoverNotes">;
+type NotesProvider = Pick<DiscoveryProviderInterface, "discoverNotes"> & {
+  waitForBlock?: (block: number) => Promise<void>;
+};
 export interface Observation {
   source: "Local" | "Official";
   block: number;
@@ -66,7 +68,12 @@ export async function observeAt(
             )
           )
             throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          if (provider.waitForBlock && /BOUND_UNAVAILABLE/.test(String(error)))
+            await provider.waitForBlock(block);
+          else
+            // Reference API and transient transport failures have no readiness
+            // subscription. This backoff is not used for our feed availability.
+            await new Promise((resolve) => setTimeout(resolve, 1000));
         }
       }
     } catch (error) {

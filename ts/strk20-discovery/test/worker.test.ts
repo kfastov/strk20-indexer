@@ -414,6 +414,16 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
     "inline SSE never re-downloads head or epochs",
   );
 
+  requests.length = 0;
+  assert.equal((await live.sync(198)).verifiedAt, 198);
+  assert.equal(requests.filter((r) => !r.body).length, 0,
+    "bounded reads reuse staged artifacts rather than reload the feed");
+  assert(requests.some((r) => r.body.includes("starknet_getStorageProof")),
+    "artifact reuse still independently proves the requested checkpoint");
+  badProof = true;
+  await assert.rejects(() => live.sync(197), /block hash|block_hash|proof/i);
+  badProof = false;
+
   // A bounded resync signal uses the same HTTP apply path.
   manifest = {
     ...original,

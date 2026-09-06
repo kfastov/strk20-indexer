@@ -47,6 +47,7 @@ export class WorkerRuntime {
   >();
   private liveQueued = false;
   private needsCatchup = true;
+  private headStaged = false;
   private saved = false;
   private stopped = false;
   private readonly module: EngineModule;
@@ -80,14 +81,14 @@ export class WorkerRuntime {
       `strk20-folded-v2:${this.profile.chainId}:${hex(this.profile.pool)}`,
     );
   }
-  private async span<T>(name: string, work: () => T | Promise<T>): Promise<T> {
+  private async span<T>(name: string, work: () => T | Promise<T>, bytes?: number): Promise<T> {
     const start = performance.now();
     try {
       return await work();
     } finally {
       this.emit({
         event: "span",
-        value: { name, ms: performance.now() - start },
+        value: { name, ms: performance.now() - start, ...(bytes === undefined ? {} : { bytes }) },
       });
     }
   }
@@ -99,7 +100,7 @@ export class WorkerRuntime {
     if (bytes) {
       try {
         this.engine = await this.span("Restore verified state", () =>
-          this.module.Engine.load(bytes, this.genesis),
+          this.module.Engine.load(bytes, this.genesis), bytes.length,
         );
         this.saved = true;
       } catch {
@@ -161,8 +162,12 @@ export class WorkerRuntime {
     }
   }
   private async syncOnce(block?: number): Promise<EngineInfo> {
-    if (this.needsCatchup || !this.manifest || !this.queuedHead)
-      await this.manifestGet();
+    // A bounded read may reuse staged public artifacts. The independently
+    // fetched checkpoint still verifies the requested block, including reorgs.
+    const reuse = block !== undefined && this.headStaged && !this.needsCatchup
+      && !this.queuedHead && this.manifest && block <= this.manifest.head.number;
+    if (!reuse && (this.needsCatchup || !this.manifest || !this.queuedHead))
+      await this.span("Fetch feed manifest", () => this.manifestGet());
     const m = this.manifest!;
     const pending = this.queuedHead;
     this.queuedHead = undefined;
@@ -196,13 +201,14 @@ export class WorkerRuntime {
         l1_accepted: pending.l1_accepted,
       };
       this.engine.stage_head(encode(pending.payload), pending.etag);
-    } else {
+    } else if (!reuse) {
       const head = await this.net.get("head.ndjson");
       this.engine.stage_head(
         head.bytes,
         head.etag || (await digest(head.bytes)),
       );
     }
+    this.headStaged = true;
     if (
       block !== undefined &&
       (!Number.isSafeInteger(block) || block < 0 || block > m.head.number)
@@ -319,6 +325,7 @@ export class WorkerRuntime {
             }
             if (name === "head") {
               this.queuedHead = data;
+              this.emit({ event: "head", value: data.head });
               if (!data.payload || data.resync || this.queuedEpochs.size > 4)
                 this.needsCatchup = true;
               if (!this.liveQueued) {
@@ -348,6 +355,7 @@ export class WorkerRuntime {
     this.engine.free();
     this.engine = new this.module.Engine(this.genesis);
     this.manifest = undefined;
+    this.headStaged = false;
     this.needsCatchup = true;
     this.saved = false;
   }

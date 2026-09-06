@@ -47,3 +47,27 @@ test("comparison normalizes SDK note IDs but still detects different witnesses",
   });
   assert.equal(comparison?.equal, false);
 });
+
+test("local feed lag waits for subscription readiness instead of a retry timer", async () => {
+  let available = false;
+  let waits = 0;
+  const local = {
+    async discoverNotes(): Promise<Awaited<ReturnType<DiscoveryProviderInterface["discoverNotes"]>>> {
+      if (!available) throw new Error("BOUND_UNAVAILABLE: behind");
+      return {
+        timestamp: 99,
+        notes: new AddressMap(),
+        cursor: { blockId: 99, incomingChannels: new AddressMap() },
+      };
+    },
+    async waitForBlock(block: number) {
+      assert.equal(block, 99);
+      waits++;
+      available = true;
+    },
+  };
+  let comparison: Comparison | undefined;
+  await observeAt(newWallet("sepolia"), local, 99, false, (value) => { comparison = value; });
+  assert.equal(waits, 1);
+  assert.equal(comparison?.rows[0]?.attempts, 2);
+});
