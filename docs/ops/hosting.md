@@ -36,13 +36,19 @@ Deployment remains manual:
 
 The 2026-09-06 deployment runs backend `1dbd6be`, image
 `fe756d5309d30bff2b3ed64d5bdc0b090789f3b95bbf0a0ec5cfd471643d1b81`.
-The demo runs `486d448`, built in an isolated consumer from the standalone
-`strk20-discovery@0.1.0` release tarball. CI passed, including installation of
-that tarball and a browser build without the repository's upstream checkout.
-Every public demo asset matched the isolated build byte-for-byte, including
-Worker and WASM. This was a static-only deployment; the backend was unchanged.
-`/root/strk20-deploy-20260906-sdk-release/demo-before.tar.gz` preserves demo
-`6c2fdfa`; `SHA256SUMS`, `previous-deployment` and `activated-at` are beside it.
+The demo runs `54993ef`, built in an isolated consumer of
+`strk20-discovery@0.1.0`. CI passed Rust, invariants and TypeScript/WASM, including
+installation of the SDK tarball and a browser build outside the repository.
+Confirmation now uses transaction-status WebSocket events; the page CSP allows
+the two configured WSS hosts. Every public asset matched the isolated build
+byte-for-byte. Hosted unfunded wallet creation, backup download, address restore
+and funding checks passed on both networks, with no page errors or mobile overflow.
+This does not replace the pending funded mainnet withdrawal acceptance.
+
+This was a static-only deployment; the backend was unchanged.
+`/root/strk20-deploy-20260906-confirmation/demo-before.tar.gz` preserves demo
+`486d448`; `SHA256SUMS` and `activated-at` are beside it. The preceding SDK-release
+backup remains at `/root/strk20-deploy-20260906-sdk-release/`.
 
 After the preceding backend activation, the actual Node/WASM consumer independently
 verified Sepolia `14643219` and mainnet `14455072`, both `rpc-verified` with
