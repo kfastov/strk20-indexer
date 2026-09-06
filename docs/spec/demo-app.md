@@ -438,6 +438,34 @@ construction, replaces cryptographic signing and RPC submission, simulates a
 lost response, reloads the wallet and confirms that resume does not send again.
 Legacy pending records without a hash remain a manual recovery case.
 
+## Standalone release acceptance, 2026-09-06
+
+Demo source `486d448` now consumes the unchanged official builder through
+`strk20-discovery/privacy-sdk`. The release tarball includes the compiled
+upstream SDK and WASM; it needs no local vendor checkout or GitHub Packages
+credentials. Version 0.1.0 is published on npm; its registry SHA-1 is
+`9d01df7e04b9fe5d06dcca001b9e320a10ea165b`, matching the tested tarball.
+A separate consumer installed version 0.1.0 from the public registry with
+`--userconfig=/dev/null`, started the Node/WASM Worker, and passed TypeScript
+and Vite builds. The tested tarball also ran the actual Node/WASM provider
+against Sepolia checkpoint
+14645569. This cold run spent 6.97 s verifying state; it is not a warm-start
+measurement or evidence that cold startup meets two seconds.
+
+That isolated demo build is deployed. Public files matched SHA-256 checks of
+all local assets. A headless browser tested both networks on the hosted page:
+create an unfunded wallet, export the correctly named backup, reload with the
+same address, and check funding. Both reported the expected empty STRK balance.
+No page errors or horizontal overflow at 390 px were observed. Test wallet
+contexts were disposable; this check did not submit funded transactions.
+
+Separately, the existing funded Sepolia wallet in the user's Chrome tab took
+2.42 s to restore on the preceding deployment, plus 0.21 s to read its public
+balance. The two-second funded restart target is not reliably met. The new
+release's unfunded reload result does not establish funded-cache performance.
+The previous funded lifecycle evidence remains above; a new funded mainnet
+lifecycle using this package remains pending.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,

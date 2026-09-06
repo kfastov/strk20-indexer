@@ -36,13 +36,15 @@ Deployment remains manual:
 
 The 2026-09-06 deployment runs backend `1dbd6be`, image
 `fe756d5309d30bff2b3ed64d5bdc0b090789f3b95bbf0a0ec5cfd471643d1b81`.
-The demo runs `6c2fdfa` (foreground queue priority); both versions passed CI.
-Every hosted demo file was compared byte-for-byte with the local release,
-including its Worker and WASM. `demo-before-priority.tar.gz` in the backup
-directory below preserves demo `1dbd6be`; `demo-priority-activated-at` records
-this later static-only publication.
+The demo runs `486d448`, built in an isolated consumer from the standalone
+`strk20-discovery@0.1.0` release tarball. CI passed, including installation of
+that tarball and a browser build without the repository's upstream checkout.
+Every public demo asset matched the isolated build byte-for-byte, including
+Worker and WASM. This was a static-only deployment; the backend was unchanged.
+`/root/strk20-deploy-20260906-sdk-release/demo-before.tar.gz` preserves demo
+`6c2fdfa`; `SHA256SUMS`, `previous-deployment` and `activated-at` are beside it.
 
-After activation, the actual Node/WASM consumer independently
+After the preceding backend activation, the actual Node/WASM consumer independently
 verified Sepolia `14643219` and mainnet `14455072`, both `rpc-verified` with
 `verificationFailed: false`. Both public health endpoints reported OK and
 heads advanced. Public HTTPS SSE delivered complete epoch and head payloads.

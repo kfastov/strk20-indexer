@@ -56,10 +56,10 @@ required; the repository at the deadline is the entry.
 | A: mainnet repair and backward epoch recut (1–2) | Repair/recut code and published snapshots exist; full consumer state checks now pass on both networks. This audit did not repeat the old all-history event-count comparison. State-root agreement does not prove intermediate history. |
 | B: CORS, Docker, compose, health, cache headers (3–7) | Deployed on both networks; backups, rollback, advancing heads and complete public SSE payloads checked. Final release smoke remains part of acceptance. |
 | C: packaging-only fork, single pin, delta CI, upstream PR (8–11) | Implemented. Upstream PR #984 remains open; merging is outside our control and is not a submission dependency. |
-| D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Package is not published to npm and depends on a local vendored SDK path. A checkout build is documented; installation outside that checkout remains a packaging task. |
+| D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Release 0.1.0 bundles the unchanged official SDK and WASM. Installation, Node discovery against Sepolia, and a demo build passed in an isolated consumer without a source checkout or GitHub Packages credentials. [0.1.0 is published on npm](https://www.npmjs.com/package/strk20-discovery). |
 | D: transaction-history API (13) | Still optional, not implemented as the proposed complete transaction-history surface. Do not imply current-state verification authenticates transaction history. |
-| E: README, diagram, pitch (14–16) | Incomplete: README still says the funded demo is unvalidated; pitch claims a final-state root proves every historical write, advertises old 0.03 s measurements and says snapshots are unpublished. Diagram still shows polling and a SQLite snapshot. Rewrite before using them for judging/video. |
-| E: Sepolia scripts (17) | Scripts were published. However `examples/sepolia/spend.mjs`, `verify.mjs` and `verify-spend.mjs` still instantiate the official provider. The old standalone Sepolia scripts were removed on the user's instruction; the SDK and browser demo are now the maintained integration path. |
+| E: README, diagram, pitch (14–16) | README rewritten around the SDK and demo, with explicit trust and performance limits. Still outstanding: pitch claims a final-state root proves every historical write, advertises old 0.03 s measurements and says snapshots are unpublished. Diagram still shows polling and a SQLite snapshot. Rewrite before using them for judging/video. |
+| E: Sepolia scripts (17) | The old standalone Sepolia scripts were removed on the user's instruction; the SDK and browser demo are now the maintained integration path. |
 | F: main branch and mainnet hashes (18–19) | Commits are pushed; four existing mainnet hashes are verified by the hub. They do not establish a mainnet lifecycle using our newly implemented provider. |
 | F: video and final metadata (20–21) | Not done: no video URL, no final metadata/hub acceptance. Empty optional `contracts` is not a missing deployed contract. |
 
@@ -93,7 +93,7 @@ required; the repository at the deadline is the entry.
 
 ### Ordered remaining work
 
-1. Correct README, pitch and the single dataflow diagram. Center the pitch on
+1. Finish the pitch and single dataflow diagram; README is rewritten. Center the pitch on
    discovery without disclosing the viewing key and independently checked state;
    remove historical-proof and universal-speed claims. Keep measurements in the
    demo evidence rather than multiplying contradictory copies.
@@ -101,17 +101,13 @@ required; the repository at the deadline is the entry.
    transfer and withdrawal. Complete mainnet acceptance with our provider; retain
    hashes and exported timing evidence. Verify reload/receipt recovery and repeated
    warm starts. Use the same run as the basis for the video.
-3. Verify a clean-checkout build and runnable consumer example, including the Node
-   lifecycle path. Resolve the old Sepolia scripts' official-provider ambiguity.
-   Make an independently installable package if time permits; do not advertise
-   `npm install strk20-discovery` while it is unpublished and uses a local SDK path.
-4. Keep the release focused on SDK and demo. The user explicitly moved the bloat
+3. Keep the release focused on SDK and demo. The user explicitly moved the bloat
    audit and large-server-module revision after submission. Fix release-blocking
    defects found during acceptance without starting that refactor.
-5. Record and publish the three-minute video. Show real transactions, our discovered
+4. Record and publish the three-minute video. Show real transactions, our discovered
    note supplying the next spend, and the privacy distinction. Explain any compressed
    waits; do not turn cached-vs-fresh timings into a universal speed claim.
-6. Insert the real video URL into `strk20.json`, retain valid mainnet hashes, push,
+5. Insert the real video URL into `strk20.json`, retain valid mainnet hashes, push,
    then verify the hub recognizes all requirements. Check public demo/assets,
    clean build and CI once more on the final release.
 
