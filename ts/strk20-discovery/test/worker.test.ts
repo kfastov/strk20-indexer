@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import "fake-indexeddb/auto";
 import init, { Engine } from "../../../crates/wasm/pkg/strk20_engine.js";
 import { Witness, AddressMap } from "@starkware-libs/starknet-privacy-sdk";
-import { WorkerRuntime, installWorker } from "../src/worker.ts";
+import { WorkerRuntime, installWorker, type WorkerHost } from "../src/worker.ts";
 import { notesResult, LocalDiscoveryProvider } from "../src/provider.ts";
 import type { DiscoveryResult, RuntimeOptions } from "../src/types.ts";
 
@@ -53,6 +53,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   let manifest = doc("manifest.json"),
     badProof = false;
   let unavailableProofAt: number | undefined;
+  let headerGate: { block: number; entered: () => void; resume: Promise<void> } | undefined;
   const requests: { url: string; body: string }[] = [];
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
   let connected: (() => void) | undefined;
@@ -66,6 +67,11 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       requests.push({ url, body });
       if (body) {
         const call = JSON.parse(body);
+        if (headerGate && call.method === "starknet_getBlockWithTxHashes"
+          && call.params[0].block_number === headerGate.block) {
+          headerGate.entered();
+          await headerGate.resume;
+        }
         let result: unknown;
         if (call.method === "starknet_chainId")
           result = `0x${Buffer.from(genesis.chain_id).toString("hex")}`;
@@ -227,22 +233,24 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
     await runtime.close();
   }
   // The public SDK adapter and actual dispatcher; only signing/proving is replaced.
-  const scope = globalThis as unknown as {
-    postMessage: (data: unknown) => void;
-    onmessage: (event: MessageEvent) => void;
+  const scope: WorkerHost = {
+    postMessage: () => {},
+    onmessage: null,
   };
   const port = {
     onmessage: null as ((event: MessageEvent) => void) | null,
     onerror: null,
-    postMessage: (data: unknown) => scope.onmessage({ data } as MessageEvent),
+    postMessage: (data: unknown) => scope.onmessage?.({ data }),
     terminate: () => {},
   };
   scope.postMessage = (data) =>
     queueMicrotask(() => port.onmessage?.({ data } as MessageEvent));
-  installWorker(async () => ({ Engine }));
+  installWorker(async () => ({ Engine }), scope);
+  let headObserved: (() => void) | undefined;
   const provider = new LocalDiscoveryProvider({
     ...options,
     workerFactory: () => port as unknown as Worker,
+    onEvent: (e) => { if (e.event === "head") headObserved?.(); },
   });
   const owner = owners[0]!,
     viewingKey = BigInt(`0x${owner.key}`);
@@ -324,7 +332,39 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       .length,
     1,
   );
-  await provider.close();
+  // A foreground request arriving during an active verification must precede
+  // an already queued SSE refresh, rather than verify an unrelated head first.
+  let releaseHeader!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    headerGate = { block: 98, entered: resolve,
+      resume: new Promise<void>((resume) => { releaseHeader = resume; }) };
+  });
+  try {
+    const connection = new Promise<void>((resolve) => { connected = resolve; });
+    await provider.subscribe();
+    await connection;
+    requests.length = 0;
+    const first = mine.discoverNotes({ blockIdentifier: 98 });
+    await entered;
+    const observed = new Promise<void>((resolve) => { headObserved = resolve; });
+    stream!.enqueue(new TextEncoder().encode(
+      `event: head\ndata: ${JSON.stringify({ head: 99, payload: null, resync: true })}\n\n`,
+    ));
+    await observed;
+    const second = mine.discoverNotes({ blockIdentifier: 97 });
+    // Deliver the foreground message while the first verification is paused.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseHeader();
+    await Promise.all([first, second]);
+    const proofBlocks = requests.filter((r) => r.body.includes("starknet_getStorageProof"))
+      .map((r) => JSON.parse(r.body).params[0].block_number);
+    assert.deepEqual(proofBlocks.slice(0, 2), [98, 97],
+      "queued live verification must yield to the waiting foreground read");
+  } finally {
+    releaseHeader();
+    headerGate = undefined;
+    await provider.close();
+  }
 
   // An actual epoch advance arrives entirely in SSE; only the independent
   // checkpoint RPCs are allowed before the new state becomes visible.

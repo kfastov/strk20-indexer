@@ -352,6 +352,7 @@ export class WorkerRuntime {
                 this.liveQueued = true;
                 this.enqueue(async () => {
                   this.liveQueued = false;
+                  if (this.stopped) return;
                   await this.sync();
                   // Let reads already waiting behind this update run before disk I/O.
                   this.enqueue(() => this.save());
@@ -407,12 +408,24 @@ export function installWorker(
   cacheFactory?: CacheFactory,
 ): void {
   let runtime: WorkerRuntime | undefined;
-  let queue = Promise.resolve();
+  const foreground: (() => Promise<void>)[] = [];
+  const background: (() => Promise<void>)[] = [];
+  let running = false;
   const emit = (event: WorkerEvent) => scope.postMessage(event);
-  const enqueue = (work: () => Promise<void>) => {
-    queue = queue
-      .then(work)
-      .catch((e) => emit({ event: "error", value: String(e) }));
+  const enqueue = (work: () => Promise<void>, urgent = false) => {
+    (urgent ? foreground : background).push(work);
+    if (running) return;
+    running = true;
+    void (async () => {
+      let next;
+      // Never interrupt a state mutation. Between jobs, reads take precedence
+      // over coalesced live updates and cache writes.
+      while ((next = foreground.shift() ?? background.shift())) {
+        try { await next(); }
+        catch (e) { emit({ event: "error", value: String(e) }); }
+      }
+      running = false;
+    })();
   };
   scope.onmessage = (event) => {
     const { id, method, args } = event.data as {
@@ -489,6 +502,6 @@ export function installWorker(
       } finally {
         if (args[1] instanceof Uint8Array) args[1].fill(0);
       }
-    });
+    }, method !== "close");
   };
 }
