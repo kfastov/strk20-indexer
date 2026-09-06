@@ -37,43 +37,101 @@ The current contracts are [consumer path](spec/consumer-path.md),
   generated reference metrics. Test servers reserve ephemeral ports themselves;
   child logging no longer depends on the parent environment.
 
-## Resume here
+## Submission reconciliation, 2026-09-06
 
-1. Continue the performance work without claiming a stable speed win. The event
-   path is deployed; Sepolia matched-block WS-to-SSE median fell from 2,493 ms
-   (4 samples) to 243 ms (17 samples). This excludes checkpoint verification and
-   discovery. Browser restart and comparison measurements, including regressions,
-   are recorded in [demo evidence](spec/demo-app.md). The <=2 s navigation-to-data
-   target is not yet reliably met. Remaining costs include WASM restoration,
-   client verification/queueing and upstream RPC availability for announced blocks.
-   The 2026-09-06 trace identifies a concrete amplifier: after error 24 the
-   producer chased newer unavailable announcements instead of processing the
-   available HTTP head. The deployed fallback fixes that starvation. A passive
-   WS trace still captured a 3.708 s notification gap after a premature head:
-   the producer has no HTTP-data-ready signal and waits for another event.
-   Next investigate a data-ready source or bounded alternate RPC acquisition,
-   and overlap requested checkpoint retrieval with feed waiting where possible.
-   See the causal breakdown in the demo evidence; the matched-head SSE median
-   excluded these coalesced slow cases.
-2. Verify the migrated lifecycle scripts with the user's funded flow. They now
-   use our Node Worker host, private file cache and a common proving block. The
-   Node integration test verifies real fixture state and restores discovered
-   notes and cursors with the HTTP server offline; no transaction is submitted.
-3. Record a clean end-to-end video on the final version. The successful Sepolia
-   run included fixes and reloads and is acceptance evidence, not a finished
-   demo video. Mainnet funded acceptance remains separate work.
-4. Verify receipt recovery in the funded run. The signer now persists the exact
-   SDK-computed hash before signing, so a lost send response can be resumed after
-   reload. Tests mock cryptographic signing and network submission, and verify
-   that resuming does not submit again. Legacy pending entries without a hash
-   still require manual investigation; no automatic resubmission is attempted.
-5. Deployment completed on 2026-09-06: both indexers and `/demo/` now run the
-   updated implementation. Both services are healthy and advancing; full SSE
-   payloads were observed through nginx. The deployment and rollback details
-   are in [hosting](ops/hosting.md). The subsequent Sepolia browser acceptance
-   run verified spending; the demo now includes the fixes found by that run.
-6. Finish the hackathon video and submission metadata against the current rules.
-   External wallet adoption or upstream acceptance is not implied by a demo.
+This reconciles the original [21-item plan](pre-submission-corrections.md), the
+later accepted design, current source and live evidence. The original plan is a
+historical decision record, not a current checklist. Source reviewed: `1955dd9`.
+The deadline is September 7, 23:59 UTC (September 8, 02:59 Moscow), according to
+the [current rules](https://github.com/starkience/strk20-hackathon#submitting).
+
+The hub's current `projects.json` reports four verified mainnet transactions,
+`demo=true`, `mainnet=true`, `video=false`, status `building`. Its indexed source
+is still `5152e07`, so it is not evidence that the newest implementation was
+reviewed. Local `strk20.json.demo_video` is also empty. No extra submission PR is
+required; the repository at the deadline is the entry.
+
+| Original items | Current evidence / remaining acceptance |
+|---|---|
+| A: mainnet repair and backward epoch recut (1–2) | Repair/recut code and published snapshots exist; full consumer state checks now pass on both networks. This audit did not repeat the old all-history event-count comparison. State-root agreement does not prove intermediate history. |
+| B: CORS, Docker, compose, health, cache headers (3–7) | Deployed on both networks; backups, rollback, advancing heads and complete public SSE payloads checked. Final release smoke remains part of acceptance. |
+| C: packaging-only fork, single pin, delta CI, upstream PR (8–11) | Implemented. Upstream PR #984 remains open; merging is outside our control and is not a submission dependency. |
+| D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Package is not published to npm and depends on a local vendored SDK path. A checkout build is documented; installation outside that checkout remains a packaging task. |
+| D: transaction-history API (13) | Still optional, not implemented as the proposed complete transaction-history surface. Do not imply current-state verification authenticates transaction history. |
+| E: README, diagram, pitch (14–16) | Incomplete: README still says the funded demo is unvalidated; pitch claims a final-state root proves every historical write, advertises old 0.03 s measurements and says snapshots are unpublished. Diagram still shows polling and a SQLite snapshot. Rewrite before using them for judging/video. |
+| E: Sepolia scripts (17) | Scripts were published. However `examples/sepolia/spend.mjs`, `verify.mjs` and `verify-spend.mjs` still instantiate the official provider. Migrate the intended current example or clearly retain it as historical evidence and point to the new lifecycle example. |
+| F: main branch and mainnet hashes (18–19) | Commits are pushed; four existing mainnet hashes are verified by the hub. They do not establish a mainnet lifecycle using our newly implemented provider. |
+| F: video and final metadata (20–21) | Not done: no video URL, no final metadata/hub acceptance. Empty optional `contracts` is not a missing deployed contract. |
+
+### Later accepted requirements
+
+- **Real state proofs:** implemented. Complete state at accepted RPC checkpoint B;
+  no proof of all intermediate writes or Ethereum finality. Cache remains explicitly trusted.
+- **Self-contained wallet demo:** real Sepolia shield → local discovery → spend →
+  withdraw passed. Mainnet state verification passed, but a complete funded mainnet
+  lifecycle with the new provider is not yet established. The previous Sepolia run
+  included fixes and reloads; it is not a clean final video run.
+- **Restart and transfer size:** earlier funded restarts exceeded two seconds; later
+  individual restores were faster. Repeat navigation-to-cached-notes acceptance on
+  the final build is still needed. Record actual cold transferred bytes, WASM work
+  and catch-up separately; current-state snapshot size and full-history size are
+  different quantities. Do not use the former 8/16 MB figures as current cold traffic.
+- **Same-transaction benchmark:** implemented. Latest 20-pair VPS series after queue
+  priority: local fresh work 203–422 ms, cached 1–3 ms, official 122–153 ms. No stable
+  fresh-path speed victory established. Final funded evidence remains separate.
+- **Recovery:** both wallet keys persist separately from disposable state, with
+  export/import. Precomputed transaction hashes are saved before signing and
+  response-loss behavior is tested. A funded receipt-resume acceptance run remains.
+- **Simplification/test isolation:** mock engine and duplicate wrappers were removed;
+  test ports, child logging and Worker host isolation improved. This is not a completed
+  whole-project bloat audit: `ingest.rs` has roughly 1,100 lines before its test module,
+  `cutter.rs` roughly 1,188, and CLI/run handling shares a 1,292-line `main.rs`.
+  Size is a review trigger, not proof that all these lines are unnecessary.
+- **External adoption:** no confirmed third-party integration. Prepare a reproducible
+  example; contact a team only with explicit message authorization. Adoption and
+  upstream acceptance remain bonus evidence, not gates for submission.
+
+### Ordered remaining work
+
+1. Correct README, pitch and the single dataflow diagram. Center the pitch on
+   discovery without disclosing the viewing key and independently checked state;
+   remove historical-proof and universal-speed claims. Keep measurements in the
+   demo evidence rather than multiplying contradictory copies.
+2. Rehearse the final deployed flow from entry through funding, shield, discovery,
+   transfer and withdrawal. Complete mainnet acceptance with our provider; retain
+   hashes and exported timing evidence. Verify reload/receipt recovery and repeated
+   warm starts. Use the same run as the basis for the video.
+3. Verify a clean-checkout build and runnable consumer example, including the Node
+   lifecycle path. Resolve the old Sepolia scripts' official-provider ambiguity.
+   Make an independently installable package if time permits; do not advertise
+   `npm install strk20-discovery` while it is unpublished and uses a local SDK path.
+4. Do the promised focused maintainability pass: remove confirmed dead paths,
+   duplicate state and fictitious checks; isolate test pollution. Avoid speculative
+   abstractions and a broad rewrite before recording. Fix release-blocking findings.
+5. Record and publish the three-minute video. Show real transactions, our discovered
+   note supplying the next spend, and the privacy distinction. Explain any compressed
+   waits; do not turn cached-vs-fresh timings into a universal speed claim.
+6. Insert the real video URL into `strk20.json`, retain valid mainnet hashes, push,
+   then verify the hub recognizes all requirements. Check public demo/assets,
+   clean build and CI once more on the final release.
+
+### Performance work boundary
+
+The deployed transport is **WS header → one feeder HTTP request with block,
+receipts and state update → indexer → full-payload SSE → client**, plus independent
+client checkpoint RPCs. The data request after the upstream notification remains.
+Standard new-head subscriptions contain headers, not complete storage diffs.
+A data stream such as Apibara/Starkstream is a candidate, not an implemented or
+measured replacement. Do not delay required submission artifacts for that integration.
+
+The role split allows live RPC and proof/archive capabilities to differ. There
+has been no isolated end-to-end A/B test changing only that configuration. A
+fresh 20-head mainnet comparison found more error-24 refusals on PublicNode than
+Lava despite shorter successful-response tails. Neither endpoint is established
+as universally fastest/freshest; details are in [demo evidence](spec/demo-app.md).
+Automatic latency routing remains unimplemented. Further provider research,
+zero-extra-request data streaming and cross-transport experiments are deferred
+behind the submission work, unless a reproducible release-blocking failure appears.
 
 ## After the main plan
 

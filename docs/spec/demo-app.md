@@ -376,6 +376,46 @@ steady verification medians of roughly 97 versus 92 ms did not establish a
 worthwhile end-to-end improvement. The deployed WASM uses the original
 representation, rebuilt from committed Rust source.
 
+### What the RPC-role measurements establish
+
+There is no isolated full-discovery A/B test changing only the mainnet RPC role
+configuration. Earlier consumer timings also changed ingestion, trie reuse,
+checkpoint concurrency and scheduling, and cannot attribute the entire gain to
+provider separation.
+
+A prior 20-request mainnet `l1_accepted` header probe had Lava 19 successes,
+median 86 ms, maximum 1,609 ms and one three-second timeout; PublicNode had 20,
+median 100 ms and maximum 317 ms. This favored the observed tail, not median
+latency, and did not measure availability of newly announced blocks.
+
+A follow-up probe on 2026-09-06 observed 20 PublicNode WS head notifications on
+the VPS. For each exact announced height, both endpoints received one header
+and one state-update request concurrently, with no retry and a three-second
+request timeout. Success required the returned block hash to match the notification.
+
+| Method | Provider | Matching answers / 20 | Median successful response | Maximum successful response |
+|---|---|---:|---:|---:|
+| Block header | Lava | 18 | 149.9 ms | 1,483.9 ms |
+| Block header | PublicNode | 14 | 116.1 ms | 337.2 ms |
+| State update | Lava | 17 | 159.4 ms | 999.5 ms |
+| State update | PublicNode | 15 | 120.7 ms | 312.9 ms |
+
+All unsuccessful answers were RPC error 24. These successful-response medians
+exclude different sets of blocks. On the 13 common successful header pairs,
+PublicNode won only six and its paired median was 29.2 ms slower. On the 13
+common successful state-update pairs, it won eight with a 68.6 ms paired median
+advantage. This is not evidence that PublicNode is universally the fastest live
+source. Sampling is triggered by PublicNode itself, not by an independent chain
+arrival clock; no retry-to-ready time or complete-discovery time was measured.
+
+Provider roles remain useful for capability separation: archive/proof requests
+need not move the ordinary live endpoint. Current primary block data comes from
+the coherent feeder, so the table does not directly measure that ingest path.
+There is no automatic fastest-provider router. A full-data stream could remove
+the feeder request after a header notification, but it has not been integrated.
+Routine indexer-to-client SSE already carries the data itself; independent
+checkpoint header/proof requests still remain.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it
