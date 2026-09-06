@@ -41,10 +41,13 @@ const probes = [
     const j = await r.json();
     return j.result ? `OK (starknet spec ${j.result})` : `unexpected: ${JSON.stringify(j).slice(0, 120)}`;
   }],
-  ["discovery", cfg.discovery, async (u) => {
-    const r = await fetch(u + "/health");
+  ["feed     ", cfg.feed, async (u) => {
+    const r = await fetch(u.replace(/\/$/, "") + "/manifest.json");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
-    return j.status === "OK" ? `OK (head ${j.chain_head?.block_number}, lag ${j.lag_secs}s)` : JSON.stringify(j).slice(0, 120);
+    return j.chain_id === "SN_MAIN" && BigInt(j.pool) === BigInt(cfg.pool)
+      ? `OK (published head ${j.head.number}; checkpoint verified during discovery)`
+      : "WRONG CHAIN OR POOL";
   }],
 ];
 for (const [name, url, probe] of probes) {

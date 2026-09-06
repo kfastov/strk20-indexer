@@ -60,11 +60,24 @@ Requires **Node ≥ 24** (the SDK's OHTTP dependency needs modern WebCrypto) and
 
 ```sh
 cd examples/mainnet
-./setup.sh                       # vendors + builds the SDK, installs deps
+./setup.sh                       # vendors + builds the official SDK, installs deps
+cd ../..
+./crates/wasm/build.sh
+npm --prefix ts ci
+npm --prefix ts run build --workspace strk20-discovery
+cd examples/mainnet
 cp .env.example .env
 $EDITOR .env
 set -a; . ./.env; set +a         # the scripts read env vars, never .env itself
 ```
+
+The transaction scripts use our `NodeDiscoveryProvider`, including its local
+witnesses and channel/requirement discovery. All reads are pinned to the selected
+proving block. Its explicitly trusted cache lives in `discovery-cache/` beside
+the wallet files, with mode 0600. `STRK20_FEED` must be an HTTP(S) public feed;
+`STRK20_PROOF_RPC` supplies contract proofs. A fresh cache may need a newer feed
+snapshot or more blocks before a note is spendable. Hosted proving still sends
+proving inputs to the configured prover.
 
 `setup.sh` builds `@starkware-libs/starknet-privacy-sdk` **from source**. The package is
 published on GitHub Packages, which demands a token with `read:packages` even for public

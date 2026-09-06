@@ -10,7 +10,7 @@ import type {
 } from "./types.ts";
 import { resolveProfile } from "./profiles.ts";
 import { PublicTransport } from "./net.ts";
-import { StateCache } from "./storage.ts";
+import { StateCache, type CacheStore, type CacheFactory } from "./storage.ts";
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const encode = (text: string) => new TextEncoder().encode(text);
@@ -99,7 +99,7 @@ export class WorkerRuntime {
   private manifest: Manifest | undefined;
   private readonly profile;
   private readonly net: PublicTransport;
-  private readonly cache: StateCache;
+  private readonly cache: CacheStore;
   private readonly genesis: string;
   private liveAbort: AbortController | undefined;
   private queuedHead:
@@ -130,6 +130,7 @@ export class WorkerRuntime {
     opts: RuntimeOptions,
     emit: (event: WorkerEvent) => void,
     enqueue: (job: () => Promise<void>) => void,
+    cacheFactory: CacheFactory = (name) => new StateCache(name),
   ) {
     this.module = module;
     this.opts = opts;
@@ -147,7 +148,7 @@ export class WorkerRuntime {
     this.net = new PublicTransport(opts.feedUrl, (value) =>
       emit({ event: "request", value }),
     );
-    this.cache = new StateCache(
+    this.cache = cacheFactory(
       `strk20-folded-v2:${this.profile.chainId}:${hex(this.profile.pool)}`,
     );
   }
@@ -481,11 +482,15 @@ export class WorkerRuntime {
 }
 
 /** Bundlers can import this from a custom Worker that statically imports WASM. */
-export function installWorker(load: () => Promise<EngineModule>): void {
-  const scope = globalThis as unknown as {
-    postMessage(value: unknown): void;
-    onmessage: ((e: MessageEvent) => void) | null;
-  };
+export interface WorkerHost {
+  postMessage(value: unknown): void;
+  onmessage: ((e: Pick<MessageEvent, "data">) => void) | null;
+}
+export function installWorker(
+  load: () => Promise<EngineModule>,
+  scope: WorkerHost = globalThis as unknown as WorkerHost,
+  cacheFactory?: CacheFactory,
+): void {
   let runtime: WorkerRuntime | undefined;
   let queue = Promise.resolve();
   const emit = (event: WorkerEvent) => scope.postMessage(event);
@@ -509,6 +514,7 @@ export function installWorker(load: () => Promise<EngineModule>): void {
             args[0] as RuntimeOptions,
             emit,
             enqueue,
+            cacheFactory,
           );
           result = await runtime.init();
         } else {

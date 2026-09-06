@@ -1,5 +1,12 @@
+export interface CacheStore {
+  read(): Promise<Uint8Array | undefined>;
+  write(bytes: Uint8Array): Promise<void>;
+  clear(): Promise<void>;
+}
+export type CacheFactory = (identity: string) => CacheStore;
+
 /** One atomic folded-state record. Wallet backup material uses another DB. */
-export class StateCache {
+export class StateCache implements CacheStore {
   private readonly name: string;
   constructor(name: string) {
     this.name = name;

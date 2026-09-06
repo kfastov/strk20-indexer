@@ -10,9 +10,9 @@
   ],
   "scripts": {
     "typecheck": "npm run build --workspace strk20-discovery && npm run typecheck --workspaces --if-present",
-    "test": "npm run build --workspace strk20-discovery && npm run test --workspaces --if-present",
-    "dev": "npm run build --workspace strk20-discovery && npm run dev --workspace demo",
-    "build": "npm run build --workspace strk20-discovery && npm run build --workspace demo",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "npm run dev --workspace demo",
+    "build": "npm run build --workspace demo",
     "scan:chokepoint": "node strk20-discovery/scripts/scan-chokepoint.mjs"
   },
   "devDependencies": {

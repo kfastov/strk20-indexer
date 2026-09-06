@@ -8,17 +8,24 @@ import type {
 } from "./types.ts";
 import { resolveProfile } from "./profiles.ts";
 
+export interface WorkerPort {
+  onmessage: ((event: MessageEvent) => void) | null;
+  onerror: ((event: ErrorEvent) => void) | null;
+  postMessage(value: unknown): void;
+  terminate(): void;
+}
 export interface ClientOptions {
   network?: "mainnet" | "sepolia" | ChainProfile;
   feedUrl: string;
   rpcUrl?: string;
   proofRpcUrl?: string;
-  workerFactory?: () => Worker;
+  workerFactory?: () => WorkerPort;
   onEvent?: (event: WorkerEvent) => void;
 }
 export class KeylessClient {
   readonly ready: Promise<EngineInfo>;
-  private readonly worker: Worker;
+  private readonly worker: WorkerPort;
+  private failure: Error | undefined;
   private sequence = 0;
   private closed = false;
   private pending = new Map<
@@ -46,8 +53,8 @@ export class KeylessClient {
       else waiter.resolve(message.result);
     };
     this.worker.onerror = () => {
-      for (const waiter of this.pending.values())
-        waiter.reject(new Error("Discovery worker failed"));
+      this.failure = new Error("Discovery worker failed");
+      for (const waiter of this.pending.values()) waiter.reject(this.failure);
       this.pending.clear();
     };
     const config: RuntimeOptions = {
@@ -67,12 +74,18 @@ export class KeylessClient {
     this.ready = this.call("init", [config]) as Promise<EngineInfo>;
   }
   private call(method: string, args: unknown[] = []): Promise<unknown> {
+    if (this.failure) return Promise.reject(this.failure);
     if (this.closed)
       return Promise.reject(new Error("Discovery provider is closed"));
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args });
+      try {
+        this.worker.postMessage({ id, method, args });
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
   async discover(
@@ -134,7 +147,7 @@ export class KeylessClient {
   async close(): Promise<void> {
     if (this.closed) return;
     try {
-      await this.call("close");
+      if (!this.failure) await this.call("close");
     } finally {
       this.closed = true;
       this.worker.terminate();

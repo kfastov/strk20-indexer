@@ -42,7 +42,8 @@ export const CFG = () => ({
   strk: env("STRK20_STRK", "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"),
   accountClass: env("STRK20_ACCOUNT_CLASS", "0x05b4b537eaa2399e3aa99c4e2e0208ebd6c71bc1467938cd52c798c601e43564"),
   prover: env("STRK20_PROVER", "https://transaction-prover.alpha-mainnet.sw-dev.io"),
-  discovery: env("STRK20_DISCOVERY", "https://discovery-service.alpha-mainnet.sw-dev.io"),
+  feed: env("STRK20_FEED", "https://strk20.nullref.cc/mainnet/feed"),
+  proofRpc: env("STRK20_PROOF_RPC", "https://rpc.starknet.lava.build"),
   feeMarginPercent: Number(env("STRK20_FEE_MARGIN_PERCENT", "0")),
   dryRun: flag("DRY_RUN"),
   force: flag("FORCE"),
@@ -370,17 +371,27 @@ export function dryRunStop(cfg, what) {
 }
 
 // ── SDK wiring ───────────────────────────────────────────────────────────────
-// Shared by 03/04/05. Plain HTTP (no OHTTP): these scripts run headless on your
-// own machine, so the relay adds nothing but a dependency.
-export async function makeTransfers(cfg, ks, account, chainId = constants.StarknetChainId.SN_MAIN) {
-  const { createPrivateTransfers, ProvingServiceProofProvider, IndexerDiscoveryProvider } = await import("@starkware-libs/starknet-privacy-sdk");
-  return createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => BigInt(ks.viewing_key) },
-    provingProvider: new ProvingServiceProofProvider(cfg.prover, chainId, { requestTimeoutMs: 180_000 }),
-    discoveryProvider: new IndexerDiscoveryProvider(cfg.discovery, cfg.pool),
-    poolContractAddress: cfg.pool,
+// Shared by 03/04/05. Browser and scripts use the same verified WASM engine.
+export async function makeTransfers(cfg, ks, account, provider) {
+  const { createPrivateTransfers, ProvingServiceProofProvider } = await import("@starkware-libs/starknet-privacy-sdk");
+  const { NodeDiscoveryProvider } = await import("../../ts/strk20-discovery/dist/node.js");
+  const discovery = new NodeDiscoveryProvider({
+    network: "mainnet", feedUrl: cfg.feed, rpcUrl: cfg.rpc, proofRpcUrl: cfg.proofRpc,
+    cacheDirectory: path.join(cfg.keystore, "discovery-cache"),
   });
+  try {
+    const state = await discovery.ready;
+    if (BigInt(state.pool) !== BigInt(cfg.pool)) throw new Error("Configured pool differs from the discovery network profile");
+    const { provingBlockId } = await provingBlock(provider);
+    const transfers = createPrivateTransfers({
+      account,
+      viewingKeyProvider: { getViewingKey: async () => BigInt(ks.viewing_key) },
+      provingProvider: new ProvingServiceProofProvider(cfg.prover, constants.StarknetChainId.SN_MAIN, { requestTimeoutMs: 180_000 }),
+      discoveryProvider: discovery.atBlock(provingBlockId),
+      poolContractAddress: cfg.pool,
+    });
+    return { transfers, discovery, provingBlockId };
+  } catch (error) { await discovery.close(); throw error; }
 }
 
 /** Unspent notes for the STRK token, newest last. Fails loudly if there are none. */
@@ -390,7 +401,7 @@ export async function spendableNotes(transfers, cfg, { required = true } = {}) {
   try {
     found = await transfers.discoverNotes();
   } catch (e) {
-    fail(`note discovery failed against ${cfg.discovery}\n  ${String(e.message ?? e).slice(0, 300)}\n` + `  The discovery service may be down. Nothing was spent.`);
+    fail(`note discovery failed against ${cfg.feed}\n  ${String(e.message ?? e).slice(0, 300)}\n` + `  The feed or checkpoint RPC may be unavailable. Nothing was spent.`);
   }
   const notes = found.notes.get(BigInt(cfg.strk)) ?? [];
   for (const n of notes) log(`  note ${n.id}  ${fmt(n.amount)} STRK  created ${n.created}  open ${n.open ?? false}`);
@@ -406,10 +417,10 @@ export async function spendableNotes(transfers, cfg, { required = true } = {}) {
  * Prove, then hand back the call + proof details. Common to all three pool
  * scripts: prove against head-PROVING_BLOCK_DEPTH, report what came back.
  */
-export async function buildAndProve(transfers, chain, provider) {
-  const { head, provingBlockId } = await provingBlock(provider);
+export async function buildAndProve(transfers, chain, provider, provingBlockId) {
+  const head = await provider.getBlockNumber();
   step("proving");
-  log(`head ${head}; proving against block ${provingBlockId} (head-${PROVING_BLOCK_DEPTH})`);
+  log(`head ${head}; proving against block ${provingBlockId} (all discovery reads pinned to this block)`);
   let invocation;
   try {
     invocation = await chain.createProofInvocation({ provingBlockId });

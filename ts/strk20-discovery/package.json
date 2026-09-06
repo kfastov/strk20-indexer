@@ -9,7 +9,8 @@
     ".": "./dist/index.js",
     "./sdk": "./dist/index.js",
     "./worker": "./dist/worker.js",
-    "./scan": "./dist/scan.js"
+    "./scan": "./dist/scan.js",
+    "./node": "./dist/node.js"
   },
   "files": [
     "dist",
@@ -18,7 +19,7 @@
   "scripts": {
     "build": "node scripts/copy-wasm.mjs --clean && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "node scripts/copy-wasm.mjs",
+    "pretest": "node scripts/copy-wasm.mjs --clean && tsc -p tsconfig.build.json",
     "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
     "scan:chokepoint": "node scripts/scan-chokepoint.mjs"
   },
@@ -29,7 +30,8 @@
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
-    "typescript": "5.9.2"
+    "typescript": "5.9.2",
+    "@types/node": "^24.0.0"
   },
   "peerDependencies": {
     "typescript": ">=5.6"

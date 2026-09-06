@@ -53,6 +53,30 @@ For a proof builder, use `discovery.atBlock(blockNumber)` so every discovery met
 including requirement checks, uses the same proving block. Explicit numbers and
 `latest` are supported; unsupported block tags fail rather than select another block.
 
+## Node scripts
+
+```ts
+import { NodeDiscoveryProvider } from 'strk20-discovery/node';
+
+const discovery = new NodeDiscoveryProvider({
+  network: 'mainnet',
+  feedUrl: 'https://strk20.nullref.cc/mainnet/feed',
+  cacheDirectory: '/your/private/discovery-cache',
+});
+try {
+  const mine = discovery.forAccount({ address, viewingKey });
+  const cached = await mine.restore();
+  const current = await mine.discoverNotes();
+} finally {
+  await discovery.close(); // flushes cache and terminates the worker thread
+}
+```
+
+The Node host runs the same Worker runtime in `worker_threads`. It atomically
+replaces a mode-0600 cache file; the directory is explicitly trusted and contains
+private discovery results. No IndexedDB shim or second discovery implementation
+is used. The headless lifecycle scripts use this provider for SDK proof inputs.
+
 ## Verification and persistence
 
 The default trust root is an independently fetched, accepted Starknet RPC header.

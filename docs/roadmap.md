@@ -1,7 +1,7 @@
 # Implementation status and next work
 
-Updated 2026-09-06. Work is paused at the user's request after committing and
-pushing the current SDK and demo stages. Resume only on the user's instruction.
+Updated 2026-09-06. Work resumed on the user's instruction after the SDK and
+demo stages were committed and pushed.
 The current contracts are [consumer path](spec/consumer-path.md),
 [SDK API](../ts/strk20-discovery/README.md), and [demo](spec/demo-app.md).
 
@@ -32,9 +32,10 @@ The current contracts are [consumer path](spec/consumer-path.md),
    transaction was signed or submitted during implementation checks. The current
    evidence covers unfunded wallet creation, real public checkpoint verification,
    cache restoration and SDK builder consumption of a real fixture note.
-2. Migrate `examples/mainnet/lib.mjs` from the official remote discovery provider
-   to ours. A small Node host for the shared WASM runtime is still needed; the
-   browser demo already uses our provider. Keep storage and HTTP ownership clear.
+2. Verify the migrated lifecycle scripts with the user's funded flow. They now
+   use our Node Worker host, private file cache and a common proving block. The
+   Node integration test verifies real fixture state and restores discovered
+   notes and cursors with the HTTP server offline; no transaction is submitted.
 3. Measure incremental catch-up and discovery on a funded account. Full-mainnet
    empty-account measurements: cold 37.85 s; fresh Worker/cache restores
    292–299 ms. The repeat-start target is met for that measurement; this is not
