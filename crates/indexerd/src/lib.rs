@@ -9,6 +9,7 @@ pub mod config;
 pub mod cutter;
 pub mod db;
 pub mod head_events;
+pub mod feeder;
 pub mod ingest;
 pub mod live;
 pub mod recovery;

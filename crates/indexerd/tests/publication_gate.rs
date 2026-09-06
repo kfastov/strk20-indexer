@@ -678,3 +678,48 @@ async fn unavailable_announcements_do_not_starve_available_blocks_or_regress_the
     assert_eq!(ingest.db.meta_get("head_number").unwrap().as_deref(), Some("12"));
     server.abort();
 }
+
+#[tokio::test]
+async fn feeder_ingests_a_silent_write_before_rpc_can_serve_the_announced_block() {
+    use axum::{routing::{get, post}, Json, Router};
+    use serde_json::{json, Value};
+    let router = Router::new().route("/get_state_update", get(|| async {
+        Json(json!({"block":{"block_number":10,"block_hash":"0xa","parent_block_hash":"0x9",
+            "state_root":"0xb","timestamp":10,"status":"ACCEPTED_ON_L2",
+            "transactions":[],"transaction_receipts":[]},
+            "state_update":{"block_hash":"0xa","new_root":"0xb","state_diff":{
+                "storage_diffs":{"0xf001":[{"key":"0x123","value":"0x456"}]},
+                "deployed_contracts":[],"replaced_classes":[]}}}))
+    })).route("/", post(|Json(request): Json<Value>| async move {
+        // Latest block, events and update are deliberately unavailable over RPC.
+        // Only the old L1-final head is served: a second live RPC read fails.
+        if request["method"] == "starknet_getBlockWithTxHashes" && request["params"][0] == "l1_accepted" {
+            Json(json!({"jsonrpc":"2.0","id":1,"result":{"block_number":0,"block_hash":"0x0",
+                "parent_hash":"0x0","timestamp":0,"status":"ACCEPTED_ON_L1","transactions":[]}}))
+        } else { Json(json!({"jsonrpc":"2.0","id":1,"error":{"code":24,"message":"Block not found"}})) }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let rpc = RpcClient::new(url.clone(), None).with_feeder(Some(url));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open(&dir.path().join("head.db")).unwrap();
+    db.set_ingest_cursor(9).unwrap();
+    db.meta_set("head_number", "9").unwrap();
+    db.meta_set("head_hash", "0x9").unwrap();
+    let config = cfg();
+    let header = strk20_indexerd::rpc::BlockHeader { block_number:10, block_hash:"0xa".into(),
+        parent_hash:"0x9".into(), new_root:Some("0xb".into()), timestamp:10, status:None, transactions:vec![] };
+    let mut ingest = strk20_indexerd::ingest::Ingestor {
+        db:&mut db, rpc:&rpc, cfg:&config, chunk_size:1000, progress_secs:0,
+    };
+    let mut wrong = header.clone(); wrong.new_root = Some("0xc".into());
+    assert!(ingest.run_cycle_announced(Some(&wrong)).await.unwrap_err().to_string().contains("subscription state root"));
+    assert_eq!(ingest.db.ingest_cursor().unwrap(), Some(9));
+    let result = ingest.run_cycle_announced(Some(&header)).await.unwrap();
+    assert_eq!(result.head_number, 10);
+    assert_eq!(result.blocks_ingested, 1);
+    assert_eq!(ingest.db.blocks_in_range(10, 10).unwrap().len(), 1);
+    assert_eq!(ingest.db.ingest_cursor().unwrap(), Some(10));
+    server.abort();
+}

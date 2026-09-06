@@ -1,15 +1,16 @@
-//! Block notifications wake the ingest loop; HTTP remains the source of data.
+//! Block headers wake the ingest loop and bind subsequently acquired block data.
 //! Coalescing is safe: ingestion resumes from its persisted cursor, including
 //! after reconnects and reorgs. No per-block queue or timer-driven head fetch.
 
 use anyhow::{bail, Context, Result};
+use crate::rpc::BlockHeader;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-pub fn subscribe(url: String) -> watch::Receiver<Option<u64>> {
+pub fn subscribe(url: String) -> watch::Receiver<Option<BlockHeader>> {
     let (tx, rx) = watch::channel(None);
     tokio::spawn(async move {
         while !tx.is_closed() {
@@ -28,7 +29,7 @@ pub fn subscribe(url: String) -> watch::Receiver<Option<u64>> {
     rx
 }
 
-async fn connection(url: &str, tx: &watch::Sender<Option<u64>>) -> Result<()> {
+async fn connection(url: &str, tx: &watch::Sender<Option<BlockHeader>>) -> Result<()> {
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(url))
         .await
         .context("connect head subscription timeout")??;
@@ -66,18 +67,14 @@ async fn connection(url: &str, tx: &watch::Sender<Option<u64>>) -> Result<()> {
                     // Always catch up, even if no fresh block follows the ACK.
                     tx.send_replace(None);
                 } else if is_notification(&message, subscription.as_ref()) {
-                    // Ask HTTP for this exact block, not a potentially cached
-                    // `latest` tag. Only HTTP-validated data enters the mirror.
-                    let number = if message["method"] == "starknet_subscriptionNewHeads" {
-                        Some(
-                            message["params"]["result"]["block_number"]
-                                .as_u64()
-                                .context("invalid announced block number")?,
-                        )
-                    } else {
-                        None
-                    };
-                    tx.send_replace(number);
+                    let header = if message["method"] == "starknet_subscriptionNewHeads" {
+                        let header: BlockHeader = serde_json::from_value(message["params"]["result"].clone())
+                            .context("invalid announced header")?;
+                        crate::rpc::parse_felt(&header.block_hash)?;
+                        crate::rpc::parse_felt(header.new_root.as_deref().context("announced state root missing")?)?;
+                        Some(header)
+                    } else { None };
+                    tx.send_replace(header);
                 }
             }
             Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
@@ -120,7 +117,7 @@ mod tests {
                     .await
                     .unwrap();
                 let event = if round == 0 {
-                    json!({"method": "starknet_subscriptionNewHeads", "params": {"subscription_id": "7", "result": {"block_number": 42}}})
+                    json!({"method": "starknet_subscriptionNewHeads", "params": {"subscription_id": "7", "result": {"block_number": 42, "block_hash":"0x42", "parent_hash":"0x41", "new_root":"0x123", "timestamp":42}}})
                 } else {
                     json!({"method": "starknet_subscriptionReorg", "params": {"subscription_id": "7"}})
                 };
@@ -137,7 +134,7 @@ mod tests {
         for expected in [Some(42), None] {
             assert!(connection(&url, &tx).await.is_err());
             assert!(rx.has_changed().unwrap());
-            assert_eq!(*rx.borrow_and_update(), expected);
+            assert_eq!(rx.borrow_and_update().as_ref().map(|h| h.block_number), expected);
         }
         server.await.unwrap();
     }

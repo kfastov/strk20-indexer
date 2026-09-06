@@ -166,35 +166,54 @@ impl<'a> Ingestor<'a> {
         self.run_cycle_at(BlockRef::Latest).await
     }
 
-    /// A subscription supplies the block number, never trusted state. Fetch
-    /// the named header to avoid `latest` caches trailing the notification.
-    /// If HTTP cannot serve it yet, process its available head once instead
-    /// of starving ingestion by chasing a newer unavailable announcement.
     pub async fn run_cycle_at(&mut self, target: BlockRef) -> Result<CycleOutcome> {
+        self.run_cycle_bound(target, None).await
+    }
+
+    /// Keep the subscription's header: bind the coherent feeder response to it.
+    /// RPC-only recovery may process an earlier available height after a refusal.
+    pub async fn run_cycle_announced(&mut self, head: Option<&BlockHeader>) -> Result<CycleOutcome> {
+        let target = head.map_or(BlockRef::Latest, |h| BlockRef::Number(h.block_number));
+        self.run_cycle_bound(target, head).await
+    }
+
+    async fn run_cycle_bound(&mut self, target: BlockRef, announced: Option<&BlockHeader>) -> Result<CycleOutcome> {
         let mut out = CycleOutcome::default();
 
         // 1. finality poll
-        let (latest, l1, reorg) = tokio::try_join!(
+        let ((latest, mut supplied), l1, reorg) = tokio::try_join!(
             async {
+                if let Some(data) = self.rpc.get_block_data(target, &self.cfg.pool).await? {
+                    return Ok((data.header.clone(), Some(data)));
+                }
                 match self.rpc.get_block(target).await {
                     Ok(header) => {
                         if let BlockRef::Number(number) = target {
                             anyhow::ensure!(header.block_number == number, "RPC returned another announced block");
                         }
-                        Ok(header)
+                        Ok((header, None))
                     }
                     Err(e) if matches!(target, BlockRef::Number(_)) && RpcClient::is_block_not_found(&e) => {
                         let header = self.rpc.get_block(BlockRef::Latest).await?;
                         tracing::warn!(?target, available = header.block_number,
                             "announced block unavailable; ingesting HTTP head");
-                        Ok(header)
+                        Ok((header, None))
                     }
                     Err(e) => Err(e),
                 }
             },
             self.rpc.get_block(BlockRef::L1Accepted),
-            self.detect_reorg(),
+            self.detect_reorg(announced),
         )?;
+        if let Some(head) = announced.filter(|h| h.block_number == latest.block_number) {
+            anyhow::ensure!(normalize_hex(&head.block_hash)? == normalize_hex(&latest.block_hash)?,
+                "block data disagrees with subscription hash");
+            anyhow::ensure!(normalize_hex(&head.parent_hash)? == normalize_hex(&latest.parent_hash)?,
+                "block data disagrees with subscription parent");
+            anyhow::ensure!(head.new_root.as_deref().map(normalize_hex).transpose()?
+                == latest.new_root.as_deref().map(normalize_hex).transpose()?,
+                "block data disagrees with subscription state root");
+        }
         if reorg.is_none() {
             anyhow::ensure!(
                 self.db.ingest_cursor()?.is_none_or(|n| latest.block_number >= n),
@@ -262,7 +281,7 @@ impl<'a> Ingestor<'a> {
             None => self.cfg.genesis_block.saturating_sub(1),
         };
         if latest.block_number.saturating_sub(frontier) <= TAIL_STATE_DIFF_SPAN {
-            out.blocks_ingested = self.ingest_tail(frontier + 1, &latest).await?;
+            out.blocks_ingested = self.ingest_tail(frontier + 1, &latest, &mut supplied).await?;
         } else {
             // Scanned in SEGMENTS, not in one pass over the whole remaining range:
             // the segment bounds both the memory the scan holds and what a failure
@@ -320,17 +339,28 @@ impl<'a> Ingestor<'a> {
     /// Live ingestion covers EVERY state diff, including silent pool writes
     /// (sound-ingest.md). Fetch events and updates together, then commit each
     /// active block once. Small batches bound both concurrency and memory.
-    async fn ingest_tail(&mut self, from: u64, latest: &BlockHeader) -> Result<u64> {
+    async fn ingest_tail(&mut self, from: u64, latest: &BlockHeader, supplied: &mut Option<crate::feeder::BlockData>) -> Result<u64> {
         let mut count = 0;
         let pool = strk20_feed::felt_hex(&self.cfg.pool);
         for start in (from..=latest.block_number).step_by(8) {
             let end = start.saturating_add(7).min(latest.block_number);
             let rpc = self.rpc;
-            let (events, updates) = tokio::try_join!(
-                self.scan_active_blocks(start, end),
-                futures::future::try_join_all((start..=end).map(|n| rpc.get_state_update(n))),
-            )?;
+            // The announced block arrives with all receipts and its state diff.
+            // Only gaps preceding it require RPC range reads.
+            let rpc_end = if end == latest.block_number && supplied.is_some() { end.checked_sub(1) } else { Some(end) };
+            let (events, mut updates) = if let Some(rpc_end) = rpc_end.filter(|n| *n >= start) {
+                tokio::try_join!(
+                    self.scan_active_blocks(start, rpc_end),
+                    futures::future::try_join_all((start..=rpc_end).map(|n| rpc.get_state_update(n))),
+                )?
+            } else { (Vec::new(), Vec::new()) };
             let mut events: BTreeMap<_, _> = events.into_iter().collect();
+            if end == latest.block_number {
+                if let Some(data) = supplied.take() {
+                    events.insert(end, data.events);
+                    updates.push(data.update);
+                }
+            }
             for (number, update) in (start..=end).zip(updates) {
                 let pool_events = events.remove(&number).unwrap_or_default();
                 if !pool_events.is_empty() || touches_pool(&update, &pool) {
@@ -368,7 +398,7 @@ impl<'a> Ingestor<'a> {
     /// Highest stored block that is still canonical, if a reorg is detected.
     /// None = no reorg. Transport errors PROPAGATE — an RPC outage must never
     /// be mistaken for a reorg (review finding: detect_reorg on Err).
-    async fn detect_reorg(&self) -> Result<Option<u64>> {
+    async fn detect_reorg(&self, announced: Option<&BlockHeader>) -> Result<Option<u64>> {
         let Some(head_num) = self.db.meta_get("head_number")?.and_then(|s| s.parse().ok())
         else {
             return Ok(None);
@@ -376,6 +406,13 @@ impl<'a> Ingestor<'a> {
         let Some(stored_hash) = self.db.meta_get("head_hash")? else {
             return Ok(None);
         };
+        // A direct successor already identifies its parent. Re-fetching that
+        // parent from a lagging RPC can falsely classify a fresh stored head
+        // as orphaned. The acquired successor is bound to this header before writes.
+        if announced.is_some_and(|h| h.block_number.checked_sub(1) == Some(head_num)
+            && normalize_hex(&h.parent_hash).ok().as_deref() == Some(stored_hash.as_str())) {
+            return Ok(None);
+        }
         let gone = match self.rpc.get_block(BlockRef::Number(head_num)).await {
             Ok(h) => normalize_hex(&h.block_hash)? != stored_hash,
             Err(e) if RpcClient::is_block_not_found(&e) => true,

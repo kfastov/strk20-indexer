@@ -116,6 +116,9 @@ enum Command {
         /// RPC head subscription; production uses this instead of polling.
         #[arg(long, env = "STRK20_RPC_WS_URL")]
         rpc_ws_url: Option<String>,
+        /// Optional sequencer feed for coherent live block + receipts + state diff.
+        #[arg(long, env = "STRK20_FEEDER_URL")]
+        feeder_url: Option<String>,
         /// HTTP-only compatibility mode when no subscription URL is configured
         #[arg(long, default_value_t = 2000)]
         poll_ms: u64,
@@ -261,7 +264,8 @@ async fn main() -> Result<()> {
             enable_compat,
             poll_ms,
             rpc_ws_url,
-        } => run(common, listen, enable_raw, enable_compat, poll_ms, rpc_ws_url).await,
+            feeder_url,
+        } => run(common, listen, enable_raw, enable_compat, poll_ms, rpc_ws_url, feeder_url).await,
         Command::Backfill { common } => backfill(common).await,
         Command::Status { common } => status(common),
         Command::EpochVerify { common, epoch } => epoch_verify(common, epoch),
@@ -301,9 +305,10 @@ async fn run(
     enable_compat: bool,
     poll_ms: u64,
     rpc_ws_url: Option<String>,
+    feeder_url: Option<String>,
 ) -> Result<()> {
     let cfg = common.chain_config();
-    let rpc = common.rpc();
+    let rpc = common.rpc().with_feeder(feeder_url);
     let mut db = Db::open(&common.db)?;
     init_checks(&db, &rpc, &cfg).await?;
 
@@ -350,8 +355,7 @@ async fn run(
     }
     let rpc_ref = &rpc;
     loop {
-        let target = heads.as_mut().and_then(|rx| *rx.borrow_and_update())
-            .map_or(strk20_indexerd::rpc::BlockRef::Latest, strk20_indexerd::rpc::BlockRef::Number);
+        let target = heads.as_mut().and_then(|rx| rx.borrow_and_update().clone());
         let started = std::time::Instant::now();
         let outcome = {
             let mut ingestor = Ingestor {
@@ -361,7 +365,7 @@ async fn run(
                 chunk_size: common.chunk_size,
                 progress_secs: common.progress_secs,
             };
-            ingestor.run_cycle_at(target).await
+            ingestor.run_cycle_announced(target.as_ref()).await
         };
         match outcome {
             Ok(o) => {

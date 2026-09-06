@@ -211,6 +211,7 @@ struct EndpointCaps {
 
 pub struct RpcClient {
     http: reqwest::Client,
+    feeder_url: Option<String>,
     endpoints: Vec<String>,
     caps: Vec<EndpointCaps>,
     active: AtomicUsize,
@@ -229,9 +230,22 @@ impl RpcClient {
                 .build()
                 .expect("reqwest client"),
             endpoints,
+            feeder_url: None,
             caps,
             active: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn with_feeder(mut self, url: Option<String>) -> Self {
+        self.feeder_url = url.filter(|s| !s.is_empty());
+        self
+    }
+
+    pub async fn get_block_data(&self, target: BlockRef, pool: &Felt) -> Result<Option<crate::feeder::BlockData>> {
+        match (&self.feeder_url, target) {
+            (Some(url), BlockRef::Number(number)) => crate::feeder::fetch(&self.http, url, number, pool).await,
+            _ => Ok(None),
         }
     }
 
