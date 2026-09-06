@@ -33,10 +33,13 @@ export class PublicTransport {
       | "starknet_getBlockWithTxHashes"
       | "starknet_getStorageProof",
     params: unknown[],
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const result = await this.request(
       url,
       JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      "default",
+      signal,
     );
     const json = JSON.parse(new TextDecoder().decode(result.bytes)) as {
       result?: unknown;
@@ -54,6 +57,7 @@ export class PublicTransport {
     url: string,
     body?: string,
     cache: RequestCache = "default",
+    signal?: AbortSignal,
   ): Promise<{ bytes: Uint8Array; etag: string }> {
     const start = performance.now();
     const res = await fetch(url, {
@@ -64,7 +68,7 @@ export class PublicTransport {
       ...(body
         ? { body, headers: { "content-type": "application/json" } }
         : {}),
-      signal: AbortSignal.timeout(30_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
     if (!res.ok) throw new Error(`TRANSPORT: HTTP ${res.status}`);
     const bytes = await readBounded(res, 32 * 1024 * 1024);

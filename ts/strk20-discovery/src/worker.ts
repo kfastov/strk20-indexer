@@ -153,6 +153,9 @@ export class WorkerRuntime {
     const target = block ?? (this.requestedBlock !== undefined
       && this.queuedHead && this.queuedHead.head >= this.requestedBlock
       ? this.requestedBlock : undefined);
+    const prepare = target ?? this.queuedHead?.head;
+    if (prepare !== undefined && Number.isSafeInteger(prepare) && prepare >= 0)
+      this.checkpoints.prepare(prepare);
     try {
       const state = await this.syncOnce(target);
       if (state.verifiedAt === this.requestedBlock) this.requestedBlock = undefined;
@@ -226,7 +229,7 @@ export class WorkerRuntime {
       (!Number.isSafeInteger(block) || block < 0 || block > m.head.number)
     )
       throw new Error("BOUND_UNAVAILABLE: block not present in feed");
-    const cp = await this.span("Fetch checkpoint proof", () =>
+    const cp = await this.span("Wait for checkpoint proof", () =>
       this.checkpoints.acquire(block ?? m.head.number),
     );
     this.engine.stage_checkpoint(JSON.stringify(cp.checkpoint), cp.proof);
@@ -364,6 +367,7 @@ export class WorkerRuntime {
     })();
   }
   async clear(): Promise<void> {
+    this.checkpoints.cancel();
     await this.cache.clear();
     this.engine.free();
     this.engine = new this.module.Engine(this.genesis);
@@ -376,6 +380,7 @@ export class WorkerRuntime {
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.checkpoints.cancel();
     this.liveAbort?.abort();
     if (!this.engine) return; // initialization can fail while opening storage
     try {

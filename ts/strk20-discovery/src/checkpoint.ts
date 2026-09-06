@@ -1,10 +1,12 @@
 import type { Checkpoint, ChainProfile, RuntimeOptions } from "./types.ts";
 import { PublicTransport } from "./net.ts";
 const hex = (value: string) => `0x${BigInt(value).toString(16)}`;
+type Acquired = { checkpoint: Checkpoint; proof: string };
 
 /** Independent RPC header selection and proof acquisition; Rust verifies the proof. */
 export class CheckpointSource {
   private chainChecked = false;
+  private pending: { block: number; work: Promise<Acquired>; abort: AbortController } | undefined;
   private readonly net: PublicTransport;
   private readonly opts: RuntimeOptions;
   private readonly profile: ChainProfile;
@@ -17,17 +19,38 @@ export class CheckpointSource {
     this.opts = opts;
     this.profile = profile;
   }
-  async acquire(
-    block: number,
-  ): Promise<{ checkpoint: Checkpoint; proof: string }> {
+  /** One bounded speculative read: overlap RPC with feed arrival and folding. */
+  prepare(block: number): void {
+    if (this.pending?.block === block) return;
+    this.cancel();
+    const abort = new AbortController();
+    const pending = { block, abort, work: this.fetch(block, abort.signal) };
+    this.pending = pending;
+    // Preparation can outlive a BOUND_UNAVAILABLE result. Handle rejection
+    // immediately and allow the next read to retry an unavailable checkpoint.
+    void pending.work.catch(() => {
+      if (this.pending === pending) this.pending = undefined;
+    });
+  }
+  cancel(): void {
+    this.pending?.abort.abort();
+    this.pending = undefined;
+  }
+  async acquire(block: number): Promise<Acquired> {
+    this.prepare(block);
+    const pending = this.pending!;
+    try { return await pending.work; }
+    finally { if (this.pending === pending) this.pending = undefined; }
+  }
+  private async fetch(block: number, signal: AbortSignal): Promise<Acquired> {
     // Fetch by the same height concurrently. Rust binds the proof's block hash
     // and global roots to this independently trusted header, including reorgs.
     const [header, proof] = await Promise.all([
       this.net.rpc(this.opts.rpcUrl, "starknet_getBlockWithTxHashes", [
         { block_number: block },
-      ]),
-      this.proof(block),
-      this.checkChain(),
+      ], signal),
+      this.proof(block, signal),
+      this.checkChain(signal),
     ]) as [{ block_number: number; block_hash: string; new_root: string;
       status: string }, string, void];
     if (
@@ -44,21 +67,22 @@ export class CheckpointSource {
     };
     return { checkpoint: cp, proof };
   }
-  private async checkChain(): Promise<void> {
+  private async checkChain(signal: AbortSignal): Promise<void> {
     if (this.chainChecked) return;
-    const id = await this.net.rpc(this.opts.rpcUrl, "starknet_chainId", []);
+    const id = await this.net.rpc(this.opts.rpcUrl, "starknet_chainId", [], signal);
     const expected = `0x${[...this.profile.chainId].map((c) => c.charCodeAt(0).toString(16)).join("")}`;
     if (typeof id !== "string" || hex(id) !== hex(expected))
       throw new Error("CHAIN_MISMATCH: checkpoint RPC");
     this.chainChecked = true;
   }
-  private async proof(block: number): Promise<string> {
+  private async proof(block: number, signal: AbortSignal): Promise<string> {
     for (let attempt = 0; ; attempt++) {
       try {
         return JSON.stringify(await this.net.rpc(
           this.opts.proofRpcUrl,
           "starknet_getStorageProof",
           [{ block_number: block }, [], [hex(this.profile.pool)], []],
+          signal,
         ));
       } catch (e) {
         if (attempt === 2 || !/RPC_UNAVAILABLE: (42|24|-32603)/.test(String(e)))

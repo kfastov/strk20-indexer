@@ -32,3 +32,27 @@ test("checkpoint requests run concurrently and retain the trusted header boundar
   chain = "0x1";
   await assert.rejects(new CheckpointSource(net, opts, profile).acquire(123), /CHAIN_MISMATCH/);
 });
+
+test("a prepared checkpoint is shared and a superseded request is cancelled", async (t) => {
+  const profile = resolveProfile("sepolia");
+  const net = new PublicTransport("https://feed.test", () => {});
+  const headers: number[] = [];
+  t.mock.method(net, "rpc", async (_url: string, method: string, params: any[], signal?: AbortSignal) => {
+    if (method === "starknet_chainId") return `0x${Buffer.from(profile.chainId).toString("hex")}`;
+    if (method === "starknet_getStorageProof") return {};
+    const block = params[0].block_number;
+    headers.push(block);
+    if (block === 123) await new Promise((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    });
+    return { block_number: block, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
+  });
+  const source = new CheckpointSource(net, { network: "sepolia", feedUrl: "https://feed.test",
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" }, profile);
+  source.prepare(123);
+  const old = source.acquire(123);
+  source.prepare(124);
+  await assert.rejects(old, /cancelled/);
+  assert.equal((await source.acquire(124)).checkpoint.block_number, 124);
+  assert.deepEqual(headers, [123, 124], "no duplicate acquisition or unbounded pending work");
+});

@@ -341,6 +341,9 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   await live.init();
   await live.sync();
   await assert.rejects(() => live.sync(198), /BOUND_UNAVAILABLE/);
+  assert(requests.some((r) => r.body.includes("starknet_getStorageProof")
+    && JSON.parse(r.body).params[0].block_number === 198),
+    "checkpoint acquisition starts before the requested feed block arrives");
   const connection = new Promise<void>((resolve) => {
     connected = resolve;
   });
@@ -419,9 +422,9 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   assert(liveSpans.indexOf("Discover notes") < liveSpans.indexOf("Save verified state"),
     "a read queued behind a live update finishes before persisting the cache");
   const proofRequests = () => requests.filter((r) => r.body.includes("starknet_getStorageProof")).length;
-  assert.equal(proofRequests(), 1);
+  assert.equal(proofRequests(), 0, "the proof was prefetched while waiting for the feed");
   await live.sync(198);
-  assert.equal(proofRequests(), 1, "the foreground retry must not acquire a second proof");
+  assert.equal(proofRequests(), 0, "the foreground retry must not acquire a second proof");
   assert.equal(
     requests.filter((r) => !r.body).length,
     0,
