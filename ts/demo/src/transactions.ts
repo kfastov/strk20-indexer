@@ -15,6 +15,7 @@ import {
 import { NETWORKS, STRK } from "./network.ts";
 import { saveWallet, type Wallet, type Action } from "./wallet.ts";
 import { Operations, type Operation } from "./operations.ts";
+import { SubmissionSigner } from "./submission-signer.ts";
 
 const PROOF_DEPTH = 9;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -25,6 +26,7 @@ export class Transactions {
   private readonly discovery: LocalDiscoveryProvider;
   private readonly wallet: Wallet;
   private readonly operations: Operations;
+  private submission: Operation | undefined;
   constructor(
     wallet: Wallet,
     discovery: LocalDiscoveryProvider,
@@ -38,7 +40,24 @@ export class Transactions {
     this.account = new Account({
       provider: this.rpc,
       address: wallet.address,
-      signer: wallet.signingKey,
+      signer: new SubmissionSigner(wallet.signingKey, async (hash) => {
+        // Fee estimation and prover authentication happen before this is armed.
+        if (!this.submission) return;
+        const pending = this.wallet.pending;
+        if (!pending) throw new Error("Missing submission intent.");
+        if (pending.hash && BigInt(pending.hash) !== BigInt(hash))
+          throw new Error("The SDK attempted to change a pending transaction.");
+        const previous = pending.hash;
+        pending.hash = hash;
+        try {
+          await saveWallet(this.wallet);
+        } catch (error) {
+          if (previous) pending.hash = previous;
+          else delete pending.hash;
+          throw error;
+        }
+        this.submission.detail = `${config.explorer}/tx/${hash}`;
+      }),
       cairoVersion: "1",
     });
     this.transfers = this.makeTransfers(discovery);
@@ -137,12 +156,29 @@ export class Transactions {
     if (this.wallet.pending)
       throw new Error("A transaction is already pending.");
     this.wallet.pending = { action };
-    await saveWallet(this.wallet);
-    // No automatic retry after a send with an unknown outcome.
-    const sent = await send();
-    this.wallet.pending = { action, hash: sent.transaction_hash };
-    await saveWallet(this.wallet);
-    operation.detail = `${NETWORKS[this.wallet.network].explorer}/tx/${sent.transaction_hash}`;
+    let sent: { transaction_hash: string };
+    try {
+      await saveWallet(this.wallet);
+      this.submission = operation;
+      sent = await send();
+      // The signer persisted the SDK-computed hash before signing/broadcast.
+      // A lost RPC response therefore remains recoverable via receipt lookup.
+      if (
+        !this.wallet.pending.hash ||
+        BigInt(this.wallet.pending.hash) !== BigInt(sent.transaction_hash)
+      )
+        throw new Error(
+          "The RPC returned a different transaction hash. Check the saved transaction in the explorer.",
+        );
+    } catch (error) {
+      if (!this.wallet.pending.hash) {
+        delete this.wallet.pending; // failed before any signature could be sent
+        await saveWallet(this.wallet);
+      }
+      throw error;
+    } finally {
+      this.submission = undefined;
+    }
     return this.operations.run(
       "Confirm transaction",
       () => this.receipt(action, sent.transaction_hash),
@@ -199,6 +235,11 @@ export class Transactions {
       }[action],
       async (operation) => {
         const fee = await this.poolFee();
+        const allowance = fee + (action === "shield" ? amount : 0n);
+        if ((await this.balance()) <= allowance)
+          throw new Error(
+            `Fund more public STRK: this action needs ${decimal(allowance)} STRK plus gas.`,
+          );
         const proveAt = await this.operations.run(
           "Wait for spendable notes",
           async () => {
@@ -270,7 +311,6 @@ export class Transactions {
               proof: callAndProof.proof.data,
             }
           : {};
-        const allowance = fee + (action === "shield" ? amount : 0n);
         const calls: Call[] = [
           {
             contractAddress: STRK,
