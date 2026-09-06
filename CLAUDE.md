@@ -17,7 +17,6 @@ cd ts && npm ci && npm run build
 ## Hard rules
 
 - Never read `~/.strk20`, `data/**/vk*.txt`, `*keystore*`, `accounts.json`. Keys are not context.
-- Never sign or submit a transaction. Not on mainnet, not on Sepolia, not to test.
 - Never touch `data/mainnet` without the orchestrator's say-so; it takes hours to rebuild.
 - Never run `git stash`, `checkout`, `reset` or `clean`. Other agents share this working tree.
 - Do not commit unless asked. Leave changes in the working tree.
