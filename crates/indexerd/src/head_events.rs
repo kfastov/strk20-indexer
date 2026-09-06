@@ -8,6 +8,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 pub fn subscribe(url: String) -> watch::Receiver<Option<BlockHeader>> {
@@ -30,7 +31,7 @@ pub fn subscribe(url: String) -> watch::Receiver<Option<BlockHeader>> {
 }
 
 async fn connection(url: &str, tx: &watch::Sender<Option<BlockHeader>>) -> Result<()> {
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(url))
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), connect_async(url))
         .await
         .context("connect head subscription timeout")??;
     socket
@@ -44,11 +45,13 @@ async fn connection(url: &str, tx: &watch::Sender<Option<BlockHeader>>) -> Resul
         ))
         .await?;
     let mut subscription = None;
+    let mut deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let frame = tokio::select! {
             _ = tx.closed() => return Ok(()),
-            frame = tokio::time::timeout(Duration::from_secs(60), socket.next()) =>
-                frame.context("head subscription idle timeout")?
+            frame = tokio::time::timeout_at(deadline, socket.next()) =>
+                frame.context(if subscription.is_none() { "head subscription ACK timeout" }
+                    else { "head subscription header timeout" })?
                     .context("head subscription closed")??,
         };
         match frame {
@@ -63,10 +66,12 @@ async fn connection(url: &str, tx: &watch::Sender<Option<BlockHeader>>) -> Resul
                         bail!("invalid head subscription id");
                     }
                     subscription = Some(id.clone());
+                    deadline = Instant::now() + Duration::from_secs(10);
                     tracing::info!("head subscription connected");
                     // Always catch up, even if no fresh block follows the ACK.
                     tx.send_replace(None);
                 } else if is_notification(&message, subscription.as_ref()) {
+                    deadline = Instant::now() + Duration::from_secs(10);
                     let header = if message["method"] == "starknet_subscriptionNewHeads" {
                         let header: BlockHeader = serde_json::from_value(message["params"]["result"].clone())
                             .context("invalid announced header")?;
@@ -137,6 +142,27 @@ mod tests {
             assert_eq!(rx.borrow_and_update().as_ref().map(|h| h.block_number), expected);
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_open_socket_without_subscription_ack_does_not_stall_for_a_minute() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            // Answering transport pings cannot substitute for a subscription ACK.
+            for _ in 0..20 {
+                if socket.send(Message::Ping(vec![1].into())).await.is_err() { break; }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        });
+        let (tx, _rx) = watch::channel(None);
+        let result = tokio::time::timeout(Duration::from_secs(4), connection(&url, &tx)).await;
+        server.abort();
+        assert!(format!("{:#}", result.expect("missing ACK must not wait for header idle timeout").unwrap_err())
+            .contains("ACK timeout"));
     }
 
     #[test]
