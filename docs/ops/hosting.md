@@ -4,6 +4,51 @@ What is here: a container image, a two-network compose file, and the rules for
 what may face the internet. TLS certificates and DNS are a deployment
 decision and are deliberately not in this repo.
 
+## Current production deployment
+
+Verified on 2026-09-06: `root@157.173.104.231`, repository
+`/opt/strk20-indexer`, Ubuntu 24.04, Docker Compose and nginx. Mainnet listens
+on `127.0.0.1:8080`, Sepolia on `127.0.0.1:8081`. nginx serves Sepolia's
+allowlisted endpoints at `https://strk20.nullref.cc/` and mainnet's under
+`/mainnet/`. `/demo/` aliases `/var/www/strk20-demo/`. DNS is not proxied through
+Cloudflare. The nginx site is `/etc/nginx/sites-available/strk20.conf`.
+
+Deployment remains manual:
+
+1. Commit and push, check CI, and require a clean server checkout. Record the
+   previous commit and tag the current image before replacing `latest`.
+2. Back up the demo and nginx site. Pull with `git pull --ff-only origin main`;
+   build one shared image with `docker compose build mainnet` while both old
+   containers still serve requests.
+3. Stop both containers briefly and archive each entire volume, including the
+   database and feed. Resume the existing containers if either backup fails.
+   An archive of a live, mutating SQLite database and feed is not a consistent
+   rollback point.
+4. `docker compose up -d --no-build`. Check both local and public health, head
+   progress, logs, metrics and a complete consumer checkpoint verification.
+   Verify full SSE payloads through nginx, not just a successful connection.
+5. Build the demo locally with `npm --prefix ts run build`, then publish with
+   `rsync -a --delete --delay-updates ts/demo/dist/ root@157.173.104.231:/var/www/strk20-demo/`.
+   Check the hosted page and its assets. nginx needs no restart for this step.
+
+The 2026-09-06 deployment uses commit `3edda7a` (runtime code `6ac9748`). Backups
+are in `/root/strk20-deploy-20260906-3edda7a/`, including `SHA256SUMS`; the old
+image is `strk20-indexer:rollback-ed0b6d1`. Roll back that deployment by tagging
+the saved image as `strk20-indexer:latest` and running
+`docker compose up -d --no-build`. This does not require a rebuild or change
+volumes. Restore volumes only if data recovery is actually needed, with the
+containers stopped. Restore the demo from its matching archive separately.
+
+Do not interpret health alone as proof of upstream RPC quality: after this
+deployment, both heads advanced without a verification mismatch, but
+`strk20_l1_answer_rejected_total` and logs showed regressing L1-height answers
+from upstream. The indexer retained the previously recorded height. The client
+checkpoint mode verifies accepted Starknet state and does not claim L1 finality.
+Post-deployment checks through the shared Node/WASM consumer returned
+`rpc-verified` at Sepolia block `14630316` and mainnet block `14442288`, each
+with `verificationFailed: false`. Public HTTPS health checks also returned
+`OK` for both networks.
+
 ## Run it
 
 ```sh

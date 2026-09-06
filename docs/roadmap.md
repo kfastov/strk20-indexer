@@ -46,10 +46,11 @@ The current contracts are [consumer path](spec/consumer-path.md),
    reload. Tests mock cryptographic signing and network submission, and verify
    that resuming does not submit again. Legacy pending entries without a hash
    still require manual investigation; no automatic resubmission is attempted.
-5. Deploy and verify the hosted page after the user supplies the server/deploy
-   route. Checkpoint acquisition and bounded decompression now have separate
-   modules; the Worker owns sequencing, state and persistence. Git push is not
-   a production deployment.
+5. Deployment completed on 2026-09-06: both indexers and `/demo/` now run the
+   updated implementation. Both services are healthy and advancing; full SSE
+   payloads were observed through nginx. The deployment and rollback details
+   are in [hosting](ops/hosting.md). Finish the funded browser acceptance run;
+   publishing the page alone does not validate spending.
 6. Finish the hackathon video and submission metadata against the current rules.
    External wallet adoption or upstream acceptance is not implied by a demo.
 
