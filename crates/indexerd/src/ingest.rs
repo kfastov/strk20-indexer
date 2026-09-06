@@ -6,7 +6,7 @@
 
 use crate::config::ChainConfig;
 use crate::db::{BlockRow, Db, EventRow};
-use crate::rpc::{BlockHeader, BlockRef, RpcClient};
+use crate::rpc::{BlockHeader, BlockRef, RpcClient, RpcEvent, StateUpdate};
 use anyhow::{bail, Context, Result};
 use starknet_types_core::felt::Felt;
 use std::collections::BTreeMap;
@@ -172,9 +172,10 @@ impl<'a> Ingestor<'a> {
         let mut out = CycleOutcome::default();
 
         // 1. finality poll
-        let (latest, l1) = tokio::try_join!(
+        let (latest, l1, reorg) = tokio::try_join!(
             self.rpc.get_block(target),
             self.rpc.get_block(BlockRef::L1Accepted),
+            self.detect_reorg(),
         )?;
         if let BlockRef::Number(number) = target {
             anyhow::ensure!(latest.block_number == number, "RPC returned another announced block");
@@ -227,7 +228,7 @@ impl<'a> Ingestor<'a> {
         }
 
         // 2. canonicity check on the stored frontier state
-        if let Some(reorg_ancestor) = self.detect_reorg().await? {
+        if let Some(reorg_ancestor) = reorg {
             let removed = self.db.rollback_above(reorg_ancestor)?;
             tracing::warn!(ancestor = reorg_ancestor, removed, "reorg: rolled back");
             out.reorged = true;
@@ -239,68 +240,37 @@ impl<'a> Ingestor<'a> {
             Some(f) => f,
             None => self.cfg.genesis_block.saturating_sub(1),
         };
-        // Scanned in SEGMENTS, not in one pass over the whole remaining range:
-        // the segment bounds both the memory the scan holds and what a failure
-        // costs, since the frontier is checkpointed at each segment's end.
-        let mut seg_from = frontier + 1;
-        while seg_from <= latest.block_number {
-            let seg_to = seg_from
-                .saturating_add(SCAN_SEGMENT - 1)
-                .min(latest.block_number);
-            let active = self.scan_active_blocks(seg_from, seg_to).await?;
-            let found = active.len();
-            // The scan's own answer carries this block's events, so nothing
-            // re-asks for them: a second getEvents per active block is both
-            // 28,655 wasted calls on a full mainnet backfill and, once it has
-            // to page, the LIVE-8 defect all over again.
-            for (number, events) in active {
-                self.ingest_block(number, Some(events)).await?;
-                self.db.set_ingest_cursor(number)?;
-                out.blocks_ingested += 1;
-            }
-            self.db.set_ingest_cursor(seg_to)?;
-            tracing::info!(
-                segment_from = seg_from,
-                segment_to = seg_to,
-                scan_to = latest.block_number,
-                active_blocks = found,
-                "scan segment ingested; frontier checkpointed"
-            );
-            seg_from = seg_to + 1;
-        }
-
-        // 5. The events-first scan is INCOMPLETE, and measurably so: a block can
-        //    carry pool storage writes and emit no pool event, and `getEvents`
-        //    cannot name such a block, so nothing above ever asks the chain about
-        //    it. Measured 2026-09-01 on Sepolia — 23 blocks between 8,271,125 and
-        //    14,358,219 write pool storage with zero pool events (8,472,101: 17
-        //    writes; 12,715,446: 10; 13,702,347: 20), 221 slots the mirror had
-        //    never seen — and reproduced on mainnet at 11,721,848 (7 writes, 0
-        //    events). Every one of them is a permanent root divergence, which is
-        //    what `verify-root` was reporting on both networks.
-        //
-        //    The tail closes the hole where it is affordable: one
-        //    `getStateUpdate` per block, over the blocks this cycle just moved
-        //    past. A live follower moves a handful of blocks per poll, so this is
-        //    a handful of calls; a backfill moves millions and is skipped
-        //    entirely, because one call per block over 6M blocks is not a poll
-        //    interval's worth of work. History therefore still needs the
-        //    out-of-band audit (`strk20 rescan`), and this only guarantees that a
-        //    mirror already verified at its frontier stays verified.
-        let tail_from = frontier + 1;
-        if tail_from <= latest.block_number
-            && latest.block_number - frontier <= TAIL_STATE_DIFF_SPAN
-        {
-            let recovered = self.rescan_range(tail_from, latest.block_number).await?;
-            if recovered > 0 {
+        if latest.block_number.saturating_sub(frontier) <= TAIL_STATE_DIFF_SPAN {
+            out.blocks_ingested = self.ingest_tail(frontier + 1, &latest).await?;
+        } else {
+            // Scanned in SEGMENTS, not in one pass over the whole remaining range:
+            // the segment bounds both the memory the scan holds and what a failure
+            // costs, since the frontier is checkpointed at each segment's end.
+            let mut seg_from = frontier + 1;
+            while seg_from <= latest.block_number {
+                let seg_to = seg_from
+                    .saturating_add(SCAN_SEGMENT - 1)
+                    .min(latest.block_number);
+                let active = self.scan_active_blocks(seg_from, seg_to).await?;
+                let found = active.len();
+                // The scan's own answer carries this block's events, so nothing
+                // re-asks for them: a second getEvents per active block is both
+                // 28,655 wasted calls on a full mainnet backfill and, once it has
+                // to page, the LIVE-8 defect all over again.
+                for (number, events) in active {
+                    self.ingest_block(number, Some(events)).await?;
+                    self.db.set_ingest_cursor(number)?;
+                    out.blocks_ingested += 1;
+                }
+                self.db.set_ingest_cursor(seg_to)?;
                 tracing::info!(
-                    from = tail_from,
-                    to = latest.block_number,
-                    recovered,
-                    "tail state-diff sweep ingested block(s) that write pool storage \
-                     without emitting a pool event"
+                    segment_from = seg_from,
+                    segment_to = seg_to,
+                    scan_to = latest.block_number,
+                    active_blocks = found,
+                    "scan segment ingested; frontier checkpointed"
                 );
-                out.blocks_ingested += recovered;
+                seg_from = seg_to + 1;
             }
         }
 
@@ -324,6 +294,38 @@ impl<'a> Ingestor<'a> {
             self.db.promote_l1(h)?;
         }
         Ok(out)
+    }
+
+    /// Live ingestion covers EVERY state diff, including silent pool writes
+    /// (sound-ingest.md). Fetch events and updates together, then commit each
+    /// active block once. Small batches bound both concurrency and memory.
+    async fn ingest_tail(&mut self, from: u64, latest: &BlockHeader) -> Result<u64> {
+        let mut count = 0;
+        let pool = strk20_feed::felt_hex(&self.cfg.pool);
+        for start in (from..=latest.block_number).step_by(8) {
+            let end = start.saturating_add(7).min(latest.block_number);
+            let rpc = self.rpc;
+            let (events, updates) = tokio::try_join!(
+                self.scan_active_blocks(start, end),
+                futures::future::try_join_all((start..=end).map(|n| rpc.get_state_update(n))),
+            )?;
+            let mut events: BTreeMap<_, _> = events.into_iter().collect();
+            for (number, update) in (start..=end).zip(updates) {
+                let pool_events = events.remove(&number).unwrap_or_default();
+                if !pool_events.is_empty() || touches_pool(&update, &pool) {
+                    let header = if number == latest.block_number {
+                        latest.clone()
+                    } else {
+                        self.rpc.get_block(BlockRef::Number(number)).await?
+                    };
+                    self.store_block(number, header, update, Some(pool_events)).await?;
+                    count += 1;
+                }
+            }
+            // Never mark the range scanned until its silent writes are covered.
+            self.db.set_ingest_cursor(end)?;
+        }
+        Ok(count)
     }
 
     /// Count one refused finality answer and return the new total. The count
@@ -565,6 +567,18 @@ impl<'a> Ingestor<'a> {
             self.rpc.get_state_update(number),
         ).with_context(|| format!("header and state update of block {number}"))?;
 
+        self.store_block(number, header, update, events).await
+    }
+
+    /// All ingest paths share the same fork, event and class checks.
+    async fn store_block(
+        &mut self,
+        number: u64,
+        header: BlockHeader,
+        update: StateUpdate,
+        events: Option<Vec<RpcEvent>>,
+    ) -> Result<()> {
+        anyhow::ensure!(header.block_number == number, "RPC returned another block header");
         let pool_hex = strk20_feed::felt_hex(&self.cfg.pool);
         let mut diffs: Vec<(Felt, Felt)> = Vec::new();
         for cd in &update.state_diff.storage_diffs {
@@ -916,28 +930,21 @@ impl<'a> Ingestor<'a> {
         for number in from..=to {
             let update = self.rpc.get_state_update(number).await?;
             let pool_hex = strk20_feed::felt_hex(&self.cfg.pool);
-            let touches_pool = update
-                .state_diff
-                .storage_diffs
-                .iter()
-                .any(|cd| normalize_hex(&cd.address).map(|a| a == pool_hex).unwrap_or(false))
-                || update
-                    .state_diff
-                    .replaced_classes
-                    .iter()
-                    .any(|rc| normalize_hex(&rc.contract_address).map(|a| a == pool_hex).unwrap_or(false))
-                || update
-                    .state_diff
-                    .deployed_contracts
-                    .iter()
-                    .any(|dc| normalize_hex(&dc.address).map(|a| a == pool_hex).unwrap_or(false));
-            if touches_pool {
-                self.ingest_block(number, None).await?;
+            if touches_pool(&update, &pool_hex) {
+                let header = self.rpc.get_block(BlockRef::Number(number)).await?;
+                self.store_block(number, header, update, None).await?;
                 recovered += 1;
             }
         }
         Ok(recovered)
     }
+}
+
+fn touches_pool(update: &StateUpdate, pool: &str) -> bool {
+    let matches = |address: &str| normalize_hex(address).is_ok_and(|a| a == pool);
+    update.state_diff.storage_diffs.iter().any(|d| matches(&d.address))
+        || update.state_diff.replaced_classes.iter().any(|d| matches(&d.contract_address))
+        || update.state_diff.deployed_contracts.iter().any(|d| matches(&d.address))
 }
 
 /// Canonical minimal-hex form for address comparison.

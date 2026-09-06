@@ -99,6 +99,19 @@ impl Ctx {
         panic!("indexer did not become healthy with epoch {want_epoch}");
     }
 
+    async fn wait_snapshot(&self, epoch: u64) {
+        let manifest = self.dir.path().join("feed/manifest.json");
+        for _ in 0..300 {
+            let ready = std::fs::read(&manifest).ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|m| m["snapshot"]["e"].as_u64() == Some(epoch));
+            if ready { return; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.dump_logs();
+        panic!("snapshot {epoch} was not published");
+    }
+
     async fn wait_head(&self, want_head: u64) {
         for _ in 0..300 {
             if let Ok(resp) = self
@@ -262,13 +275,15 @@ async fn acceptance() {
     // Preamble (was leg a): bring the pipeline up. The wait is for the EXACT
     // epoch, not merely for /health to answer — epochs 0 [0,15] and 1 [16,31]
     // must both be cut before the oracle comparison below, or leg b compares
-    // against a half-published feed. wait_health(1) is what pins that, and it
-    // is the whole of what the old leg a asserted.
+    // against a half-published feed. Wait for the snapshot too: otherwise one
+    // wallet can fetch epochs while the next fetches the newly published
+    // snapshot, falsely attributing timing-dependent URLs to the viewing key.
     let indexer = ctx.spawn_indexer("indexer", &[]);
     ctx.indexer_port=listening_port(&indexer).await;
     ctx.proxy=RecordingProxy::new(&ctx.indexer_url());
     ctx.proxy_addr=ctx.proxy.serve().await;
     ctx.wait_health(1).await;
+    ctx.wait_snapshot(1).await;
 
     // Oracle O1 over the same 48 slots + committed write blocks.
     let o1_backend = {

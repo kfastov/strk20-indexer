@@ -337,6 +337,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   );
   await live.init();
   await live.sync();
+  await assert.rejects(() => live.sync(198), /BOUND_UNAVAILABLE/);
   const connection = new Promise<void>((resolve) => {
     connected = resolve;
   });
@@ -406,8 +407,12 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   send("head", update);
   await queued;
   while (liveTasks.length) await liveTasks.shift()!();
-  assert.equal(live.info().verifiedAt, 199);
+  assert.equal(live.info().verifiedAt, 198, "SSE first serves the waiting foreground bound");
   assert.equal(live.info().last_epoch, 1);
+  const proofRequests = () => requests.filter((r) => r.body.includes("starknet_getStorageProof")).length;
+  assert.equal(proofRequests(), 1);
+  await live.sync(198);
+  assert.equal(proofRequests(), 1, "the foreground retry must not acquire a second proof");
   assert.equal(
     requests.filter((r) => !r.body).length,
     0,
@@ -415,13 +420,13 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   );
 
   requests.length = 0;
-  assert.equal((await live.sync(198)).verifiedAt, 198);
+  assert.equal((await live.sync(197)).verifiedAt, 197);
   assert.equal(requests.filter((r) => !r.body).length, 0,
     "bounded reads reuse staged artifacts rather than reload the feed");
   assert(requests.some((r) => r.body.includes("starknet_getStorageProof")),
     "artifact reuse still independently proves the requested checkpoint");
   badProof = true;
-  await assert.rejects(() => live.sync(197), /block hash|block_hash|proof/i);
+  await assert.rejects(() => live.sync(196), /block hash|block_hash|proof/i);
   badProof = false;
 
   // A bounded resync signal uses the same HTTP apply path.

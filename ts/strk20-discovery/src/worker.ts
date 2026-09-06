@@ -48,6 +48,7 @@ export class WorkerRuntime {
   private liveQueued = false;
   private needsCatchup = true;
   private headStaged = false;
+  private requestedBlock: number | undefined;
   private saved = false;
   private stopped = false;
   private readonly module: EngineModule;
@@ -146,9 +147,20 @@ export class WorkerRuntime {
       !previous.verificationFailed
     )
       return previous;
+    // If a foreground read is waiting for B, let the arriving SSE update
+    // verify B first. Otherwise it verifies H and the queued read immediately
+    // downloads another proof for B. This is a single coalesced scheduling hint.
+    const target = block ?? (this.requestedBlock !== undefined
+      && this.queuedHead && this.queuedHead.head >= this.requestedBlock
+      ? this.requestedBlock : undefined);
     try {
-      return await this.syncOnce(block);
+      const state = await this.syncOnce(target);
+      if (state.verifiedAt === this.requestedBlock) this.requestedBlock = undefined;
+      return state;
     } catch (error) {
+      if (block !== undefined && Number.isSafeInteger(block) && block >= 0
+        && String(error).includes("BOUND_UNAVAILABLE: block not present"))
+        this.requestedBlock = block;
       if (
         retry === 0 &&
         /FEED_ADVANCED_MIDSYNC|FEED_EPOCH_GAP/.test(String(error))
@@ -356,6 +368,7 @@ export class WorkerRuntime {
     this.engine = new this.module.Engine(this.genesis);
     this.manifest = undefined;
     this.headStaged = false;
+    this.requestedBlock = undefined;
     this.needsCatchup = true;
     this.saved = false;
   }
