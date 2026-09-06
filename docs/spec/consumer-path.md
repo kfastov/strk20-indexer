@@ -17,7 +17,8 @@ remain in Git; the implemented public API is documented in
 
 Select an independent trusted checkpoint `(network, pool, B, blockHash, stateRoot)`.
 The default host obtains an accepted block header from a configured Starknet RPC.
-It fetches a contract storage proof for that block hash, then verifies:
+The browser and Node hosts fetch the header and contract storage proof concurrently
+for the same block number. They then verify:
 
 1. Proof block hash equals the selected checkpoint hash.
 2. Global state commitment matches the contracts and classes roots.

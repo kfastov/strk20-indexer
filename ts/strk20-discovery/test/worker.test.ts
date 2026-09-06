@@ -325,11 +325,14 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   // An actual epoch advance arrives entirely in SSE; only the independent
   // checkpoint RPCs are allowed before the new state becomes visible.
   const liveTasks: (() => Promise<void>)[] = [];
+  const liveSpans: string[] = [];
   let notify: (() => void) | undefined;
   const live = new WorkerRuntime(
     { Engine },
     options,
-    () => {},
+    (event) => {
+      if (event.event === "span") liveSpans.push(event.value.name);
+    },
     (task) => {
       liveTasks.push(task);
       notify?.();
@@ -406,9 +409,15 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   send("epoch", { entry, payload });
   send("head", update);
   await queued;
+  liveSpans.length = 0;
+  liveTasks.push(async () => {
+    await live.discover(owners[0]!.owner, key(owners[0]!), 198);
+  });
   while (liveTasks.length) await liveTasks.shift()!();
   assert.equal(live.info().verifiedAt, 198, "SSE first serves the waiting foreground bound");
   assert.equal(live.info().last_epoch, 1);
+  assert(liveSpans.indexOf("Discover notes") < liveSpans.indexOf("Save verified state"),
+    "a read queued behind a live update finishes before persisting the cache");
   const proofRequests = () => requests.filter((r) => r.body.includes("starknet_getStorageProof")).length;
   assert.equal(proofRequests(), 1);
   await live.sync(198);

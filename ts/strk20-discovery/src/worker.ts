@@ -345,7 +345,8 @@ export class WorkerRuntime {
                 this.enqueue(async () => {
                   this.liveQueued = false;
                   await this.sync();
-                  await this.save();
+                  // Let reads already waiting behind this update run before disk I/O.
+                  this.enqueue(() => this.save());
                 });
               }
             }
