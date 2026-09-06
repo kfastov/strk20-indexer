@@ -288,6 +288,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   const freshChannels = await provider.discoverChannels(fresh, 1n, [fresh], {
     blockIdentifier: 99,
   });
+  assert(freshChannels.channels);
   assert(!freshChannels.channels.has(fresh));
   assert.equal(
     await provider.discoverRequirement(fresh, 1n, fresh, token, 99),

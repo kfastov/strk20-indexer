@@ -51,9 +51,40 @@ is not a tiny fixture measurement. A funded wallet may add note-discovery work.
 The maximum observed interval of a 50 ms main-thread heartbeat was 82.2 ms.
 These are local-machine measurements, not guarantees for all devices or networks.
 
-No funded transaction was signed or submitted during these checks. A recorded
-shield → transfer → withdrawal run remains necessary before claiming a verified
-end-to-end live transaction demonstration.
+### Funded Sepolia acceptance run, 2026-09-06
+
+The deployed browser demo completed registration/shield, private self-transfer
+and withdrawal with our provider supplying the builder's discovery data. The
+account was generated in the page, received 105 test STRK (5 through the agent
+faucet and 100 from the user's faucet claim), and was deployed in 7.50 s.
+
+| Action | Accepted block | Browser operation | Receipt |
+|---|---:|---:|---|
+| Shield 0.01 STRK | 14630720 | 16.87 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x760b6fc6e6cefa318a53071823466163b4ba48a2aac513ccbc3a7fc5cf0e88d) |
+| Spend by self-transfer | 14630873 | 17.41 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x48557def3325c9fc153b0e53e22fc624a51a65148d0f904b10a0d0099ed5386) |
+| Withdraw 0.01 STRK | 14631004 | 15.93 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x28d8c41ea12d5ce715e557c69945f87a0e0260f4a0210bb0d6d20e2fd845ce4) |
+
+Both discovery providers agreed on notes and spend witnesses after transfer
+(block 14630981) and withdrawal (14631073). Final displayed balances were
+91.84274 public test STRK and zero private STRK. The wallet survived reloads
+between actions. This is a live Sepolia result, not a mainnet transaction run.
+
+The run exposed and fixed three defects: zero-public-key channel placeholders
+broke registration; background SSE skipped the explicit observation step; and
+hex-string versus bigint note IDs caused a false benchmark mismatch. The first
+shield attempt stopped before proof submission. The false comparison is not
+counted as a valid measurement.
+
+Performance remains unfinished. At block 14630981, official discovery took
+0.46 s (one attempt), local discovery 7.03 s (six attempts). After withdrawal:
+0.43 s versus 4.37 s (two local attempts). The local path was waiting/retrying
+for the requested state; equal results do not imply a speed advantage. Repeated
+funded-wallet restores measured 1.98, 2.27 and 2.68 s; the last reload used the
+same deployed assets. In the 2.27 s run, restoring WASM state took 1.94 s.
+The <=2 s repeat-start target is therefore not yet reliably met by the hosted
+demo. The earlier empty-account numbers below do not establish that target.
+
+### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it
 in 341.5, 312.4 and 308.4 ms. Catch-up to 14,440,963 took 1,624.7 ms, including

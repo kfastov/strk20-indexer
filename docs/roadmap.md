@@ -20,6 +20,10 @@ The current contracts are [consumer path](spec/consumer-path.md),
   Worker test verifies an epoch advance with no follow-up artifact GET.
 - Browser wallet flow: create/backup/import, public funding, deploy, shield,
   local discovery, private transfer and withdraw. Heavy state work is in a Worker.
+- The hosted Sepolia flow completed with real STRK, proofs and transaction
+  signatures on 2026-09-06. Our discovered note was spent, the replacement was
+  withdrawn, and official/local note and witness results agreed. Receipts and
+  timing limits are recorded in [demo evidence](spec/demo-app.md).
 - Optional same-block dual observation, explicit viewing-key disclosure consent,
   failures and cache conditions recorded. One transaction serves both observers.
 - Removed the mock engine, duplicate wrappers, synthetic replay bundle and stale
@@ -28,19 +32,18 @@ The current contracts are [consumer path](spec/consumer-path.md),
 
 ## Resume here
 
-1. Run the funded demo flow with the user and record the video. No funded
-   transaction was signed or submitted during implementation checks. The current
-   evidence covers unfunded wallet creation, real public checkpoint verification,
-   cache restoration and SDK builder consumption of a real fixture note.
+1. Fix measured performance gaps before claiming a speed win: hosted funded-wallet
+   reload reached 2.68 s (target <=2 s); local observation of a requested block
+   took 4.37–7.03 s versus 0.43–0.46 s for the official provider. Profile cache
+   restoration and the producer-to-consumer delay separately. Keep the complete
+   proof and spend checks; do not replace them with a cosmetic fast path.
 2. Verify the migrated lifecycle scripts with the user's funded flow. They now
    use our Node Worker host, private file cache and a common proving block. The
    Node integration test verifies real fixture state and restores discovered
    notes and cursors with the HTTP server offline; no transaction is submitted.
-3. Measure incremental catch-up and discovery on a funded account. Full-mainnet
-   empty-account measurements include a 33-block catch-up in 1.625 s, with
-   176 ms spent verifying state; cold 40.31 s and fresh Worker restores
-   308–342 ms. The repeat-start target is met for that measurement; this is not
-   a cold-start or all-device guarantee.
+3. Record a clean end-to-end video on the final version. The successful Sepolia
+   run included fixes and reloads and is acceptance evidence, not a finished
+   demo video. Mainnet funded acceptance remains separate work.
 4. Verify receipt recovery in the funded run. The signer now persists the exact
    SDK-computed hash before signing, so a lost send response can be resumed after
    reload. Tests mock cryptographic signing and network submission, and verify
@@ -49,8 +52,8 @@ The current contracts are [consumer path](spec/consumer-path.md),
 5. Deployment completed on 2026-09-06: both indexers and `/demo/` now run the
    updated implementation. Both services are healthy and advancing; full SSE
    payloads were observed through nginx. The deployment and rollback details
-   are in [hosting](ops/hosting.md). Finish the funded browser acceptance run;
-   publishing the page alone does not validate spending.
+   are in [hosting](ops/hosting.md). The subsequent Sepolia browser acceptance
+   run verified spending; the demo now includes the fixes found by that run.
 6. Finish the hackathon video and submission metadata against the current rules.
    External wallet adoption or upstream acceptance is not implied by a demo.
 
