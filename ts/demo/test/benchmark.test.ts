@@ -5,7 +5,7 @@ import {
   IndexerDiscoveryProvider,
   Witness,
   type DiscoveryProviderInterface,
-} from "@starkware-libs/starknet-privacy-sdk";
+} from "strk20-discovery/privacy-sdk";
 import { observeAt, type Comparison } from "../src/benchmark.ts";
 import { newWallet } from "../src/wallet.ts";
 

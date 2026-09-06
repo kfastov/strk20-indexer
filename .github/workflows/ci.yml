@@ -194,3 +194,7 @@ jobs:
       - name: TypeScript tests
         working-directory: ts
         run: npm test
+
+      - name: Install release archive outside the repository and build the demo
+        working-directory: ts
+        run: npm run check:release --workspace strk20-discovery

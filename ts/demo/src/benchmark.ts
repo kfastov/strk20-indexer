@@ -1,7 +1,7 @@
 import {
   IndexerDiscoveryProvider,
   type DiscoveryProviderInterface,
-} from "@starkware-libs/starknet-privacy-sdk";
+} from "strk20-discovery/privacy-sdk";
 import type { Wallet } from "./wallet.ts";
 import { NETWORKS } from "./network.ts";
 

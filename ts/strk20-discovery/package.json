@@ -1,8 +1,8 @@
 {
   "name": "strk20-discovery",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Keyless STRK20 note discovery. The viewing key stays in the browser; every client fetches identical public bytes.",
+  "description": "Locally verified STRK20 note discovery for Starknet. Keep viewing keys in your wallet.",
   "license": "Apache-2.0",
   "sideEffects": false,
   "exports": {
@@ -10,7 +10,8 @@
     "./sdk": "./dist/index.js",
     "./worker": "./dist/worker.js",
     "./scan": "./dist/scan.js",
-    "./node": "./dist/node.js"
+    "./node": "./dist/node.js",
+    "./privacy-sdk": "./dist/privacy-sdk.js"
   },
   "files": [
     "dist",
@@ -21,7 +22,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "node scripts/copy-wasm.mjs --clean && tsc -p tsconfig.build.json",
     "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
-    "scan:chokepoint": "node scripts/scan-chokepoint.mjs"
+    "scan:chokepoint": "node scripts/scan-chokepoint.mjs",
+    "pack:release": "npm run build && node scripts/pack-release.mjs",
+    "check:release": "npm run pack:release && node scripts/check-release.mjs"
   },
   "dependencies": {
     "@starkware-libs/starknet-privacy-sdk": "file:../../examples/mainnet/vendor/starknet-privacy-sdk",
@@ -43,5 +46,26 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kfastov/strk20-indexer.git",
+    "directory": "ts/strk20-discovery"
+  },
+  "homepage": "https://github.com/kfastov/strk20-indexer#readme",
+  "bugs": {
+    "url": "https://github.com/kfastov/strk20-indexer/issues"
+  },
+  "keywords": [
+    "starknet",
+    "strk20",
+    "privacy",
+    "wallet",
+    "discovery",
+    "wasm"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   }
 }

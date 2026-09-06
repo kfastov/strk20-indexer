@@ -567,12 +567,17 @@ id, new note enc data, proving block and `pool_class_hash_at_block`.
 
 ---
 
-# Addendum — the scripts now ship in `examples/sepolia/`
+# Historical addendum — scripts published on 2026-08-31
+
+The old standalone Sepolia scripts were removed on 2026-09-06. They are preserved
+in [Git history](https://github.com/kfastov/strk20-indexer/tree/5eab0b1/examples/sepolia).
+The maintained integration path is now the [SDK and demo](../../spec/demo-app.md).
+The statements below describe the original publication.
 
 Added 2026-08-31, after Run 2. The working copies described above live under
 gitignored `data/sepolia/shield/` and are staying there; what ships is a
 key-free port of the same code at
-[`examples/sepolia/`](../../../examples/sepolia), so the two runs are
+[`examples/sepolia/` at the historical revision](https://github.com/kfastov/strk20-indexer/tree/5eab0b1/examples/sepolia), so the two runs are
 reproducible by someone with their own testnet account.
 
 **Only code was copied. No key material was.** The changes that made that true:

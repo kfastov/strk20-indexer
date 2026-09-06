@@ -5,23 +5,27 @@ incremental diffs, verifies the complete pool storage root at a trusted checkpoi
 and runs upstream discovery locally. Viewing keys and account-specific reads stay
 in the browser. The feed still sees IP addresses and request timing.
 
-## Build
-
-This package is not published to npm. From the repository root:
+## Install
 
 ```sh
-# Node 24+, Rust and wasm-pack; the SDK is built from its pinned public tag.
-./examples/mainnet/setup.sh
-./crates/wasm/build.sh
-cd ts
-npm ci
-npm run build --workspace strk20-discovery
+npm install strk20-discovery
 ```
 
-The package includes its Worker and WASM assets. Its official SDK dependency is
-built by `examples/mainnet/setup.sh` into an ignored vendor directory. Build
-from the repository, then consume the package
-with a bundler that supports module Workers, such as Vite.
+Use a bundler with module Worker support, such as Vite, for browser applications.
+Node applications require Node 24+. The release includes compiled Worker/WASM
+assets and the unmodified official Privacy SDK 0.14.3-rc.5; no Rust toolchain,
+GitHub Packages token or local vendor checkout is required to install it.
+
+The official SDK is available through `strk20-discovery/privacy-sdk`, so the
+builder and discovery provider share the same SDK classes and types:
+
+```ts
+import { LocalDiscoveryProvider } from 'strk20-discovery';
+import { createPrivateTransfers } from 'strk20-discovery/privacy-sdk';
+```
+
+The [demo source](https://github.com/kfastov/strk20-indexer/tree/main/ts/demo)
+is the maintained complete example, including signing, proving and recovery.
 
 ## Use
 
@@ -75,7 +79,8 @@ try {
 The Node host runs the same Worker runtime in `worker_threads`. It atomically
 replaces a mode-0600 cache file; the directory is explicitly trusted and contains
 private discovery results. No IndexedDB shim or second discovery implementation
-is used. The headless lifecycle scripts use this provider for SDK proof inputs.
+is used. The demo is the maintained integration example; standalone lifecycle examples
+are not the primary supported entry point.
 
 ## Verification and persistence
 
@@ -119,3 +124,20 @@ npm run scan:chokepoint --workspace strk20-discovery
 Tests run the actual compiled WASM against native discovery goldens, exercise both
 cold modes, real SDK objects, cache-only restart, verification failures, decompression
 limits and public request paths. The WASM smoke also checks key-buffer zeroization.
+
+## Build and package from source
+
+From the repository root:
+
+```sh
+./examples/mainnet/setup.sh
+./crates/wasm/build.sh
+npm --prefix ts ci
+npm --prefix ts run pack:release --workspace strk20-discovery
+```
+
+The archive is written to `ts/strk20-discovery/release/`. The packaging script
+replaces the development-only SDK path with the exact bundled version and keeps
+public transitive dependencies as normal npm dependencies. Publish this archive,
+not the development workspace directory. Upstream attribution is in `UPSTREAM.txt`
+and the bundled package's license. The repository's Apache-2.0 license also ships.

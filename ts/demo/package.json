@@ -15,8 +15,7 @@
   },
   "dependencies": {
     "strk20-discovery": "*",
-    "starknet": "10.5.0",
-    "@starkware-libs/starknet-privacy-sdk": "file:../../examples/mainnet/vendor/starknet-privacy-sdk"
+    "starknet": "10.5.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

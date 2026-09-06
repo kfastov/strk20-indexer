@@ -134,7 +134,7 @@ both spent-states against Starknet state roots via storage proofs, with the
 indexer entirely out of the trust path.
 
 The scripts that produced those two transactions ship in
-[examples/sepolia](../examples/sepolia) so someone else can do it with their own
+[historical Sepolia scripts](https://github.com/kfastov/strk20-indexer/tree/5eab0b1/examples/sepolia) so someone else can do it with their own
 testnet account.
 
 ## What survived contact with reality

@@ -59,7 +59,7 @@ required; the repository at the deadline is the entry.
 | D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Package is not published to npm and depends on a local vendored SDK path. A checkout build is documented; installation outside that checkout remains a packaging task. |
 | D: transaction-history API (13) | Still optional, not implemented as the proposed complete transaction-history surface. Do not imply current-state verification authenticates transaction history. |
 | E: README, diagram, pitch (14–16) | Incomplete: README still says the funded demo is unvalidated; pitch claims a final-state root proves every historical write, advertises old 0.03 s measurements and says snapshots are unpublished. Diagram still shows polling and a SQLite snapshot. Rewrite before using them for judging/video. |
-| E: Sepolia scripts (17) | Scripts were published. However `examples/sepolia/spend.mjs`, `verify.mjs` and `verify-spend.mjs` still instantiate the official provider. Migrate the intended current example or clearly retain it as historical evidence and point to the new lifecycle example. |
+| E: Sepolia scripts (17) | Scripts were published. However `examples/sepolia/spend.mjs`, `verify.mjs` and `verify-spend.mjs` still instantiate the official provider. The old standalone Sepolia scripts were removed on the user's instruction; the SDK and browser demo are now the maintained integration path. |
 | F: main branch and mainnet hashes (18–19) | Commits are pushed; four existing mainnet hashes are verified by the hub. They do not establish a mainnet lifecycle using our newly implemented provider. |
 | F: video and final metadata (20–21) | Not done: no video URL, no final metadata/hub acceptance. Empty optional `contracts` is not a missing deployed contract. |
 
@@ -105,9 +105,9 @@ required; the repository at the deadline is the entry.
    lifecycle path. Resolve the old Sepolia scripts' official-provider ambiguity.
    Make an independently installable package if time permits; do not advertise
    `npm install strk20-discovery` while it is unpublished and uses a local SDK path.
-4. Do the promised focused maintainability pass: remove confirmed dead paths,
-   duplicate state and fictitious checks; isolate test pollution. Avoid speculative
-   abstractions and a broad rewrite before recording. Fix release-blocking findings.
+4. Keep the release focused on SDK and demo. The user explicitly moved the bloat
+   audit and large-server-module revision after submission. Fix release-blocking
+   defects found during acceptance without starting that refactor.
 5. Record and publish the three-minute video. Show real transactions, our discovered
    note supplying the next spend, and the privacy distinction. Explain any compressed
    waits; do not turn cached-vs-fresh timings into a universal speed claim.
@@ -134,6 +134,9 @@ zero-extra-request data streaming and cross-transport experiments are deferred
 behind the submission work, unless a reproducible release-blocking failure appears.
 
 ## After the main plan
+
+- Bloat audit and revision of the large server modules (explicitly deferred by the
+  user on 2026-09-06). Continue removing proven duplication and test pollution there.
 
 - AEAD for local state with an explicit key and attacker model. A replaceable key
   stored beside the cache does not authenticate the cache against that attacker.

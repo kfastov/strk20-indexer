@@ -1,210 +1,162 @@
 # strk20-indexer
 
-Open, self-hostable note indexer for the STRK20 privacy pool on Starknet, written in
-Rust. A wallet discovers its own private notes without its viewing key, or its address,
-ever reaching the server. The product is not a query API but a public verified sync feed:
-content-addressed static files every wallet downloads identically and decrypts locally.
+**Discover private STRK20 notes without sending your viewing key to an indexer.**
 
+`strk20-discovery` is a TypeScript SDK for wallets on Starknet. It downloads public
+pool state, checks it against an independently selected blockchain checkpoint,
+and discovers notes locally. The same Rust engine runs in a browser Worker or a
+Node worker thread. A self-hostable Rust indexer publishes the shared feed.
+
+[Try the live demo](https://strk20.nullref.cc/demo/) ·
+[SDK reference](ts/strk20-discovery/README.md) ·
+[Verification and measurements](docs/spec/demo-app.md) ·
+[Self-hosting](docs/ops/hosting.md)
+
+## Use the SDK
+
+```sh
+npm install strk20-discovery
 ```
-Starknet RPC ──► strk20 (server) ──► SQLite mirror ──► feed/ (static, content-addressed)
-                                                          │
-              wallet ──── GETs of public files only ──────┘
-                └─ viewing key stays here; upstream discovery-core runs locally
+
+```ts
+import { LocalDiscoveryProvider } from 'strk20-discovery';
+
+const discovery = new LocalDiscoveryProvider({
+  network: 'mainnet',
+  feedUrl: 'https://strk20.nullref.cc/mainnet/feed',
+});
+const mine = discovery.forAccount({ address, viewingKey });
+
+const cached = await mine.restore(); // previously verified local results
+await discovery.subscribe();        // full state updates over SSE
+const { notes } = await mine.discoverNotes();
+
+// On teardown:
+await discovery.close();
 ```
 
-## Why
+`address` and `viewingKey` belong to the wallet integrating the SDK. They stay on
+the client during local discovery. A Vite-compatible module Worker bundler is
+required in the browser; Node 24+ uses `NodeDiscoveryProvider` from
+`strk20-discovery/node`.
 
-To find its private money, a STRK20 wallet must walk pool contract storage with its
-viewing key. The reference discovery service does that walk server-side: the wallet posts
-its raw viewing key in every request body, so the operator can decrypt amounts, and each
-sync costs about two RPC reads per note per user (upstream's measurement: ~2250 reads and
-~1 s at 1125 notes, with a 7 to 9 req/s ceiling per node).
+The provider implements the official `DiscoveryProviderInterface`, including
+notes with spend witnesses, channels and requirement checks. Use
+`discovery.atBlock(B)` to pin all builder reads to the same proving block.
+The pinned official Privacy SDK ships with the package and is available through
+`strk20-discovery/privacy-sdk`; consumers do not need a GitHub Packages token.
 
-StarkWare runs that service: `discovery-service.alpha-mainnet.sw-dev.io` and
-`transaction-prover.alpha-mainnet.sw-dev.io` both answer `/health` today. Whether it is
-meant to be public for third parties is unanswered
-([starkience/strk20-hackathon#121](https://github.com/starkience/strk20-hackathon/issues/121)).
-The SDK's no-indexer fallback is reachable through an undocumented subpath, but
-maturity-blind: it reports `created: 0` for every note, so the 10-block maturity rule
-cannot be applied.
+The maintained integration example is **[the demo](ts/demo)**. Its
+[transaction flow](ts/demo/src/transactions.ts) passes our discovery results to
+the official builder, so the note we find is the note used for the next spend.
 
-This project is the layer that takes the key out of the request.
+## Try a real transaction
 
-## What it is
+Open [the demo](https://strk20.nullref.cc/demo/), choose Sepolia or mainnet and
+follow the primary action button:
 
-**`strk20`, the server.** Follows the pool with an events-first pipeline (pool-active
-blocks are about 0.2% of all blocks), mirrors every pool storage diff and event to SQLite,
-and cuts epoch bundles: zstd-compressed canonical NDJSON of pool diffs per fixed block
-range, content-addressed, hash-chained, cut only below `l1_accepted` so they are immutable
-by construction. Full mainnet history is 17 MB of epochs plus a 6.3 MB snapshot, growing
-about 80 KB/day.
+1. Create a software wallet and export its backup.
+2. Fund its displayed address with STRK and deploy the account.
+3. Shield STRK, discover the note locally, transfer privately and withdraw.
 
-**`strk20-sync`, the client.** Downloads the feed, verifies the whole hash chain, folds it
-into a local mirror, and runs the upstream `discovery-core` engine over it. It discovers
-channels, notes and spent-state, resumes incrementally, and rewinds to the last L1-final
-checkpoint on a reorg. The binaries share no secret-bearing code: the client does not link
-the server crate, `SecretFelt` refuses serialization (compile-fail-tested), and the
-transport trait has no method that could carry an address or a key.
+The page shows operation timings, with expandable verification details. An
+optional comparison observes the same block through both discovery providers.
+Enabling it explicitly sends this demo wallet's viewing key to the official
+service. It does not send a second transaction.
 
-**The browser path.** `crates/wasm` runs the same consumer in a Worker.
-`ts/strk20-discovery` implements the official `DiscoveryProviderInterface` and
-exports an account-bound convenience API. It verifies the complete pool state,
-returns actual SDK spend witnesses and persists folded state for fast reopening.
-`ts/demo` is a real mainnet/Sepolia wallet flow: fund, deploy, shield, discover,
-transfer and withdraw. The default build contains no synthetic replay or mock
-engine. The npm package is not published yet.
+Signing and viewing keys persist in a separate browser database; clearing the
+discovery cache does not delete the wallet. Use small amounts and keep the backup.
+The hosted proving service receives proving inputs: private local discovery does
+not make every part of transaction creation private from that service.
 
-**Modes, labeled.**
+The full Sepolia shield → local discovery → spend → withdraw flow has succeeded
+on chain. Both networks have passed complete pool-state verification. A final
+funded mainnet flow using this SDK remains a separate acceptance item; existing
+mainnet transaction hashes alone do not prove that integration. Receipts and
+measurement conditions are in [the evidence](docs/spec/demo-app.md).
 
-| Mode | What the server learns | Default |
-|---|---|---|
-| Feed (`/feed/*`) | that someone fetched public files; identical for every user | on |
-| Raw targeted (`/v1/raw/*`) | which slots you query, so your address | off, `--enable-raw` |
-| Compat (`/v1/sync/*`, `/v1/history`) | your raw viewing key, per request | off, `--enable-compat` |
+## How it works
 
-Compat is wire-identical to the reference service for its four POST routes:
-`crates/indexerd/src/compat/wire.rs` is upstream's `api/types.rs` at the pinned rev with an
-8-line diff, all of it a header comment and two imports. With `INDEXER_URL` it is a drop-in
-for key-holding backends; not yet for a browser SDK app, because those routes send no CORS
-headers by design.
+```text
+Starknet head notification → block, receipts and storage changes → Rust indexer
+                                                                    │
+                                                  public snapshot + diffs
+                                                                    │
+                          browser / Node Worker ← HTTP bootstrap + full SSE
+                                     │
+                          independently checked pool state
+                                     │
+                          local discovery with your viewing key
+```
 
-## Verification and local cache
+Every wallet consumes public pool artifacts rather than requesting its own
+slots. The indexer needs no viewing key. Live ingestion includes state writes
+that emit no pool event. The client checks the complete reconstructed storage
+root, the pool's contract proof and the global state commitment against a header
+from its configured RPC. Snapshot and incremental updates use the same verifier.
 
-A hash chain authenticates feed consistency, not completeness against Starknet. The client
-must match the entire pool storage state to an independently selected block checkpoint,
-after verifying the contract path and state commitment. This proves state at that block;
-it does not prove intermediate event history or exact slot creation times. The implemented default trusts an accepted Starknet RPC header. An Ethereum-finalized
-checkpoint mode is deferred.
+A folded cache preserves verified state, trie hashes and discovery progress.
+Restart restores that state instead of replaying the full history. Fresh updates
+still require verification; cold initialization, cache restoration and discovering
+a new transaction are different workloads. Current measurements do **not**
+establish that fresh local verification always beats the official service.
 
-For the demo we explicitly trust the browser's local cache. Its checksum detects accidental
-corruption, not malicious replacement. The restart target is ≤2 seconds to restore saved
-verified state and notes; network catch-up is measured separately. The first visit without
-cache has a separate cold-start measurement. Authenticated cache encryption (AEAD) is the
-next task after the main implementation. Wallet recovery material is stored separately
-from disposable feed data, and clearing the feed cache must preserve the wallet.
+## Trust and current limits
 
-## What is proven
+- **State at a checkpoint, not every historical transition.** Verification covers
+  the complete pool state at block B, including absent slots. It does not prove
+  intermediate events or exact write timestamps. Note maturity uses a conservative
+  verified-by block and can require extra waiting after a cold start.
+- **The configured RPC is a trust root.** The default mode checks an accepted
+  Starknet header; it does not establish Ethereum-finalized state independently.
+- **The local cache is trusted.** Its checksum detects corruption, not malicious
+  replacement. AEAD and its key-management model are deferred.
+- **Cold verification is still substantial.** WASM runs off the UI thread, but
+  the first visit must download and verify state. Warm-start and fresh-discovery
+  results are reported separately in the evidence.
+- **Proof availability can delay updates.** The server distinguishes MATCH,
+  MISMATCH and UNAVAILABLE. A mismatch stops publication; an unavailable proof
+  permits unverified publication. The SDK must independently verify new state
+  before using it for discovery.
+- **Privacy has boundaries.** Feed hosts see IP addresses and request timing.
+  Optional official comparison discloses its viewing key; hosted proving receives
+  proving inputs. Raw/compat server modes have different privacy properties and
+  are disabled by default in the public deployment.
 
-`cargo test --workspace` includes an acceptance suite
-([crates/e2e-tests/tests/acceptance.rs](crates/e2e-tests/tests/acceptance.rs)) that spawns
-the real binaries around a recording proxy and a synthetic RPC. It asserts that:
+## Run the indexer or contribute
 
-- keyless discovery output equals the upstream engine over upstream's own MockBackend,
-  field for field over the unspent notes the engine returns, note creation blocks
-  included; the report additionally carries the spent ones, flagged, so that a cold start
-  and a client that watched the spend land report the same rows;
-- no encoding of the viewing key, the address, or any derived channel key crosses the
-  wire, checked by a byte scanner that does find the key when pointed at a compat body,
-  so the negative is not vacuous;
-- two different wallets emit byte-identical request streams;
-- a tampered epoch is rejected, and two independent backfills produce identical epochs;
-- a mid-tail reorg is detected, rolled back, and the client rewinds without resyncing;
-- an unknown-class upgrade degrades typed serving while raw ingest and the feed continue,
-  and spent-state flips exactly the note whose nullifier lands on chain.
+```sh
+docker compose up -d --build
+```
 
+Compose runs isolated mainnet and Sepolia services. For RPC configuration, backups,
+health checks and public endpoint allowlists, see [hosting](docs/ops/hosting.md).
+Public feeds are available at `/mainnet/feed` and `/feed` on
+[the hosted instance](https://strk20.nullref.cc/demo/).
 
-**On live Sepolia** ([sepolia-shield-run.md](docs/research/live/sepolia-shield-run.md),
-[live-run-findings.md](docs/research/live/live-run-findings.md)) the same claims held
-against a note we minted at block 14,339,115. It was found keylessly in 1.19 s. The
-nullifier the client predicted appeared verbatim in the on-chain `NoteUsed` event. A
-recording proxy found the key in none of 13 encodings, and two wallets' request streams
-were byte-identical, 609 requests and 64,509 bytes each. An unannounced class upgrade at
-14,339,893 was caught mid-run and the feed continued.
+To build the SDK and demo from source, use Node 24+, Rust and wasm-pack:
 
-## Quick start
-
-```bash
-cargo build --release --workspace
-
-# server, against mainnet
-./target/release/strk20 run --db strk20.db --feed-dir feed --listen 127.0.0.1:8080
-
-# client; the key stays here
-echo 0x<viewing_key> > key.txt
-./target/release/strk20-sync sync --feed http://127.0.0.1:8080/feed \
-    --address 0x<your_address> --key-file key.txt --json \
-    --verify-anchor https://rpc.starknet.lava.build
-
-# browser demo against the public mainnet/Sepolia feeds
-./examples/mainnet/setup.sh  # Node 24+, builds the pinned official SDK
+```sh
+./examples/mainnet/setup.sh       # builds the pinned upstream SDK
 ./crates/wasm/build.sh
-cd ts && npm ci && npm run dev --workspace strk20-demo
+npm --prefix ts ci
+npm --prefix ts run dev          # Vite demo; no browser auto-open
 ```
 
-`strk20 backfill` ingests to finality and exits. `status`, `epoch-verify`, `verify-root`,
-`audit-coverage` and `enumerate-slots` audit; `rescan` and `recut-epochs` repair;
-`mirror-pull` bootstraps from another instance. For authenticated complete state,
-use `strk20-sync sync --verify-anchor <trusted-rpc>`. The older per-note `verify`
-command is a diagnostic and does not establish whole-state completeness.
+The setup helper is retained for building upstream dependencies. The SDK and
+browser demo are the maintained user-facing integration path; old standalone
+Sepolia scripts have been removed and remain in Git history.
 
-A local Chrome measurement on 2026-09-06 verified full mainnet state at block
-14,420,590: cold download, verification and discovery took 37.85 s; fresh Worker
-restores took 292–299 ms. The test identity had no notes. Network catch-up is
-separate. See [demo verification evidence](docs/spec/demo-app.md).
+- [Consumer architecture and proof contract](docs/spec/consumer-path.md)
+- [Why event-only indexing is insufficient](docs/spec/sound-ingest.md)
+- [Full architecture](docs/spec/architecture.md)
+- [Packaging-only upstream fork](docs/ops/fork.md)
+- [Submission checklist and deferred work](docs/roadmap.md)
 
-## Status
+Rust, real-WASM/TypeScript, SDK compatibility and packaging checks validate the
+implementation. The upstream discovery engine uses a feature-gated dependency
+fork; CI checks that its source matches upstream. The
+[upstream PR](https://github.com/starkware-libs/starknet-privacy/pull/984) is open.
 
-<!-- MAINNET-STATUS -->
-Mainnet mirror as of 2026-09-02: complete and chain-verified, verify-root MATCH at block 14,260,184, 528 epochs cut, 13 anchors, one snapshot (epoch 1424, block 14,249,999).
-
-<!-- HOSTED-STATUS -->
-Hosted instance as of 2026-09-02: <https://strk20.nullref.cc> serves Sepolia and <https://strk20.nullref.cc/mainnet> serves mainnet, each exposing the same three paths (`/feed/*`, `/health`, `/v1/stats`) and each reporting OK with `verify_root_failed` false. For mainnet, pass `--feed https://strk20.nullref.cc/mainnet/feed` to `strk20-sync`.
-
-## Honest limits
-
-- **verify-root is three-valued.** On MATCH the server writes an anchor. On MISMATCH it
-  latches `verify_root_failed` and stops publishing. On UNAVAILABLE, meaning no endpoint
-  served a proof, epochs are still cut and published unverified. Anchoring is only as good
-  as your RPC provider, and some serve no storage proofs at all.
-- **The events-first ingest can miss blocks.** A block can write pool storage and emit no
-  pool event, and `getEvents` cannot name such a block
-  ([docs/spec/sound-ingest.md](docs/spec/sound-ingest.md) §1). The tail sweep that covers it
-  is gated at 256 blocks, so a mirror further behind gets no sweep at all, which is exactly
-  when the misses pile up. verify-root, not the sweep, is the backstop. Repair is
-  `strk20 rescan` then `recut-epochs`.
-- **State verification has a precise scope.** A successful complete-root check proves
-  state at the selected checkpoint, including absence of slots. It does not prove
-  all intermediate events or publisher write timestamps. Note maturity therefore
-  uses a conservative verified-by block and may wait longer on a cold start.
-- **Cold verification remains expensive.** Folded cache avoids repeating it; a first
-  visit still hashes the complete storage tree. Local cache is trusted until AEAD
-  and its key-management threat model are implemented.
-- **The new demo's funded flow is not yet live-validated.** Browser initialization,
-  actual mainnet state verification and SDK builder consumption have been checked.
-  A recorded shield/transfer/withdraw run remains required. Hosted proving receives
-  proving inputs; local discovery alone does not make the write path private from it.
-- **Raw targeted mode leaks what direct RPC leaks**, including your address, and compat mode
-  receives viewing keys by definition. Run either for yourself, not strangers.
-- **The engine is consumed with zero source changes, but through a fork.** One commit
-  against one `Cargo.toml`, making an unused dependency optional, pinned by rev in
-  `[patch]`; CI fails if `discovery-core/src` differs from upstream by a byte. The upstream
-  PR ([starknet-privacy#984](https://github.com/starkware-libs/starknet-privacy/pull/984))
-  is open. See [docs/ops/fork.md](docs/ops/fork.md).
-
-## Pool facts this build is pinned to
-
-| | |
-|---|---|
-| Pool | `0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a` (mainnet) |
-| Deployed | block 8,978,970 (2026-04-20), class `0x30b8c540…4b4b30b` = `PRIVACY-0.14.2-RC.3` |
-| Upgraded | block 11,632,886 (2026-07-09), class `0x67dddd89…76b554d` = `CONTRACT_V2_DEPLOYED_MAINNET_2026-07-08` |
-| Decoding | one decoder covers all history: the 7 discovery events are identical in both classes, verified from both on-chain ABIs |
-
-## Design documents
-
-- [docs/spec/architecture.md](docs/spec/architecture.md), the spec
-- [docs/spec/sound-ingest.md](docs/spec/sound-ingest.md), why events alone are not a sound index
-- [docs/spec/consumer-path.md](docs/spec/consumer-path.md), the wasm and TypeScript surface
-- [docs/research-answers.md](docs/research-answers.md), 20 research questions with on-chain evidence
-- [docs/research/review/adversarial-review.md](docs/research/review/adversarial-review.md), the review that produced 22 fixes
-- [docs/ops/hosting.md](docs/ops/hosting.md), running it
-
-The working transcripts of the design process were removed from the tree on
-2026-09-02 and live in git history in the commits before that one.
-
-## License
-
-Apache-2.0. Wire types and test fixtures vendored from
-[starkware-libs/starknet-privacy](https://github.com/starkware-libs/starknet-privacy)
-(Apache-2.0); per-file paths and hashes in
-[fixtures/upstream/PROVENANCE.md](fixtures/upstream/PROVENANCE.md).
+Apache-2.0. Upstream provenance and notices ship with the applicable packages and
+[fixtures](fixtures/upstream/PROVENANCE.md).

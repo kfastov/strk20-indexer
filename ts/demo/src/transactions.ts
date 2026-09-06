@@ -11,7 +11,7 @@ import {
   createPrivateTransfers,
   ProvingServiceProofProvider,
   type DiscoveryProviderInterface,
-} from "@starkware-libs/starknet-privacy-sdk";
+} from "strk20-discovery/privacy-sdk";
 import { NETWORKS, STRK } from "./network.ts";
 import { saveWallet, type Wallet, type Action } from "./wallet.ts";
 import { Operations, type Operation } from "./operations.ts";
