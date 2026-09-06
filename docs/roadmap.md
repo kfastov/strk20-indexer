@@ -91,6 +91,27 @@ required; the repository at the deadline is the entry.
   example; contact a team only with explicit message authorization. Adoption and
   upstream acceptance remain bonus evidence, not gates for submission.
 
+### Mandatory fixes before submission: mainnet acceptance findings
+
+- Provider initialization must perform the first snapshot download and complete
+  state verification before reporting readiness. Do not defer a cold sync to the
+  first shield/builder call or merely rename that work. Preserve the trusted-cache
+  fast restart path. Requested by the user on 2026-09-06 after the 53.77 s shield.
+- Separate foreground transaction spans from background SSE/cache spans. The
+  current global `Operations.active` attaches concurrent Worker events to whichever
+  foreground action is open; nested durations cannot be summed as serial work.
+- Instrument signing/submission, balance/fee preflight RPCs and persistence so the
+  unaccounted part of transaction latency is visible. The first mainnet transfer
+  took 15.53 s; its named foreground stages cover only 13.06 s.
+- Investigate the warm discovery fluctuation observed after the mainnet transfer:
+  7.02 s total, with verification spans 1.74–1.89 s and cache-save spans
+  1.48–2.18 s, versus earlier 0.15–0.21 s verification. Attribute queue delay,
+  execution and background work separately before claiming stable warm latency.
+- Replace the demo's latency-critical two-second receipt polling with supported
+  event-driven transaction confirmation, retaining receipt/status validation and
+  recovery. Measure source arrival separately from client notification delay; do
+  not attribute the whole receipt wait to block production.
+
 ### Ordered remaining work
 
 1. Finish the pitch and single dataflow diagram; README is rewritten. Center the pitch on

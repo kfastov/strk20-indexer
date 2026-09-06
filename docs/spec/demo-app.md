@@ -466,6 +466,44 @@ release's unfunded reload result does not establish funded-cache performance.
 The previous funded lifecycle evidence remains above; a new funded mainnet
 lifecycle using this package remains pending.
 
+## Funded mainnet acceptance in progress, 2026-09-06
+
+On deployed demo `486d448`, the user funded the browser wallet with 25 STRK
+and submitted deploy, shield and private transfer. The local provider discovered
+0.01 STRK after shield and supplied the next spend. Withdrawal is still pending.
+
+| Action | Transaction | UI elapsed |
+|---|---|---|
+| Deploy | `0xc998dac4c5e2260186672c330d47cd32531774fb6693ea73d6efbd3b74074f` | 7.29 s |
+| Shield | `0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59` | 53.77 s |
+| Transfer | `0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3` | 15.53 s |
+
+Shield's builder triggered the first snapshot verification: 35.33 s inside
+37.80 s of action construction. Proof generation took 3.99 s and receipt waiting
+8.80 s. Subsequent explicit discovery took 1.33 s, including 0.21 s verification.
+Initialization had loaded no verified cache and returned without a cold sync;
+the provider must complete that work during initialization before submission.
+
+Transfer foreground stages: notes readiness 1.11 s, action construction 0.55 s,
+prover call 3.58 s, fee estimation 1.50 s, receipt waiting 6.32 s. The remaining
+2.47 s is not separately timed (preflight RPC, submission and persistence paths
+are candidates, not measured attribution). Receipt waiting currently polls every
+2 s; its full duration is not a measurement of network inclusion latency.
+
+Background SSE proof/verification/cache spans appear under whichever foreground
+operation is active. This is an attribution defect in `Operations.active`, not
+proof that all those spans block that operation. Do not add nested background
+spans to the foreground totals. Fix span attribution before recording the video.
+
+After transfer, explicit discovery found the replacement note and advanced to
+withdrawal, but took 7.02 s. Recorded spans include state verification 1.74 and
+1.89 s, cache saves 1.48 and 2.18 s, checkpoint proof wait 0.22 s and note
+scanning 0.20 s. These are overlapping foreground/background observations;
+without corrected attribution they do not establish a sequential breakdown.
+This is a warm latency regression/fluctuation requiring investigation, not a
+second cold-start explanation. The transfer receipt independently reports
+`SUCCEEDED` / `ACCEPTED_ON_L2`.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,
