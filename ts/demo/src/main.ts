@@ -51,7 +51,14 @@ const text = (id: string, value: string) => {
 function step(): {
   label: string;
   description: string;
-  action: Action | "create" | "fund" | "discover" | "resume" | "refresh";
+  action:
+    | Action
+    | "create"
+    | "fund"
+    | "discover"
+    | "resume"
+    | "refresh"
+    | "initialize";
 } {
   if (!wallet)
     return {
@@ -59,6 +66,12 @@ function step(): {
       description:
         "Create a temporary software wallet, then fund its public address with a small amount of STRK.",
       action: "create",
+    };
+  if (!transactions)
+    return {
+      label: "Initialize wallet",
+      description: "Restore the wallet connection before continuing.",
+      action: "initialize",
     };
   if (wallet.pending)
     return {
@@ -187,6 +200,7 @@ async function run(work: () => Promise<void>): Promise<void> {
     await work();
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
+    element<HTMLSelectElement>("network").value = network;
   } finally {
     busy = false;
     render();
@@ -204,7 +218,11 @@ async function initialize(): Promise<void> {
   await operations.run(
     wallet ? "Restore wallet and discovery" : "Initialize discovery",
     async () => {
-      await provider?.close();
+      const previous = provider;
+      provider = undefined;
+      account = undefined;
+      transactions = undefined;
+      await previous?.close();
       const config = NETWORKS[network];
       provider = new LocalDiscoveryProvider({
         network,
@@ -304,10 +322,14 @@ async function next(): Promise<void> {
   switch (current.action) {
     case "create":
       await operations.run("Create demo wallet", async () => {
-        wallet = newWallet(network);
-        await saveWallet(wallet);
+        const created = newWallet(network);
+        await saveWallet(created);
+        wallet = created;
         await initialize();
       });
+      break;
+    case "initialize":
+      await initialize();
       break;
     case "fund":
       await operations.run("Detect wallet funding", async () => {
@@ -373,18 +395,20 @@ element<HTMLInputElement>("backup-file").onchange = (event) =>
       throw new Error(
         "A different wallet is already saved for this network. Export it and restore this backup in another browser profile to keep both wallets.",
       );
+    await saveWallet(imported);
+    localStorage.setItem("strk20-demo-network", imported.network);
     wallet = imported;
     network = wallet.network;
-    await saveWallet(wallet);
     element<HTMLSelectElement>("network").value = network;
-    localStorage.setItem("strk20-demo-network", network);
     await initialize();
   });
 element<HTMLSelectElement>("network").onchange = () =>
   void run(async () => {
-    network = element<HTMLSelectElement>("network").value as Network;
-    localStorage.setItem("strk20-demo-network", network);
-    wallet = await loadWallet(network);
+    const selected = element<HTMLSelectElement>("network").value as Network;
+    const selectedWallet = await loadWallet(selected);
+    localStorage.setItem("strk20-demo-network", selected);
+    network = selected;
+    wallet = selectedWallet;
     info = undefined;
     notes = undefined;
     balance = 0n;

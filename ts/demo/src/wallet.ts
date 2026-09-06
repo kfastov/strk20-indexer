@@ -49,7 +49,9 @@ export async function saveWallet(wallet: Wallet): Promise<void> {
   const db = await database();
   try {
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction("wallet", "readwrite");
+      const tx = db.transaction("wallet", "readwrite", {
+        durability: "strict",
+      });
       tx.objectStore("wallet").put(wallet, wallet.network);
       tx.oncomplete = () => resolve();
       tx.onerror = tx.onabort = () =>
