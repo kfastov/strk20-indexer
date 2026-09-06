@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-pub fn subscribe(url: String) -> watch::Receiver<()> {
-    let (tx, rx) = watch::channel(());
+pub fn subscribe(url: String) -> watch::Receiver<Option<u64>> {
+    let (tx, rx) = watch::channel(None);
     tokio::spawn(async move {
         while !tx.is_closed() {
             let result = connection(&url, &tx).await;
@@ -28,7 +28,7 @@ pub fn subscribe(url: String) -> watch::Receiver<()> {
     rx
 }
 
-async fn connection(url: &str, tx: &watch::Sender<()>) -> Result<()> {
+async fn connection(url: &str, tx: &watch::Sender<Option<u64>>) -> Result<()> {
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(url))
         .await
         .context("connect head subscription timeout")??;
@@ -64,9 +64,20 @@ async fn connection(url: &str, tx: &watch::Sender<()>) -> Result<()> {
                     subscription = Some(id.clone());
                     tracing::info!("head subscription connected");
                     // Always catch up, even if no fresh block follows the ACK.
-                    tx.send_replace(());
+                    tx.send_replace(None);
                 } else if is_notification(&message, subscription.as_ref()) {
-                    tx.send_replace(());
+                    // Ask HTTP for this exact block, not a potentially cached
+                    // `latest` tag. Only HTTP-validated data enters the mirror.
+                    let number = if message["method"] == "starknet_subscriptionNewHeads" {
+                        Some(
+                            message["params"]["result"]["block_number"]
+                                .as_u64()
+                                .context("invalid announced block number")?,
+                        )
+                    } else {
+                        None
+                    };
+                    tx.send_replace(number);
                 }
             }
             Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
@@ -94,7 +105,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
+            for round in 0..2 {
                 let (tcp, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
                 let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
@@ -108,17 +119,25 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-                socket.send(Message::Text(json!({"method": "starknet_subscriptionReorg", "params": {"subscription_id": "7"}}).to_string().into())).await.unwrap();
+                let event = if round == 0 {
+                    json!({"method": "starknet_subscriptionNewHeads", "params": {"subscription_id": "7", "result": {"block_number": 42}}})
+                } else {
+                    json!({"method": "starknet_subscriptionReorg", "params": {"subscription_id": "7"}})
+                };
+                socket
+                    .send(Message::Text(event.to_string().into()))
+                    .await
+                    .unwrap();
                 socket.close(None).await.unwrap();
             }
         });
-        let (tx, mut rx) = watch::channel(());
+        let (tx, mut rx) = watch::channel(None);
         // Drive two connections without a backoff clock: the reconnect ACK
         // must cause catch-up even if no head was produced while disconnected.
-        for _ in 0..2 {
+        for expected in [Some(42), None] {
             assert!(connection(&url, &tx).await.is_err());
             assert!(rx.has_changed().unwrap());
-            rx.borrow_and_update();
+            assert_eq!(*rx.borrow_and_update(), expected);
         }
         server.await.unwrap();
     }

@@ -578,3 +578,43 @@ async fn publication_wakes_existing_subscribers_without_a_timer() {
     let status: serde_json::Value = serde_json::from_str(rx.borrow_and_update().status.as_ref().unwrap()).unwrap();
     assert_eq!(status["verify_root_failed"], true);
 }
+
+#[tokio::test]
+async fn announced_height_is_fetched_explicitly_and_wrong_heights_are_rejected() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let latest_calls = Arc::new(AtomicUsize::new(0));
+    let calls = latest_calls.clone();
+    let router = axum::Router::new().route("/", axum::routing::post(
+        move |axum::Json(request): axum::Json<serde_json::Value>| {
+            let calls = calls.clone();
+            async move {
+                assert_eq!(request["method"], "starknet_getBlockWithTxHashes");
+                let number = if request["params"][0] == "latest" {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    9
+                } else { 10 };
+                axum::Json(serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result": {
+                    "block_number": number, "block_hash": "0xa", "parent_hash": "0x9",
+                    "timestamp": 10, "status": "ACCEPTED_ON_L1", "transactions": []
+                }}))
+            }
+        }
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rpc = RpcClient::new(format!("http://{}/", listener.local_addr().unwrap()), None);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open(&dir.path().join("head.db")).unwrap();
+    db.set_ingest_cursor(10).unwrap();
+    let config = cfg();
+    let mut ingest = strk20_indexerd::ingest::Ingestor {
+        db: &mut db, rpc: &rpc, cfg: &config, chunk_size: 1000, progress_secs: 0,
+    };
+    let result = ingest.run_cycle_at(strk20_indexerd::rpc::BlockRef::Number(10)).await.unwrap();
+    assert_eq!(result.head_number, 10);
+    assert_eq!(latest_calls.load(Ordering::Relaxed), 0);
+    assert!(ingest.run_cycle_at(strk20_indexerd::rpc::BlockRef::Number(11)).await
+        .unwrap_err().to_string().contains("another announced block"));
+    assert_eq!(db.meta_get("head_number").unwrap().as_deref(), Some("10"));
+    server.abort();
+}

@@ -350,9 +350,8 @@ async fn run(
     }
     let rpc_ref = &rpc;
     loop {
-        if let Some(rx) = &mut heads {
-            rx.borrow_and_update();
-        }
+        let target = heads.as_mut().and_then(|rx| *rx.borrow_and_update())
+            .map_or(strk20_indexerd::rpc::BlockRef::Latest, strk20_indexerd::rpc::BlockRef::Number);
         let started = std::time::Instant::now();
         let outcome = {
             let mut ingestor = Ingestor {
@@ -362,7 +361,7 @@ async fn run(
                 chunk_size: common.chunk_size,
                 progress_secs: common.progress_secs,
             };
-            ingestor.run_cycle().await
+            ingestor.run_cycle_at(target).await
         };
         match outcome {
             Ok(o) => {

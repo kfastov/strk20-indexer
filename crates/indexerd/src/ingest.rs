@@ -163,13 +163,22 @@ impl<'a> Ingestor<'a> {
     /// per-block ingest. Returns what changed so the caller can cut epochs
     /// and regenerate the tail.
     pub async fn run_cycle(&mut self) -> Result<CycleOutcome> {
+        self.run_cycle_at(BlockRef::Latest).await
+    }
+
+    /// A subscription supplies the block number, never trusted state. Fetch
+    /// the named header to avoid `latest` caches trailing the notification.
+    pub async fn run_cycle_at(&mut self, target: BlockRef) -> Result<CycleOutcome> {
         let mut out = CycleOutcome::default();
 
         // 1. finality poll
         let (latest, l1) = tokio::try_join!(
-            self.rpc.get_block(BlockRef::Latest),
+            self.rpc.get_block(target),
             self.rpc.get_block(BlockRef::L1Accepted),
         )?;
+        if let BlockRef::Number(number) = target {
+            anyhow::ensure!(latest.block_number == number, "RPC returned another announced block");
+        }
         out.head_number = latest.block_number;
         let persisted_l1: Option<u64> = self
             .db
@@ -551,16 +560,10 @@ impl<'a> Ingestor<'a> {
         number: u64,
         events: Option<Vec<crate::rpc::RpcEvent>>,
     ) -> Result<()> {
-        let header = self
-            .rpc
-            .get_block(BlockRef::Number(number))
-            .await
-            .with_context(|| format!("header of block {number}"))?;
-        let update = self
-            .rpc
-            .get_state_update(number)
-            .await
-            .with_context(|| format!("state update of block {number}"))?;
+        let (header, update) = tokio::try_join!(
+            self.rpc.get_block(BlockRef::Number(number)),
+            self.rpc.get_state_update(number),
+        ).with_context(|| format!("header and state update of block {number}"))?;
 
         let pool_hex = strk20_feed::felt_hex(&self.cfg.pool);
         let mut diffs: Vec<(Felt, Felt)> = Vec::new();
