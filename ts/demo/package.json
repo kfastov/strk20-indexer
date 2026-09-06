@@ -14,14 +14,16 @@
     "test": "tsc --noEmit && node --test --experimental-strip-types \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "strk20-discovery": "*",
-    "starknet": "10.5.0"
+    "starknet": "10.5.0",
+    "strk20-discovery": "*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/ws": "8.18.1",
+    "fake-indexeddb": "6.2.5",
     "typescript": "5.9.2",
     "vite": "^7.1.5",
-    "fake-indexeddb": "6.2.5"
+    "ws": "8.21.3"
   },
   "engines": {
     "node": ">=24"

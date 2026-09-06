@@ -16,6 +16,7 @@ import { NETWORKS, STRK } from "./network.ts";
 import { saveWallet, type Wallet, type Action } from "./wallet.ts";
 import { Operations, type Operation } from "./operations.ts";
 import { SubmissionSigner } from "./submission-signer.ts";
+import { waitForReceipt } from "./confirmation.ts";
 
 const PROOF_DEPTH = 9;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -127,21 +128,16 @@ export class Transactions {
     action: Action,
     hash: string,
   ): Promise<{ hash: string; block: number }> {
-    const receipt = await this.rpc.waitForTransaction(hash, {
-      retryInterval: 2000,
-    });
-    if (!receipt.isSuccess()) {
+    const receipt = await waitForReceipt(
+      hash, NETWORKS[this.wallet.network].ws, () => this.rpc.getTransactionReceipt(hash),
+    );
+    if (receipt.execution_status === "REVERTED") {
       delete this.wallet.pending;
       await saveWallet(this.wallet);
       throw new Error(
         "Transaction reverted. Gas was charged; inspect the explorer before retrying.",
       );
     }
-    if (
-      !("block_number" in receipt) ||
-      typeof receipt.block_number !== "number"
-    )
-      throw new Error("Waiting for an accepted block.");
     const record = { hash, block: receipt.block_number };
     this.wallet.completed[action] = record;
     delete this.wallet.pending;

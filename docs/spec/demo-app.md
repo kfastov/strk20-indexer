@@ -487,7 +487,7 @@ the provider must complete that work during initialization before submission.
 Transfer foreground stages: notes readiness 1.11 s, action construction 0.55 s,
 prover call 3.58 s, fee estimation 1.50 s, receipt waiting 6.32 s. The remaining
 2.47 s is not separately timed (preflight RPC, submission and persistence paths
-are candidates, not measured attribution). Receipt waiting currently polls every
+are candidates, not measured attribution). Receipt waiting on that build polled every
 2 s; its full duration is not a measurement of network inclusion latency.
 
 Background SSE proof/verification/cache spans appear under whichever foreground
@@ -503,6 +503,35 @@ without corrected attribution they do not establish a sequential breakdown.
 This is a warm latency regression/fluctuation requiring investigation, not a
 second cold-start explanation. The transfer receipt independently reports
 `SUCCEEDED` / `ACCEPTED_ON_L2`.
+
+## Event-driven confirmation, 2026-09-06
+
+`confirmation.ts` replaces `waitForTransaction(... retryInterval: 2000)` with
+`starknet_subscribeTransactionStatus`. It issues one immediate HTTP receipt
+lookup to cover already-confirmed transactions, then reads receipts on accepted
+status events. A bounded reconnect resubscribes and checks for confirmation
+missed during the disconnected interval. There is no periodic receipt lookup.
+Only an accepted receipt with the requested hash, valid block number and known
+execution status completes the step. Reverts, timeouts and uncertain responses
+preserve the existing recovery behavior; failed confirmation never resends.
+
+The handler uses the native browser WebSocket API and is installed before the
+subscribe request, covering an initial notification before the acknowledgement.
+The attempted SDK channel dropped that early notification and could leave a
+reconnect callback active after closing; the final implementation does not patch
+SDK internals. CSP now allows exactly the two configured PublicNode WSS hosts.
+The `ws` dependency is only a local test server, not a browser dependency.
+
+Local protocol tests cover early and duplicate status notifications, reconnect,
+revert, wrong hash, invalid/missing accepted block, timeout without polling and
+failed handshakes. The actual signer-construction recovery test still confirms
+one broadcast and one signature across a failed receipt lookup and resume.
+
+A headless Chrome check of the final handler read existing accepted receipts on
+mainnet in 1.037 s and Sepolia in 0.508 s, one HTTP receipt request each and no page
+errors. The lookup starts alongside WS connection, so recovery does not wait for
+the handshake. These are read-only checks of already-confirmed hashes, not fresh
+transaction inclusion measurements or proof of an end-to-end speed advantage.
 
 ## Deferred
 

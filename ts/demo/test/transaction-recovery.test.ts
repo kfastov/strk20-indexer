@@ -4,6 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import "fake-indexeddb/auto";
+import { once } from "node:events";
+import { WebSocketServer } from "ws";
 import {
   Account,
   RpcProvider,
@@ -75,14 +77,39 @@ test("lost deployment response retains the precomputed hash and resumes without 
     const restored = await loadWallet("sepolia");
     assert(restored?.pending?.hash);
     assert.equal(restored.pending.hash, signedHash);
-    t.mock.method(
-      RpcProvider.prototype,
-      "waitForTransaction",
-      async (hash: string) => {
-        assert.equal(hash, signedHash);
-        return { isSuccess: () => true, block_number: 100 };
-      },
-    );
+    const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await once(server, "listening");
+    t.after(async () => {
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    const url = `ws://127.0.0.1:${address.port}`;
+    const NativeSocket = globalThis.WebSocket;
+    t.mock.property(globalThis, "WebSocket", class extends NativeSocket {
+      constructor() { super(url); }
+    });
+    let receiptAvailable = false;
+    t.mock.method(RpcProvider.prototype, "getTransactionReceipt", async (hash: string) => {
+      assert.equal(hash, signedHash);
+      if (!receiptAvailable) throw new Error("Receipt connection failed");
+      return { transaction_hash: signedHash, execution_status: "SUCCEEDED",
+        finality_status: "ACCEPTED_ON_L2", block_number: 100 };
+    });
+    server.on("connection", (socket) => socket.on("message", (bytes) => {
+      const request = JSON.parse(String(bytes));
+      assert.equal(BigInt(request.params.transaction_hash), BigInt(signedHash));
+      const status = { execution_status: "SUCCEEDED", finality_status: "ACCEPTED_ON_L2" };
+      if (request.method === "starknet_subscribeTransactionStatus") {
+        socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: "sub" }));
+        socket.send(JSON.stringify({ jsonrpc: "2.0", method: "starknet_subscriptionTransactionStatus",
+          params: { subscription_id: "sub", result: { transaction_hash: signedHash, status } } }));
+      } else assert.fail(`Unexpected WebSocket method: ${request.method}`);
+    }));
+    await assert.rejects(new Transactions(restored, discovery, operations).resume(), /Receipt connection failed/);
+    assert.equal((await loadWallet("sepolia"))?.pending?.hash, signedHash);
+    receiptAvailable = true;
     await new Transactions(restored, discovery, operations).resume();
     assert.equal(
       (await loadWallet("sepolia"))?.completed.deploy?.hash,

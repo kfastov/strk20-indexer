@@ -107,10 +107,11 @@ required; the repository at the deadline is the entry.
   7.02 s total, with verification spans 1.74–1.89 s and cache-save spans
   1.48–2.18 s, versus earlier 0.15–0.21 s verification. Attribute queue delay,
   execution and background work separately before claiming stable warm latency.
-- Replace the demo's latency-critical two-second receipt polling with supported
-  event-driven transaction confirmation, retaining receipt/status validation and
-  recovery. Measure source arrival separately from client notification delay; do
-  not attribute the whole receipt wait to block production.
+- Receipt polling is replaced by transaction-status WebSocket events plus one
+  catch-up read when connecting/reconnecting. Receipt/hash/block validation and
+  resume without a new send are retained. The next user-submitted mainnet action
+  still needs to measure this path on a newly accepted transaction; do not present
+  already-confirmed receipt checks as inclusion-latency measurements.
 
 ### Ordered remaining work
 
