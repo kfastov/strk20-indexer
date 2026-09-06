@@ -113,7 +113,10 @@ enum Command {
         /// Enable the reference-compatible keyed API (receives viewing keys!)
         #[arg(long)]
         enable_compat: bool,
-        /// Poll interval in milliseconds
+        /// RPC head subscription; production uses this instead of polling.
+        #[arg(long, env = "STRK20_RPC_WS_URL")]
+        rpc_ws_url: Option<String>,
+        /// HTTP-only compatibility mode when no subscription URL is configured
         #[arg(long, default_value_t = 2000)]
         poll_ms: u64,
     },
@@ -257,7 +260,8 @@ async fn main() -> Result<()> {
             enable_raw,
             enable_compat,
             poll_ms,
-        } => run(common, listen, enable_raw, enable_compat, poll_ms).await,
+            rpc_ws_url,
+        } => run(common, listen, enable_raw, enable_compat, poll_ms, rpc_ws_url).await,
         Command::Backfill { common } => backfill(common).await,
         Command::Status { common } => status(common),
         Command::EpochVerify { common, epoch } => epoch_verify(common, epoch),
@@ -296,6 +300,7 @@ async fn run(
     enable_raw: bool,
     enable_compat: bool,
     poll_ms: u64,
+    rpc_ws_url: Option<String>,
 ) -> Result<()> {
     let cfg = common.chain_config();
     let rpc = common.rpc();
@@ -316,12 +321,11 @@ async fn run(
         common.feed_dir.clone(),
         server_db.clone(),
     ));
-    tokio::spawn(strk20_indexerd::live::run_watcher(live.clone()));
     let state = strk20_indexerd::server::AppState {
         feed_dir: common.feed_dir.clone(),
         db: server_db.clone(),
         cfg: cfg.clone(),
-        live,
+        live: live.clone(),
     };
     let compat_state = enable_compat.then(|| strk20_indexerd::compat::CompatState {
         backend: strk20_indexerd::bridge::DbBackend::new(common.db.clone(), cfg.pool),
@@ -339,9 +343,17 @@ async fn run(
         }
     });
 
-    // ingest loop
+    // Subscribe before catch-up so blocks arriving during it are not lost.
+    let mut heads = rpc_ws_url.map(strk20_indexerd::head_events::subscribe);
+    if heads.is_none() {
+        tracing::warn!("HTTP polling compatibility mode; configure STRK20_RPC_WS_URL for low latency");
+    }
     let rpc_ref = &rpc;
     loop {
+        if let Some(rx) = &mut heads {
+            rx.borrow_and_update();
+        }
+        let started = std::time::Instant::now();
         let outcome = {
             let mut ingestor = Ingestor {
                 db: &mut db,
@@ -354,6 +366,7 @@ async fn run(
         };
         match outcome {
             Ok(o) => {
+                let ingest_ms = started.elapsed().as_millis() as u64;
                 // Publish the tail BEFORE cutting. `/health` already reports the
                 // new head at this point, and the cut path can take a while
                 // (verify-root, the anchor probe, or a §5.6 rescan) — a consumer
@@ -375,6 +388,8 @@ async fn run(
                         cutter.write_anchors()?;
                     }
                 }
+                live.refresh();
+                let published_ms = started.elapsed().as_millis() as u64;
                 let cut =
                     cut_epochs_with_recovery(&mut db, &rpc, &cfg, &common, o.l1_accepted).await;
                 if cut > 0 {
@@ -387,10 +402,18 @@ async fn run(
                     };
                     cutter.regen_head()?;
                 }
+                // Also announce a verification failure even when no epoch cut.
+                live.refresh();
+                tracing::info!(head = o.head_number, ingest_ms, published_ms,
+                    cycle_ms = started.elapsed().as_millis() as u64, "feed cycle timing");
             }
             Err(e) => tracing::error!(error = %e, "ingest cycle failed"),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+        if let Some(rx) = &mut heads {
+            rx.changed().await.context("head subscription task stopped")?;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+        }
     }
 }
 

@@ -70,7 +70,7 @@ docker compose run --rm mainnet mirror-pull https://some-host/feed
 ```
 
 Overrides go in a `.env` file next to `docker-compose.yml` (it is gitignored):
-`MAINNET_RPC_URL`, `MAINNET_RPC_FALLBACK`, `MAINNET_PORT`, `MAINNET_BIND`,
+`MAINNET_RPC_URL`, `MAINNET_RPC_FALLBACK`, `MAINNET_RPC_WS_URL`, `MAINNET_PORT`, `MAINNET_BIND`,
 `MAINNET_ALLOW_CLASS`, and the `SEPOLIA_*` equivalents, plus `RUST_LOG`. Every
 one of them is a wrapper over a flag the CLI already has; there is no
 compose-only configuration.
@@ -82,6 +82,15 @@ operation — both network profiles already carry every class hash their pool
 has ever run — and exists for the recovery path after an upgrade the profile
 does not know about yet, where the choice is between adding the class and
 letting the decoder go degraded.
+
+Production compose configures `STRK20_RPC_WS_URL`: new-head and reorg
+notifications from PublicNode wake ingestion immediately; reconnect also
+triggers catch-up from the persisted cursor. Notifications are wakeups, not
+trusted pool data. HTTP-only CLI deployments without this setting retain the
+explicitly logged polling compatibility mode (also used by deterministic RPC
+fixtures). Feed publication itself wakes SSE subscribers directly, without a
+file-polling task. Run offline repair commands with the server stopped, then
+restart it to publish and announce the repaired state.
 
 ## RPC endpoints, and what anchoring needs
 

@@ -19,7 +19,6 @@ pub const PADDING_BYTES: usize = 2048;
 pub const RETRY_MS: u64 = 15_000;
 /// §2.2 keepalive cadence, and §2.5's watchdog budget on the client side.
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
-const POLL: Duration = Duration::from_secs(1);
 /// Oversized artifacts use HTTP catch-up; SSE queues stay bounded.
 const MAX_INLINE: usize = 2 * 1024 * 1024;
 
@@ -62,20 +61,14 @@ impl LiveHub {
 
     /// Re-read the published files and publish what they say.
     ///
-    /// Called on the 1 s cadence AND at every connect, so the burst is the
-    /// state of the files right now rather than whatever the last tick saw. A
-    /// client that connects the instant after a cut must not be handed a
-    /// pre-cut burst and then have to wait a second for the correction.
+    /// The writer calls this immediately after publication and after a change
+    /// to verification status. Connecting clients also refresh their initial
+    /// burst. No timer sits between a committed feed and its subscribers.
     pub fn refresh(&self) {
-        let state = {
-            let mut src = self.source.lock().expect("live source");
-            let Source {
-                feed_dir,
-                db,
-                cache,
-            } = &mut *src;
-            read_state(feed_dir, db, cache)
-        };
+        let mut src = self.source.lock().expect("live source");
+        let Source { feed_dir, db, cache } = &mut *src;
+        let state = read_state(feed_dir, db, cache);
+        // Keep ordering across concurrent connects and writer notifications.
         self.publish(state);
     }
 
@@ -113,15 +106,6 @@ pub struct ConnectionGuard<'a> {
 impl Drop for ConnectionGuard<'_> {
     fn drop(&mut self) {
         self.hub.connections.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// One global watcher task. Reads the published files (and the DB only for
-/// `verify_root_failed`, which is not a published artifact) on a 1 s interval.
-pub async fn run_watcher(hub: Arc<LiveHub>) {
-    loop {
-        hub.refresh();
-        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -276,7 +260,7 @@ pub async fn stream_to(
         }
         match tokio::time::timeout(KEEPALIVE, rx.changed()).await {
             Ok(Ok(())) => {}
-            // the watcher is gone: nothing more can ever be announced
+            // the publisher is gone: nothing more can ever be announced
             Ok(Err(_)) => return,
             Err(_) => {
                 if send(&tx, ": ka\n\n".to_owned()).await.is_err() {

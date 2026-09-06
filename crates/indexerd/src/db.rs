@@ -4,7 +4,9 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use starknet_types_core::felt::Felt;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use strk20_feed::trie::CachedTrie;
 
 pub const SCHEMA_VERSION: i64 = 1;
 
@@ -164,6 +166,7 @@ pub struct EventRow {
 pub struct Db {
     pub conn: Connection,
     path: PathBuf,
+    root_cache: RefCell<CachedTrie>,
 }
 
 impl Db {
@@ -188,6 +191,7 @@ impl Db {
         Ok(Self {
             conn,
             path: path.to_owned(),
+            root_cache: RefCell::new(CachedTrie::default()),
         })
     }
 
@@ -526,6 +530,14 @@ impl Db {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows.into_iter().filter(|(_, v)| *v != Felt::ZERO).collect())
+    }
+
+    /// Reuse unchanged Patricia branches, but compare the COMPLETE current slot
+    /// set on every call. Height alone cannot invalidate a cache: repair may
+    /// replace writes at the same height, and a reorg may remove them entirely.
+    pub fn storage_root_at(&self, block: u64) -> Result<Felt> {
+        let slots = self.full_slot_set_as_of(block)?;
+        Ok(self.root_cache.borrow_mut().update(&slots)?)
     }
 
     pub fn events_of_block(&self, block: u64) -> Result<Vec<EventRow>> {

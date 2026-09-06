@@ -311,12 +311,16 @@ impl<'a> Cutter<'a> {
     /// full mirrored slot set as of `block` and compare with the proof served
     /// by the RPC for that block. Returns the anchor on success.
     pub async fn verify_root(&self, block: u64) -> Result<Anchor> {
-        let set = self.db.full_slot_set_as_of(block)?;
-        let local_root = strk20_feed::mpt::storage_root(&set);
+        let started = std::time::Instant::now();
+        let local_root = self.db.storage_root_at(block)?;
+        let root_ms = started.elapsed().as_millis() as u64;
+        let proof_started = std::time::Instant::now();
         let (proof, _raw) = self
             .bound_proof(block)
             .await
             .context("getStorageProof for verify-root")?;
+        tracing::info!(block, root_ms, proof_ms = proof_started.elapsed().as_millis() as u64,
+            "verify-root timing");
         let leaf = proof
             .contracts_proof
             .contract_leaves_data

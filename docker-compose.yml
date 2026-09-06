@@ -28,6 +28,7 @@ services:
     # sets nothing at all still gets a working mainnet instance.
     environment:
       STRK20_NETWORK: mainnet
+      STRK20_RPC_WS_URL: ${MAINNET_RPC_WS_URL:-wss://starknet-rpc.publicnode.com}
       STRK20_RPC_URL: ${MAINNET_RPC_URL:-https://rpc.starknet.lava.build}
       STRK20_RPC_FALLBACK: ${MAINNET_RPC_FALLBACK:-https://starknet.publicnode.com}
       RUST_LOG: ${RUST_LOG:-info}
@@ -72,6 +73,7 @@ services:
     # blocks and events only, no proofs at any height (LIVE-6).
     environment:
       STRK20_NETWORK: sepolia
+      STRK20_RPC_WS_URL: ${SEPOLIA_RPC_WS_URL:-wss://starknet-sepolia-rpc.publicnode.com}
       STRK20_RPC_URL: ${SEPOLIA_RPC_URL:-https://api.cartridge.gg/x/starknet/sepolia}
       STRK20_RPC_FALLBACK: ${SEPOLIA_RPC_FALLBACK:-https://starknet-sepolia-rpc.publicnode.com}
       RUST_LOG: ${RUST_LOG:-info}

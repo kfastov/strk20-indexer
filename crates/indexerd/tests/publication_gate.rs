@@ -527,3 +527,54 @@ async fn the_basis_probe_budget_is_spent_and_then_left_alone() {
          every height would otherwise be asked forever"
     );
 }
+
+#[test]
+fn cached_root_follows_same_height_repairs_and_rollbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open(&dir.path().join("root.db")).unwrap();
+    let assert_root = |db: &Db, height| {
+        let full = strk20_feed::mpt::storage_root(&db.full_slot_set_as_of(height).unwrap());
+        assert_eq!(db.storage_root_at(height).unwrap(), full);
+        full
+    };
+    db.insert_block_data(&block(1), &[(Felt::ONE, Felt::from(7))], &[], None, 1).unwrap();
+    let initial = assert_root(&db, 1);
+    db.insert_block_data(&block(2), &[(Felt::from(2), Felt::from(8))], &[], None, 2).unwrap();
+    let added = assert_root(&db, 2);
+    assert_ne!(initial, added);
+    // INSERT OR REPLACE at the SAME height removes the old block's writes.
+    db.insert_block_data(&block(2), &[(Felt::ONE, Felt::ZERO)], &[], None, 2).unwrap();
+    assert_eq!(assert_root(&db, 2), Felt::ZERO);
+    assert_eq!(assert_root(&db, 1), initial);
+    assert_eq!(assert_root(&db, 2), Felt::ZERO);
+    db.rollback_above(1).unwrap();
+    assert_eq!(assert_root(&db, 2), initial);
+    // A repair from a different connection must invalidate unchanged heights too.
+    let mut repair = db.reopen().unwrap();
+    repair.insert_block_data(&block(1), &[(Felt::ONE, Felt::from(99))], &[], None, 1).unwrap();
+    assert_ne!(assert_root(&db, 2), initial);
+}
+
+#[tokio::test]
+async fn publication_wakes_existing_subscribers_without_a_timer() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cfg) = gated_mirror(dir.path(), Some(ANCHOR_BLOCK));
+    let feed = dir.path().join("feed");
+    let hub = strk20_indexerd::live::LiveHub::new(feed.clone(), Arc::new(Mutex::new(db.reopen().unwrap())));
+    let mut rx = hub.subscribe();
+    let rpc = RpcClient::new("http://127.0.0.1:1/unused".into(), None);
+    let cutter = Cutter { db: &db, cfg: &cfg, rpc: &rpc, feed_dir: feed };
+    cutter.ensure_layout().unwrap();
+    cutter.regen_head().unwrap();
+    hub.refresh();
+    assert!(rx.has_changed().unwrap());
+    assert!(rx.borrow_and_update().head.is_some());
+    hub.refresh();
+    assert!(!rx.has_changed().unwrap(), "unchanged publication must not wake subscribers");
+    db.meta_set("verify_root_failed", "1").unwrap();
+    hub.refresh();
+    assert!(rx.has_changed().unwrap());
+    let status: serde_json::Value = serde_json::from_str(rx.borrow_and_update().status.as_ref().unwrap()).unwrap();
+    assert_eq!(status["verify_root_failed"], true);
+}

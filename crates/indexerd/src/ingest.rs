@@ -166,8 +166,10 @@ impl<'a> Ingestor<'a> {
         let mut out = CycleOutcome::default();
 
         // 1. finality poll
-        let latest = self.rpc.get_block(BlockRef::Latest).await?;
-        let l1 = self.rpc.get_block(BlockRef::L1Accepted).await?;
+        let (latest, l1) = tokio::try_join!(
+            self.rpc.get_block(BlockRef::Latest),
+            self.rpc.get_block(BlockRef::L1Accepted),
+        )?;
         out.head_number = latest.block_number;
         let persisted_l1: Option<u64> = self
             .db
