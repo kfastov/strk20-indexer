@@ -20,50 +20,50 @@ export class CheckpointSource {
   async acquire(
     block: number,
   ): Promise<{ checkpoint: Checkpoint; proof: string }> {
-    if (!this.chainChecked) {
-      const id = await this.net.rpc(this.opts.rpcUrl, "starknet_chainId", []);
-      const expected = `0x${[...this.profile.chainId].map((c) => c.charCodeAt(0).toString(16)).join("")}`;
-      if (typeof id !== "string" || hex(id) !== hex(expected))
-        throw new Error("CHAIN_MISMATCH: checkpoint RPC");
-      this.chainChecked = true;
-    }
-    const number = block;
-    const header = (await this.net.rpc(
-      this.opts.rpcUrl,
-      "starknet_getBlockWithTxHashes",
-      [{ block_number: number }],
-    )) as {
-      block_number: number;
-      block_hash: string;
-      new_root: string;
-      status: string;
-    };
+    // Fetch by the same height concurrently. Rust binds the proof's block hash
+    // and global roots to this independently trusted header, including reorgs.
+    const [header, proof] = await Promise.all([
+      this.net.rpc(this.opts.rpcUrl, "starknet_getBlockWithTxHashes", [
+        { block_number: block },
+      ]),
+      this.proof(block),
+      this.checkChain(),
+    ]) as [{ block_number: number; block_hash: string; new_root: string;
+      status: string }, string, void];
     if (
-      header.block_number !== number ||
+      header.block_number !== block ||
       !["ACCEPTED_ON_L1", "ACCEPTED_ON_L2"].includes(header.status)
     )
       throw new Error("CHECKPOINT_UNAVAILABLE: accepted block header required");
     const cp = {
       chain_id: this.profile.chainId,
       pool: hex(this.profile.pool),
-      block_number: number,
+      block_number: block,
       block_hash: header.block_hash,
       state_root: header.new_root,
     };
-    let proof: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    return { checkpoint: cp, proof };
+  }
+  private async checkChain(): Promise<void> {
+    if (this.chainChecked) return;
+    const id = await this.net.rpc(this.opts.rpcUrl, "starknet_chainId", []);
+    const expected = `0x${[...this.profile.chainId].map((c) => c.charCodeAt(0).toString(16)).join("")}`;
+    if (typeof id !== "string" || hex(id) !== hex(expected))
+      throw new Error("CHAIN_MISMATCH: checkpoint RPC");
+    this.chainChecked = true;
+  }
+  private async proof(block: number): Promise<string> {
+    for (let attempt = 0; ; attempt++) {
       try {
-        proof = await this.net.rpc(
+        return JSON.stringify(await this.net.rpc(
           this.opts.proofRpcUrl,
           "starknet_getStorageProof",
-          [{ block_hash: header.block_hash }, [], [hex(this.profile.pool)], []],
-        );
-        break;
+          [{ block_number: block }, [], [hex(this.profile.pool)], []],
+        ));
       } catch (e) {
         if (attempt === 2 || !/RPC_UNAVAILABLE: (42|24|-32603)/.test(String(e)))
           throw e;
       }
     }
-    return { checkpoint: cp, proof: JSON.stringify(proof) };
   }
 }

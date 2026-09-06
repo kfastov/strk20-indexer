@@ -79,7 +79,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
           result = doc("proof.json");
           (
             result as { global_roots: { block_hash: string } }
-          ).global_roots.block_hash = call.params[0].block_hash;
+          ).global_roots.block_hash = `0x${(0xb10c0000 + call.params[0].block_number).toString(16)}`;
           if (badProof)
             (
               result as { global_roots: { block_hash: string } }
