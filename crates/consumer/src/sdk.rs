@@ -135,6 +135,11 @@ pub fn channels<S: ConsumerStore>(
         let public = store
             .read_slot_as_of(&storage_slots::public_key(recipient), block)?
             .0;
+        // The SDK creates a self-channel during registration. Returning a
+        // placeholder for an unregistered recipient makes that channel collide.
+        if public == Felt::ZERO {
+            continue;
+        }
         let channel_key = compute_channel_key(owner, key, recipient, public);
         let marker = compute_channel_marker(&channel_key, owner, recipient, public);
         let exists = store

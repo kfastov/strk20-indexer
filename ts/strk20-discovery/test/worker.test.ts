@@ -281,6 +281,44 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   assert(spend, "the official builder must spend our discovered note");
   assert.equal(spend.input.channel_key, `__bigint__${note.witness.channelKey}`);
   assert.equal(spend.input.index, note.witness.nonce);
+
+  // A recipient without a registered public key must be absent, not a
+  // Channel(publicKey=0): the SDK inserts the self-channel when registering.
+  const fresh = 0x123456789abcn;
+  const freshChannels = await provider.discoverChannels(fresh, 1n, [fresh], {
+    blockIdentifier: 99,
+  });
+  assert(!freshChannels.channels.has(fresh));
+  assert.equal(
+    await provider.discoverRequirement(fresh, 1n, fresh, token, 99),
+    0,
+  );
+  const freshTransfers = createPrivateTransfers({
+    account: { address: `0x${fresh.toString(16)}`, signer: new Signer("0x1") },
+    viewingKeyProvider: { getViewingKey: async () => 1n },
+    poolContractAddress: genesis.pool,
+    discoveryProvider: provider.atBlock(99),
+    provingProvider: new ProvingServiceProofProvider(
+      "https://prover.invalid",
+      constants.StarknetChainId.SN_SEPOLIA,
+    ),
+    proofInvocationFactory: new MockProofInvocationFactory(),
+  });
+  const registration = await freshTransfers
+    .build({
+      autoRegister: true,
+      autoSetup: true,
+      autoDiscover: { notes: "refresh", channels: "refresh" },
+    })
+    .surplusTo(fresh)
+    .with(token, (builder) => builder.deposit({ amount: 10n }))
+    .createProofInvocation({ provingBlockId: 99 });
+  const registrationActions = JSON.parse(registration.invocation.calldata[2]!);
+  assert.equal(
+    registrationActions.filter((a: { type: string }) => a.type === "SetViewingKey")
+      .length,
+    1,
+  );
   await provider.close();
 
   // An actual epoch advance arrives entirely in SSE; only the independent
