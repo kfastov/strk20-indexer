@@ -2593,8 +2593,11 @@ async fn t22_one_closure_loop_attempt_repairs_an_eventless_divergence() {
     // Both halves must be observed: the loop RAN, and health came back. Waiting
     // on health alone would pass on the first poll, before the moved frontier
     // has given verify-root anything to disagree about.
+    // The log can advance after this health response was read. Require the
+    // response itself to show completion, not just the later log snapshot.
     let (last, heads) = poll_health(&client, port, &rpc, &indexer, 150, |v, log| {
         count_lines(log, "closure loop finished") >= 1 && v["status"] == "OK"
+            && v["mismatch_block"].is_null() && v["reason"].is_null()
     })
     .await;
 
