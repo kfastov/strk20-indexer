@@ -31,9 +31,12 @@ Deployment remains manual:
    `rsync -a --delete --delay-updates ts/demo/dist/ root@157.173.104.231:/var/www/strk20-demo/`.
    Check the hosted page and its assets. nginx needs no restart for this step.
 
-The 2026-09-06 deployment uses commit `3edda7a` (runtime code `6ac9748`). Backups
-are in `/root/strk20-deploy-20260906-3edda7a/`, including `SHA256SUMS`; the old
-image is `strk20-indexer:rollback-ed0b6d1`. Roll back that deployment by tagging
+The 2026-09-06 performance deployment runs backend `4bbef8a` and demo
+`66847ea`. Both services passed health and complete consumer checkpoint checks.
+Consistent volume backups and the previous demo are in
+`/root/strk20-deploy-20260906-single-pass/`, including `SHA256SUMS`; the saved
+image is `strk20-indexer:rollback-f386ee0`. The additional
+`demo-before-parallel-proof.tar.gz` archive contains demo `639d856`. Roll back that deployment by tagging
 the saved image as `strk20-indexer:latest` and running
 `docker compose up -d --no-build`. This does not require a rebuild or change
 volumes. Restore volumes only if data recovery is actually needed, with the

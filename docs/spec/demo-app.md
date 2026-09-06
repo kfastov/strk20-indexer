@@ -84,6 +84,68 @@ same deployed assets. In the 2.27 s run, restoring WASM state took 1.94 s.
 The <=2 s repeat-start target is therefore not yet reliably met by the hosted
 demo. The earlier empty-account numbers below do not establish that target.
 
+### Event-driven performance follow-up, 2026-09-06
+
+Backend `4bbef8a` removes production head polling, the one-second SSE file poll,
+repeated live-block ingestion and unchanged-branch rehashing. The entire slot
+set is still checked; silent state writes and rollback remain covered. The SDK
+waits on feed events for a requested bound, reuses staged public artifacts,
+prioritizes that checkpoint, fetches header/proof concurrently, and queues the
+post-SSE cache save behind already waiting reads (`66847ea`). No proof is skipped.
+
+A separate probe connected to PublicNode new-head WebSocket and the public SSE
+endpoint concurrently and matched first arrival of the same block number:
+
+| Deployment / network | Matched samples | Median | Min–max |
+|---|---:|---:|---:|
+| Before / Sepolia | 4 | 2,493 ms | 2,117–2,860 ms |
+| Event wake only / Sepolia | 15 | 621 ms | 438–2,248 ms |
+| Final backend / Sepolia | 17 | 243 ms | 221–806 ms |
+| Final backend / mainnet | 17 | 664 ms | 128–2,864 ms |
+
+These are short samples of matching block numbers, not transaction-to-discovery
+latency or an all-block percentile. Coalesced heads without an exact match are
+excluded. RPC sometimes returns `Block not found` for a just-announced block;
+the indexer catches up on a subsequent notification. HTTP `latest` also lagged
+WebSocket by one or two blocks, so the indexer now requests the announced height.
+After warming, server root calculation fell from the first mainnet calculation's
+12,559 ms to 337–393 ms; Sepolia roots took 45–74 ms. Full consumer checkpoint
+verification succeeded on both deployed feeds, including parallel proof retrieval
+at Sepolia 14634430 and mainnet 14446387.
+
+Browser measurements below use the same funded wallet after its withdrawal:
+current note/witness sets are empty and match, so this is read-path performance,
+not a new nonempty spend acceptance run. Both observers request the same block;
+the local cache and reference's fresh cursor differ as described above.
+
+| Backend / demo | Block | Local | Official | Local attempts |
+|---|---:|---:|---:|---:|
+| Before | 14632459 | 5.71 s | 0.83 s | 5 |
+| Event wake only | 14632698 | 0.54 s | 0.81 s | 1 |
+| Event wait client | 14632909 | 0.89 s | 0.42 s | 2 |
+| Event wait client | 14633155 | 4.58 s | 0.41 s | 2 |
+| Final backend / 639d856 | 14634289 | 1.90 s | 0.91 s | 1 |
+| Final backend / 639d856 | 14634312 | 2.06 s | 0.49 s | 1 |
+| Final backend / 639d856 | 14634325 | 1.24 s | 0.43 s | 1 |
+| Final backend / cb631d2 | 14634520 | 2.28 s | 0.41 s | 2 |
+| Final backend / 66847ea | 14634611 | 0.55 s | 0.44 s | 1 |
+| Final backend / 66847ea | 14634625 | 1.75 s | 0.42 s | 2 |
+| Final backend / 66847ea | 14634653 | 2.40 s | 0.40 s | 2 |
+| Final backend / 66847ea | 14634664 | 0.36 s | 0.40 s | 1 |
+
+Earlier labels saying “Page to restored result” measured initialization only,
+not navigation. The corrected metric includes document/scripts/Worker loading.
+After restarting browser control, three `639d856` loads measured 5.39, 2.37 and
+4.79 s navigation-to-restored-data (initialization 3.28, 1.19 and 3.14 s).
+The cache was 4,522,005 bytes; WASM restore took 1.42, 0.56 and 1.63 s. First loads
+of the next demo builds measured 2.20 s (`cb631d2`) and 4.55 s (`66847ea`), including
+changed script assets. Reloading the same `66847ea` assets then took 2.49 s
+(initialization 1.11 s, cache read 0.05 s, WASM restore 0.57 s, discovery 0.16 s).
+Initialization alone had also measured 0.09–0.17 s before
+these client changes: those values cannot be attributed to this optimization.
+The <=2 s navigation target and a stable advantage over the official path remain
+unproven. A single faster run does not establish either claim.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it

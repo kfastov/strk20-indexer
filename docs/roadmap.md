@@ -18,6 +18,13 @@ The current contracts are [consumer path](spec/consumer-path.md),
   fixture test; the proof/signature submission path is not executed in that test.
 - Full head/epoch SSE payloads, bounded queues and HTTP catch-up. The actual WASM
   Worker test verifies an epoch advance with no follow-up artifact GET.
+- Production block notifications trigger ingestion through WebSocket; publication
+  wakes SSE directly, and bounded discovery waits for a head event. Live state
+  updates are ingested once, including silent writes. Unchanged Patricia branches
+  reuse hashes; the complete slot set is still compared before verification.
+- Client checkpoint header and proof requests run concurrently at the same height.
+  Proof hashes and state commitments remain bound to the trusted header. Waiting
+  reads run before the cache save queued by an SSE update.
 - Browser wallet flow: create/backup/import, public funding, deploy, shield,
   local discovery, private transfer and withdraw. Heavy state work is in a Worker.
 - The hosted Sepolia flow completed with real STRK, proofs and transaction
@@ -32,11 +39,13 @@ The current contracts are [consumer path](spec/consumer-path.md),
 
 ## Resume here
 
-1. Fix measured performance gaps before claiming a speed win: hosted funded-wallet
-   reload reached 2.68 s (target <=2 s); local observation of a requested block
-   took 4.37–7.03 s versus 0.43–0.46 s for the official provider. Profile cache
-   restoration and the producer-to-consumer delay separately. Keep the complete
-   proof and spend checks; do not replace them with a cosmetic fast path.
+1. Continue the performance work without claiming a stable speed win. The event
+   path is deployed; Sepolia matched-block WS-to-SSE median fell from 2,493 ms
+   (4 samples) to 243 ms (17 samples). This excludes checkpoint verification and
+   discovery. Browser restart and comparison measurements, including regressions,
+   are recorded in [demo evidence](spec/demo-app.md). The <=2 s navigation-to-data
+   target is not yet reliably met. Remaining costs include WASM restoration,
+   client verification/queueing and upstream RPC availability for announced blocks.
 2. Verify the migrated lifecycle scripts with the user's funded flow. They now
    use our Node Worker host, private file cache and a common proving block. The
    Node integration test verifies real fixture state and restores discovered
