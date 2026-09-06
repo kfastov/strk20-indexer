@@ -146,6 +146,105 @@ these client changes: those values cannot be attributed to this optimization.
 The <=2 s navigation target and a stable advantage over the official path remain
 unproven. A single faster run does not establish either claim.
 
+### Discovery tail-latency diagnosis (2026-09-06)
+
+A 14-observation Node Worker trace used the deployed Sepolia feed, the actual
+SDK/WASM, public RPC, and an independent empty identity. It did not spend or
+reuse the funded browser wallet. Each observation fixed a block number before
+reading. Seven already-verified reads took 0–6 ms; these reused the exact
+checkpoint and are **not** fresh-verification benchmarks. Two fresh ready-feed
+reads took 240 and 429 ms. Five observations waited for the feed and took
+1,148–4,651 ms, including 538–3,837 ms inside the event-driven `waitForBlock`.
+No fixed retry backoff was used in those five cases. Across all 11 checkpoint
+acquisitions in the trace, network retrieval took 190–759 ms and local pool
+verification 28–49 ms. Across 14 reads, empty-note discovery took 0.05–4.41 ms.
+
+The 4,271 ms observation at block 14637928 decomposed as follows:
+
+| Critical-path part | Time |
+|---|---:|
+| Initial requests discover that the feed is behind | 279 ms |
+| Wait for a covering SSE publication | 3,329 ms |
+| Fetch the requested checkpoint header and proof concurrently | 622 ms |
+| Verify pool state | 30 ms |
+| Discover notes | <1 ms |
+
+The remaining roughly 10 ms covers scheduling and folding. A subsequent
+40.5 ms cache save was outside the observation. The foreground retry queued
+behind background verification of the **same requested block** and reused its
+result; there was no second proof acquisition on that retry.
+
+During the feed wait, server logs show `getBlockWithTxHashes` error 24 twice,
+then ingestion through block 14637930. The old event loop discarded the failed
+target and requested the newest notification each time. HTTP availability
+lagging WebSocket announcements could therefore prevent progress across
+several notifications even though earlier blocks were already available.
+A separate event-triggered 16-head probe confirmed this: Cartridge served
+13/16 newly announced blocks and PublicNode 12/16; both served the preceding
+announced block in all 15 applicable checks. Two new heads were absent from
+both providers. Merely switching providers cannot remove that availability gap.
+The preceding server-log sample also contained two `getStateUpdate` error-24
+failures, versus 157 header failures across both networks. The header fallback
+does not remove state-update/proof availability failures or ordinary RPC RTT.
+
+This also explains the earlier 243 ms matched-block SSE median: coalesced
+publications such as 14637930 covering a wait for 14637928 were excluded from
+that sample. It is not a percentile of all consumer waits.
+
+The ingestion correction tries the exact announced height first. Only when
+that header returns `Block not found` does it request HTTP `latest` once and
+process the available range in the same event cycle. No timer or repeated
+availability polling is added. A stale answer cannot move the stored frontier
+backward without a detected reorg; wrong numbered responses are still rejected.
+The regression test failed on the old implementation and checks progress
+across three consecutive unavailable announcements plus stale-head rejection.
+
+Backend `e553c2c` was activated after CI passed at `429f07d` (a test-only
+follow-up fixes a health/log snapshot race in the recovery acceptance test).
+The next 14-observation run used the same Worker harness and cache: six
+already-verified reads took 0–7 ms, three ready-feed reads 200–492 ms, and five
+feed-waiting reads 1,347–2,840 ms (713–2,410 ms waiting). These short, sequential
+samples do not establish a production percentile or isolate changing RPC RTT.
+
+The remaining 2,840 ms case at 14638767 is also traced. The producer received
+error 24, processed available 14638766 and finished that cycle at 10:55:29.472
+UTC. The client requested 14638767 at 10:55:29.997. Publication covering it
+arrived at 10:55:32.599, followed by a 199 ms checkpoint fetch and 30 ms local
+verification. The fallback prevents starvation of available earlier blocks,
+but a prematurely announced target still waits for another wakeup: the configured
+new-head subscription gives no separate signal when HTTP data becomes ready. This
+remaining delay must not be described as solved by the fallback.
+
+A further passive-WebSocket trace confirms the wakeup gap independently.
+PublicNode announced 14638815 at 10:56:48.890 UTC; the producer's HTTP request
+failed and its fallback cycle finished at 10:56:49.110 with head 14638814.
+The next WS announcements arrived at 10:56:52.598 and 10:56:52.629 (14638816
+and 14638817): a 3,708 ms gap followed by a 31 ms burst. SSE covering the
+requested 14638815 arrived at 10:56:52.849, 251 ms after the next notification.
+The waiting read took 2,859 ms: 305 ms before the bound error, 2,309 ms waiting,
+205 ms fetching the checkpoint and 35 ms verifying it. The producer was idle
+between events; neither a one-second SSE poll nor WASM computation caused this
+tail. Faster future recovery needs a data-ready event source or a bounded
+alternate RPC attempt on failure; adding another WebSocket transport alone
+does not supply that missing readiness signal.
+
+Demo `8d24318` exports observation start timestamps and per-retry reasons,
+failed-attempt durations and feed/backoff wait durations. These are also
+expandable inside the comparison result. Before the ingestion correction, the
+funded browser wallet's empty-note read at 14638198 took 1.33 s locally versus
+0.93 s officially: the failed attempt took 0.32 s and feed waiting 0.46 s.
+A separate 7.04 s one-attempt browser result overlapped local Rust compilation
+and browser-control timeouts. Its expanded activity includes 2.01 s local
+verification, 2.64 s discovery and 2.09 s persistence spans, as well as 2.51 s
+checkpoint retrieval. Activity includes background work, so these spans cannot
+be summed into the observation's duration. Local scheduling/load is a confounder;
+its precise contribution is not established and this result is not used to
+estimate deployment latency. Native Chrome UI access subsequently recovered
+control. Post-deployment reads at 14638945 and 14638969 rounded to 0.00 s local
+versus 1.15 and 0.44 s official, with matching notes and witnesses: the requested
+state was already verified by the subscription. These are cache-hit examples,
+not evidence of faster fresh checkpoint verification.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it

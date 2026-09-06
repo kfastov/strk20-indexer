@@ -46,6 +46,15 @@ The current contracts are [consumer path](spec/consumer-path.md),
    are recorded in [demo evidence](spec/demo-app.md). The <=2 s navigation-to-data
    target is not yet reliably met. Remaining costs include WASM restoration,
    client verification/queueing and upstream RPC availability for announced blocks.
+   The 2026-09-06 trace identifies a concrete amplifier: after error 24 the
+   producer chased newer unavailable announcements instead of processing the
+   available HTTP head. The deployed fallback fixes that starvation. A passive
+   WS trace still captured a 3.708 s notification gap after a premature head:
+   the producer has no HTTP-data-ready signal and waits for another event.
+   Next investigate a data-ready source or bounded alternate RPC acquisition,
+   and overlap requested checkpoint retrieval with feed waiting where possible.
+   See the causal breakdown in the demo evidence; the matched-head SSE median
+   excluded these coalesced slow cases.
 2. Verify the migrated lifecycle scripts with the user's funded flow. They now
    use our Node Worker host, private file cache and a common proving block. The
    Node integration test verifies real fixture state and restores discovered

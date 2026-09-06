@@ -31,12 +31,21 @@ Deployment remains manual:
    `rsync -a --delete --delay-updates ts/demo/dist/ root@157.173.104.231:/var/www/strk20-demo/`.
    Check the hosted page and its assets. nginx needs no restart for this step.
 
-The 2026-09-06 performance deployment runs backend `4bbef8a` and demo
-`66847ea`. Both services passed health and complete consumer checkpoint checks.
+The 2026-09-06 performance deployment now runs backend code `e553c2c`
+(image `c2909f49c573`, server checkout `429f07d`, whose only further change is
+a test race fix) and demo `8d24318`. CI passed at `429f07d`. Both services
+passed health and complete consumer checkpoint checks after activation: Sepolia
+14638746 and mainnet 14450663, both `rpc-verified` without verification failure.
+Consistent pre-activation volume archives, demo, nginx config and checksums are
+in `/root/strk20-deploy-20260906-head-availability/`; the rollback image is
+`strk20-indexer:rollback-4bbef8a`. Its `activated-at` records the switch.
+
+For the preceding `4bbef8a` deployment:
 Consistent volume backups and the previous demo are in
 `/root/strk20-deploy-20260906-single-pass/`, including `SHA256SUMS`; the saved
 image is `strk20-indexer:rollback-f386ee0`. The additional
-`demo-before-parallel-proof.tar.gz` archive contains demo `639d856`. Roll back that deployment by tagging
+`demo-before-parallel-proof.tar.gz` archive contains demo `639d856`;
+`demo-before-retry-trace.tar.gz` contains demo `66847ea`. Roll back a deployment by tagging
 the saved image as `strk20-indexer:latest` and running
 `docker compose up -d --no-build`. This does not require a rebuild or change
 volumes. Restore volumes only if data recovery is actually needed, with the
