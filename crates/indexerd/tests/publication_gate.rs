@@ -542,6 +542,12 @@ fn cached_root_follows_same_height_repairs_and_rollbacks() {
     db.insert_block_data(&block(2), &[(Felt::from(2), Felt::from(8))], &[], None, 2).unwrap();
     let added = assert_root(&db, 2);
     assert_ne!(initial, added);
+    // Historical reads cross already-present writes without a new DB revision.
+    assert_eq!(assert_root(&db, 1), initial);
+    assert_eq!(assert_root(&db, 2), added);
+    db.insert_block_data(&block(3), &[], &[], None, 3).unwrap();
+    assert_eq!(assert_root(&db, 3), added);
+    assert_eq!(assert_root(&db, 2), added);
     // INSERT OR REPLACE at the SAME height removes the old block's writes.
     db.insert_block_data(&block(2), &[(Felt::ONE, Felt::ZERO)], &[], None, 2).unwrap();
     assert_eq!(assert_root(&db, 2), Felt::ZERO);
@@ -552,7 +558,11 @@ fn cached_root_follows_same_height_repairs_and_rollbacks() {
     // A repair from a different connection must invalidate unchanged heights too.
     let mut repair = db.reopen().unwrap();
     repair.insert_block_data(&block(1), &[(Felt::ONE, Felt::from(99))], &[], None, 1).unwrap();
-    assert_ne!(assert_root(&db, 2), initial);
+    let repaired = assert_root(&db, 2);
+    assert_ne!(repaired, initial);
+    repair.conn.execute("UPDATE storage_log SET value = ?1 WHERE block = 1",
+        [strk20_indexerd::db::felt_blob(&Felt::from(100)).as_slice()]).unwrap();
+    assert_ne!(assert_root(&db, 2), repaired);
 }
 
 #[tokio::test]

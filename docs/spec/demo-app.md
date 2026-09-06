@@ -285,6 +285,44 @@ official 0.39 s, with matching notes and witnesses; this was another cached
 checkpoint, not a fresh-path speed claim. Browser tests use tab-scoped extension
 control and screenshots without activating the user's browser window.
 
+### Demand wakeup and remaining proof availability (2026-09-06)
+
+After `7e444be`, 20 further same-block VPS pairs produced local times of
+2–1,767 ms. The three feed-unavailable observations completed in 330, 335 and
+462 ms. The two slowest results (1,767 and 1,552 ms) instead exhausted fresh
+`getStorageProof` error-24 retries and incurred the benchmark's 1,000 ms
+transport backoff. The official API also returned HTTP 503 in those two cases,
+completing in 1,253 and 1,254 ms on its second attempt. Its other observations
+were 123–155 ms. These results do not establish that local fresh verification
+is always faster. Two of 26 separate subscription observations found the block
+already published before the PublicNode notification arrived.
+
+A 20-head proof probe queried Cartridge concurrently by both block number and
+hash: both forms succeeded on the same 14 heads and both refused the same six
+with error 24. Changing identifier form does not solve this observed lag.
+Other public Sepolia proof endpoints were unusable in this check: Lava v0.8/v0.9
+returned no available providers, dRPC did not expose the method, OnFinality's
+Sepolia host was unreachable, and Blast returned 403 announcing retirement.
+The public OnFinality mainnet WebSocket demanded an API key even for the first
+subscription. None is configured as a speculative fallback.
+
+`9e42967` acquires server proof and binding header concurrently. Observed
+Sepolia proof/binding time fell from about 195 ms to 97–99 ms while reorg and
+persistent-mismatch tests retained their distinct outcomes. Mainnet verification
+through the actual Node/WASM consumer succeeded at 14453734. That VPS restored
+24,114,460 bytes of saved state in 1,232 ms and caught up in a further roughly
+1.3 s; the saved state became available before catch-up. The preceding cold
+mainnet verification at 14453291 took 114.2 s. These CPU/hardware-dependent
+measurements are distinct from the browser's 0.26 s Sepolia restoration.
+
+Server root reuse is invalidated by transactional SQLite storage-write triggers,
+including direct updates, deletes, cascaded rollback and writes from another
+connection. A read snapshot also checks for stored writes between requested
+heights: historical traversal must not reuse a newer root merely because the
+DB revision did not change. Empty blocks can reuse the root; each block's proof
+is still acquired and bound separately. No feed format or client trust boundary
+changes.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it

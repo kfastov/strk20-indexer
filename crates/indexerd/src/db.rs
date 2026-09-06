@@ -32,6 +32,26 @@ CREATE TABLE IF NOT EXISTS storage_log (
   PRIMARY KEY (slot, block)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_log_block ON storage_log(block);
+-- Invalidation follows storage writes, including repair through another connection.
+
+CREATE TRIGGER IF NOT EXISTS storage_revision_insert AFTER INSERT ON storage_log
+BEGIN
+  INSERT INTO meta(key, value) VALUES ('storage_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS storage_revision_update AFTER UPDATE ON storage_log
+BEGIN
+  INSERT INTO meta(key, value) VALUES ('storage_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS storage_revision_delete AFTER DELETE ON storage_log
+BEGIN
+  INSERT INTO meta(key, value) VALUES ('storage_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+END;
+
 
 CREATE TABLE IF NOT EXISTS events (
   block       INTEGER NOT NULL REFERENCES blocks(number) ON DELETE CASCADE,
@@ -167,6 +187,7 @@ pub struct Db {
     pub conn: Connection,
     path: PathBuf,
     root_cache: RefCell<CachedTrie>,
+    root_state: RefCell<Option<(u64, u64, Felt)>>,
 }
 
 impl Db {
@@ -192,6 +213,7 @@ impl Db {
             conn,
             path: path.to_owned(),
             root_cache: RefCell::new(CachedTrie::default()),
+            root_state: RefCell::new(None),
         })
     }
 
@@ -532,12 +554,31 @@ impl Db {
         Ok(rows.into_iter().filter(|(_, v)| *v != Felt::ZERO).collect())
     }
 
-    /// Reuse unchanged Patricia branches, but compare the COMPLETE current slot
-    /// set on every call. Height alone cannot invalidate a cache: repair may
-    /// replace writes at the same height, and a reorg may remove them entirely.
+    /// Reuse a root only when no storage mutation or write between the two
+    /// queried heights can have changed it. The read transaction binds the
+    /// revision, range check and slot set to one SQLite snapshot, including
+    /// concurrent repair from another connection.
     pub fn storage_root_at(&self, block: u64) -> Result<Felt> {
+        let tx = self.conn.unchecked_transaction()?;
+        let revision: u64 = self.meta_get("storage_revision")?
+            .map(|s| s.parse()).transpose()?.unwrap_or(0);
+        let cached = *self.root_state.borrow();
+        if let Some((at, previous_revision, root)) = cached {
+            let changed: bool = revision != previous_revision || self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_log WHERE block > ?1 AND block <= ?2)",
+                params![at.min(block) as i64, at.max(block) as i64], |row| row.get(0),
+            )?;
+            if !changed {
+                *self.root_state.borrow_mut() = Some((block, revision, root));
+                tx.commit()?;
+                return Ok(root);
+            }
+        }
         let slots = self.full_slot_set_as_of(block)?;
-        Ok(self.root_cache.borrow_mut().update(&slots)?)
+        let root = self.root_cache.borrow_mut().update(&slots)?;
+        *self.root_state.borrow_mut() = Some((block, revision, root));
+        tx.commit()?;
+        Ok(root)
     }
 
     pub fn events_of_block(&self, block: u64) -> Result<Vec<EventRow>> {
