@@ -38,6 +38,7 @@ struct BindingFixture {
     flip_after: usize,
     headers: Arc<AtomicUsize>,
     proofs: Arc<AtomicUsize>,
+    rendezvous: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl BindingFixture {
@@ -46,6 +47,7 @@ impl BindingFixture {
             flip_after,
             headers: Arc::new(AtomicUsize::new(0)),
             proofs: Arc::new(AtomicUsize::new(0)),
+            rendezvous: None,
         }
     }
 
@@ -58,6 +60,7 @@ impl BindingFixture {
                 async move {
                     let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     let id = req["id"].clone();
+                    if let Some(barrier) = &me.rendezvous { barrier.wait().await; }
                     let result = match req["method"].as_str().unwrap_or_default() {
                         "starknet_getStorageProof" => {
                             me.proofs.fetch_add(1, Ordering::SeqCst);
@@ -193,4 +196,21 @@ async fn a_disagreement_that_survives_the_re_test_is_a_hard_error() {
         "the re-test is a single bounded retry, not a loop: an endpoint that always \
          disagrees must be given up on"
     );
+}
+
+/// Neither source may depend on the other responding first. A barrier makes
+/// sequential acquisition deadlock rather than relying on wall-clock speed.
+#[tokio::test]
+async fn proof_and_binding_header_are_in_flight_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("strk20.db")).unwrap();
+    let mut fixture = BindingFixture::new(0);
+    fixture.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+    let rpc = RpcClient::new(fixture.serve().await, None);
+    let cfg = cfg();
+    let cutter = Cutter { db: &db, rpc: &rpc, cfg: &cfg, feed_dir: dir.path().join("feed") };
+    tokio::time::timeout(std::time::Duration::from_secs(2), cutter.bound_proof(BLOCK))
+        .await.expect("proof and header must be requested concurrently").unwrap();
+    assert_eq!(fixture.headers.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.proofs.load(Ordering::SeqCst), 1);
 }

@@ -253,18 +253,15 @@ impl<'a> Cutter<'a> {
         const BINDING_ATTEMPTS: usize = 2;
         let mut last: Option<(Felt, Felt)> = None;
         for attempt in 0..BINDING_ATTEMPTS {
-            // Proof first: an endpoint that cannot serve one answers fast, and
-            // there is nothing to bind, so the header fetch is never spent
-            // on it.
-            let (proof, raw) = self
-                .rpc
-                .get_storage_proof(BlockRef::Number(block), &self.cfg.pool, &[])
-                .await?;
-            let header = self
-                .rpc
-                .get_block(BlockRef::Number(block))
-                .await
-                .with_context(|| format!("chain binding: header of block {block}"))?;
+            // Header and proof are independent inputs; neither request waits
+            // for the other. A mismatch still re-fetches BOTH below.
+            let ((proof, raw), header) = tokio::try_join!(
+                self.rpc.get_storage_proof(BlockRef::Number(block), &self.cfg.pool, &[]),
+                async {
+                    self.rpc.get_block(BlockRef::Number(block)).await
+                        .with_context(|| format!("chain binding: header of block {block}"))
+                },
+            )?;
             let chain_hash = crate::rpc::parse_felt(&header.block_hash)?;
             let claimed = proof
                 .global_roots
