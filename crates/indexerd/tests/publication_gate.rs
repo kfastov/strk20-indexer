@@ -618,3 +618,63 @@ async fn announced_height_is_fetched_explicitly_and_wrong_heights_are_rejected()
     assert_eq!(db.meta_get("head_number").unwrap().as_deref(), Some("10"));
     server.abort();
 }
+
+#[tokio::test]
+async fn unavailable_announcements_do_not_starve_available_blocks_or_regress_the_head() {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    let available = Arc::new(AtomicU64::new(10));
+    let head = available.clone();
+    let served = Arc::new(AtomicU64::new(10));
+    let router = axum::Router::new().route("/", axum::routing::post(
+        move |axum::Json(request): axum::Json<serde_json::Value>| {
+            let head = head.clone();
+            let served = served.clone();
+            async move {
+                let latest = head.load(Ordering::Relaxed);
+                served.fetch_max(latest, Ordering::Relaxed);
+                let result = match request["method"].as_str().unwrap() {
+                    "starknet_getBlockWithTxHashes" => {
+                        let number = match request["params"][0].as_str() {
+                            Some("latest") => latest,
+                            Some("l1_accepted") => 0,
+                            _ => request["params"][0]["block_number"].as_u64().unwrap(),
+                        };
+                        // 13 stays absent; stored block 12 remains addressable
+                        // even when a stale `latest` answer later says 11.
+                        if number > served.load(Ordering::Relaxed) {
+                            return axum::Json(serde_json::json!({"jsonrpc":"2.0", "id":request["id"],
+                                "error":{"code":24,"message":"Block not found"}}));
+                        }
+                        serde_json::json!({"block_number":number, "block_hash":format!("0x{number:x}"),
+                            "parent_hash":format!("0x{:x}",number.saturating_sub(1)),
+                            "timestamp":number,"status":"ACCEPTED_ON_L2","transactions":[]})
+                    }
+                    "starknet_getEvents" => serde_json::json!({"events":[]}),
+                    "starknet_getStateUpdate" => serde_json::json!({"state_diff":{}}),
+                    other => panic!("unexpected RPC {other}"),
+                };
+                axum::Json(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+            }
+        }
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rpc = RpcClient::new(format!("http://{}/", listener.local_addr().unwrap()), None);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open(&dir.path().join("head.db")).unwrap();
+    db.set_ingest_cursor(9).unwrap();
+    let config = cfg();
+    let mut ingest = strk20_indexerd::ingest::Ingestor {
+        db: &mut db, rpc: &rpc, cfg: &config, chunk_size: 1000, progress_secs: 0,
+    };
+    for number in 10..=12 {
+        available.store(number, Ordering::Relaxed);
+        let out = ingest.run_cycle_at(strk20_indexerd::rpc::BlockRef::Number(number + 1)).await.unwrap();
+        assert_eq!(out.head_number, number);
+        assert_eq!(ingest.db.ingest_cursor().unwrap(), Some(number));
+    }
+    available.store(11, Ordering::Relaxed);
+    assert!(ingest.run_cycle_at(strk20_indexerd::rpc::BlockRef::Number(13)).await.is_err());
+    assert_eq!(ingest.db.meta_get("head_number").unwrap().as_deref(), Some("12"));
+    server.abort();
+}

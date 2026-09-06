@@ -168,17 +168,38 @@ impl<'a> Ingestor<'a> {
 
     /// A subscription supplies the block number, never trusted state. Fetch
     /// the named header to avoid `latest` caches trailing the notification.
+    /// If HTTP cannot serve it yet, process its available head once instead
+    /// of starving ingestion by chasing a newer unavailable announcement.
     pub async fn run_cycle_at(&mut self, target: BlockRef) -> Result<CycleOutcome> {
         let mut out = CycleOutcome::default();
 
         // 1. finality poll
         let (latest, l1, reorg) = tokio::try_join!(
-            self.rpc.get_block(target),
+            async {
+                match self.rpc.get_block(target).await {
+                    Ok(header) => {
+                        if let BlockRef::Number(number) = target {
+                            anyhow::ensure!(header.block_number == number, "RPC returned another announced block");
+                        }
+                        Ok(header)
+                    }
+                    Err(e) if matches!(target, BlockRef::Number(_)) && RpcClient::is_block_not_found(&e) => {
+                        let header = self.rpc.get_block(BlockRef::Latest).await?;
+                        tracing::warn!(?target, available = header.block_number,
+                            "announced block unavailable; ingesting HTTP head");
+                        Ok(header)
+                    }
+                    Err(e) => Err(e),
+                }
+            },
             self.rpc.get_block(BlockRef::L1Accepted),
             self.detect_reorg(),
         )?;
-        if let BlockRef::Number(number) = target {
-            anyhow::ensure!(latest.block_number == number, "RPC returned another announced block");
+        if reorg.is_none() {
+            anyhow::ensure!(
+                self.db.ingest_cursor()?.is_none_or(|n| latest.block_number >= n),
+                "RPC head trails stored frontier without a reorg"
+            );
         }
         out.head_number = latest.block_number;
         let persisted_l1: Option<u64> = self
