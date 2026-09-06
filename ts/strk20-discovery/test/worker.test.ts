@@ -52,6 +52,7 @@ const key = (owner: (typeof owners)[number]) =>
 test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and checkpoint failure", async (t) => {
   let manifest = doc("manifest.json"),
     badProof = false;
+  let unavailableProofAt: number | undefined;
   const requests: { url: string; body: string }[] = [];
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
   let connected: (() => void) | undefined;
@@ -76,6 +77,9 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
             status: "ACCEPTED_ON_L2",
           };
         else if (call.method === "starknet_getStorageProof") {
+          if (call.params[0].block_number === unavailableProofAt)
+            return Response.json({ jsonrpc: "2.0", id: 1,
+              error: { code: 24, message: "Block not found" } });
           result = doc("proof.json");
           (
             result as { global_roots: { block_hash: string } }
@@ -338,6 +342,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       notify?.();
     },
   );
+  try {
   await live.init();
   await live.sync();
   await assert.rejects(() => live.sync(198), /BOUND_UNAVAILABLE/);
@@ -463,7 +468,25 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   assert.equal(live.info().verifiedAt, 199);
   assert(requests.some((r) => r.url.endsWith("/manifest.json")));
   assert(requests.some((r) => r.url.endsWith("/head.ndjson")));
-  await live.close();
+  // A foreground bound whose proof remains unavailable must not pin all
+  // subsequent background updates to that failed checkpoint forever.
+  unavailableProofAt = 200;
+  await assert.rejects(() => live.sync(200), /BOUND_UNAVAILABLE/);
+  const advance = async (height: number) => {
+    const hash = `0x${(0xb10c0000 + height).toString(16)}`;
+    const rows = new TextDecoder().decode(head).trim().split("\n").map((r) => JSON.parse(r));
+    Object.assign(rows[0], { head: height, head_hash: hash });
+    const queued = new Promise<void>((resolve) => { notify = resolve; });
+    send("head", { ...update, head: height, head_hash: hash, etag: `live-${height}`,
+      payload: rows.map((r) => JSON.stringify(r) + "\n").join("") });
+    await queued;
+    while (liveTasks.length) await liveTasks.shift()!();
+  };
+  await assert.rejects(() => advance(201), /RPC_UNAVAILABLE: 24/);
+  await advance(202);
+  assert.equal(live.info().verifiedAt, 202, "an unavailable old proof must not stall the live stream");
+  unavailableProofAt = undefined;
+
   for (const request of requests) {
     if (request.body) {
       const rpc = JSON.parse(request.body);
@@ -477,4 +500,5 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       assert(!request.body.includes("viewing_key"));
     }
   }
+  } finally { unavailableProofAt = undefined; await live.close(); }
 });

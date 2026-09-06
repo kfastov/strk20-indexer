@@ -158,9 +158,14 @@ export class WorkerRuntime {
       this.checkpoints.prepare(prepare);
     try {
       const state = await this.syncOnce(target);
-      if (state.verifiedAt === this.requestedBlock) this.requestedBlock = undefined;
+      if (block !== undefined || state.verifiedAt === this.requestedBlock)
+        this.requestedBlock = undefined;
       return state;
     } catch (error) {
+      // This is a scheduling hint, not a permanent bound on the live stream.
+      // Once a covering feed arrives, a failed proof must not pin later updates.
+      if (target === this.requestedBlock && !String(error).includes("BOUND_UNAVAILABLE"))
+        this.requestedBlock = undefined;
       if (block !== undefined && Number.isSafeInteger(block) && block >= 0
         && String(error).includes("BOUND_UNAVAILABLE: block not present"))
         this.requestedBlock = block;
