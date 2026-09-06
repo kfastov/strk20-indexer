@@ -86,7 +86,7 @@ for attempt in range(1, ATTEMPTS + 1):
         }
         st, r = req(conn, "POST", "/faucet/request", body)
         print(f"attempt {attempt}: request {st} {json.dumps(r)[:200]}")
-        if isinstance(r, dict) and r.get("status") == "success":
+        if isinstance(r, dict) and r.get("status") in ("success", "queued"):
             rid = r["data"]["requestId"]
             for _ in range(40):
                 time.sleep(5)
