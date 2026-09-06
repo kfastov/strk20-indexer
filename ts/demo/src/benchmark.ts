@@ -6,6 +6,7 @@ import type { Wallet } from "./wallet.ts";
 import { NETWORKS } from "./network.ts";
 
 type Notes = Awaited<ReturnType<DiscoveryProviderInterface["discoverNotes"]>>;
+type NotesProvider = Pick<DiscoveryProviderInterface, "discoverNotes">;
 export interface Observation {
   source: "Local" | "Official";
   block: number;
@@ -21,7 +22,7 @@ export interface Comparison {
 }
 export async function observeAt(
   wallet: Wallet,
-  local: DiscoveryProviderInterface,
+  local: NotesProvider,
   block: number,
   compare: boolean,
   onUpdate: (result: Comparison) => void,
@@ -34,7 +35,7 @@ export async function observeAt(
   };
   const observe = async (
     source: Observation["source"],
-    provider: DiscoveryProviderInterface,
+    provider: NotesProvider,
   ): Promise<Notes> => {
     const started = performance.now();
     let attempts = 0;
@@ -104,7 +105,7 @@ function signature(result: Notes): string {
     .flatMap(([token, notes]) =>
       notes.map(
         (note) =>
-          `${token}:${note.id}:${note.amount}:${note.witness.channelKey}:${note.witness.nonce}:${note.witness.r}`,
+          `${token}:${BigInt(note.id)}:${note.amount}:${note.witness.channelKey}:${note.witness.nonce}:${note.witness.r}`,
       ),
     )
     .sort()
