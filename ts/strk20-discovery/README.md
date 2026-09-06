@@ -100,7 +100,13 @@ SSE carries complete head and epoch payloads. The same decoder handles HTTP catc
 following a gap or oversized event. Routine stream updates need no GET for their
 data; independent checkpoint RPC requests are still necessary. Queues are bounded.
 Explicit HTTP catch-up revalidates the mutable manifest instead of waiting for
-the browser's cached copy to expire.
+the browser's cached copy to expire. Bounded reads reuse already staged artifacts
+but still verify their independent checkpoint. `await discovery.waitForBlock(B)`
+waits for an advertised SSE head at or above B (120-second timeout, cancelled on
+close); it is an availability hint, not a verification result. Use a subsequent
+`discoverNotes(..., { blockIdentifier: B })` to obtain verified notes. A foreground
+read waiting for B takes priority over background checkpoint selection, so the
+same update does not trigger proofs for two different blocks.
 
 ## Checks
 

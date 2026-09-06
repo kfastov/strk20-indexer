@@ -214,8 +214,7 @@ async function publicState(): Promise<void> {
     transactions.deployed(),
   ]);
 }
-async function initialize(): Promise<void> {
-  const start = performance.now();
+async function initialize(pageLoad = false): Promise<void> {
   await operations.run(
     wallet ? "Restore wallet and discovery" : "Initialize discovery",
     async () => {
@@ -270,10 +269,8 @@ async function initialize(): Promise<void> {
           })
         : undefined;
       notes = await account?.restore();
-      operations.detail(
-        "Page to restored discovery result",
-        performance.now() - start,
-      );
+      if (pageLoad)
+        operations.detail("Navigation to restored discovery result", performance.now());
       transactions = wallet
         ? new Transactions(wallet, provider, operations)
         : undefined;
@@ -430,5 +427,5 @@ element("metrics").onclick = () =>
   );
 void run(async () => {
   wallet = await loadWallet(network);
-  await initialize();
+  await initialize(true);
 });
