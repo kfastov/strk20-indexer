@@ -285,14 +285,18 @@ impl RpcClient {
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        self.call_at(
-            self.active_index(),
-            method,
-            &params,
-            true,
-            TRANSPORT_ATTEMPTS,
-        )
-        .await
+        let result = self.call_at(
+            self.active_index(), method, &params, true, TRANSPORT_ATTEMPTS,
+        ).await;
+        match result {
+            Err(e) if is_pruned_history(&e) && self.endpoints.len() > 1 => {
+                // Route this historical read to the other source without
+                // moving ordinary live requests away from their endpoint.
+                self.call_at((self.active_index() + 1) % self.endpoints.len(),
+                    method, &params, false, TRANSPORT_ATTEMPTS).await
+            }
+            other => other,
+        }
     }
 
     /// One JSON-RPC call against endpoint `idx`, with three independent
@@ -361,7 +365,10 @@ impl RpcClient {
                             // JSON-RPC level errors are not transport failures.
                             self.consecutive_failures.store(0, Ordering::Relaxed);
                             let e = anyhow!("rpc error from {method}: {err}");
-                            if !is_pruned_history(&e) {
+                            if !is_pruned_history(&e)
+                                || (allow_failover && self.endpoints.len() > 1) {
+                                // `call` can try another source immediately;
+                                // a lone endpoint retains bounded routing retries.
                                 return Err(e);
                             }
                             if capability_left == 0 {
@@ -669,6 +676,25 @@ mod tests {
         let text = format!("{err:#}");
         assert!(text.contains("has been pruned"), "{text}");
         assert!(text.contains("13108361"), "the provider's message must survive: {text}");
+    }
+
+    #[tokio::test]
+    async fn archived_reads_use_fallback_without_switching_live_requests() {
+        let (primary, primary_hits) = serve_json(json!({"jsonrpc":"2.0","id":1,
+            "error":serde_json::from_str::<Value>(PRUNED).unwrap()})).await;
+        let (archive, hits) = serve_json(json!({"jsonrpc":"2.0","id":1,
+            "result":{"events":[],"continuation_token":null}})).await;
+        let client = RpcClient::new(primary.clone(), Some(archive));
+        client.get_events(&Felt::ONE, 1, BlockRef::Number(2), 100).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(client.active_endpoint(), primary);
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 1, "try the archive without a timer");
+        let (semantic, _) = serve_json(json!({"jsonrpc":"2.0","id":1,
+            "error":{"code":24,"message":"Block not found"}})).await;
+        let (other, hits) = serve_json(json!({"jsonrpc":"2.0","id":1,"result":{}})).await;
+        assert!(RpcClient::new(semantic, Some(other))
+            .get_block(BlockRef::Number(2)).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "semantic errors are not capability failover");
     }
 
     /// Serve `body` (a JSON-RPC response) on every POST, counting hits.
