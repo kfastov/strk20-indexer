@@ -56,3 +56,23 @@ test("a prepared checkpoint is shared and a superseded request is cancelled", as
   assert.equal((await source.acquire(124)).checkpoint.block_number, 124);
   assert.deepEqual(headers, [123, 124], "no duplicate acquisition or unbounded pending work");
 });
+
+test("new-head refusal retries are immediate, bounded and stay on the trusted endpoint", async (t) => {
+  const profile = resolveProfile("sepolia");
+  const net = new PublicTransport("https://feed.test", () => {});
+  let headers = 0, failures = 2;
+  t.mock.method(net, "rpc", async (url: string, method: string) => {
+    if (method === "starknet_chainId") return `0x${Buffer.from(profile.chainId).toString("hex")}`;
+    if (method === "starknet_getStorageProof") return {};
+    assert.equal(url, "https://header.test");
+    if (++headers <= failures) throw new Error("RPC_UNAVAILABLE: 24 Block not found");
+    return { block_number: 123, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
+  });
+  const opts = { network: "sepolia" as const, feedUrl: "https://feed.test",
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" };
+  assert.equal((await new CheckpointSource(net, opts, profile).acquire(123)).checkpoint.block_number, 123);
+  assert.equal(headers, 3);
+  headers = 0; failures = 10;
+  await assert.rejects(new CheckpointSource(net, opts, profile).acquire(123), /RPC_UNAVAILABLE: 24/);
+  assert.equal(headers, 3);
+});

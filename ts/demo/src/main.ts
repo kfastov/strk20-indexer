@@ -38,7 +38,8 @@ let info: EngineInfo | undefined,
   balance = 0n,
   deployed = false,
   busy = false,
-  error = "";
+  error = "",
+  backgroundError = "";
 let observedTransaction: string | undefined;
 const comparisons: Comparison[] = [];
 const operations = new Operations(() => {
@@ -189,8 +190,8 @@ function render(): void {
       ? `Pool state verified at block ${info.checkpoint.block_number}, against an accepted Starknet RPC header. Cached notes can be older than the current chain head.`
       : "No state verified yet.",
   );
-  element("error").hidden = !error;
-  text("error", error);
+  element("error").hidden = !(error || backgroundError);
+  text("error", error || backgroundError);
 }
 async function run(work: () => Promise<void>): Promise<void> {
   if (busy) return;
@@ -218,6 +219,7 @@ async function initialize(pageLoad = false): Promise<void> {
   await operations.run(
     wallet ? "Restore wallet and discovery" : "Initialize discovery",
     async () => {
+      backgroundError = "";
       const previous = provider;
       provider = undefined;
       account = undefined;
@@ -234,6 +236,7 @@ async function initialize(pageLoad = false): Promise<void> {
             operations.detail(event.value.name, event.value.ms, event.value.bytes);
           if (event.event === "state") {
             info = event.value;
+            backgroundError = "";
             render();
             // The stream updates pool state; discover this account locally
             // after background updates, without another network round trip.
@@ -244,19 +247,20 @@ async function initialize(pageLoad = false): Promise<void> {
                 .then((found) => {
                   if (account === current) {
                     notes = found;
+                    backgroundError = "";
                     render();
                   }
                 })
                 .catch((cause: unknown) => {
                   if (account === current) {
-                    error = String(cause);
+                    backgroundError = String(cause);
                     render();
                   }
                 });
             }
           }
           if (event.event === "error") {
-            error = event.value;
+            backgroundError = event.value;
             render();
           }
         },
