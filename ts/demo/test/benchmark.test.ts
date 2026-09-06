@@ -70,4 +70,8 @@ test("local feed lag waits for subscription readiness instead of a retry timer",
   await observeAt(newWallet("sepolia"), local, 99, false, (value) => { comparison = value; });
   assert.equal(waits, 1);
   assert.equal(comparison?.rows[0]?.attempts, 2);
+  const retry = comparison?.rows[0]?.retries[0];
+  assert.equal(retry?.waitFor, "feed");
+  assert.match(retry!.error, /BOUND_UNAVAILABLE/);
+  assert(retry!.waitMs >= 0 && retry!.attemptMs >= 0);
 });

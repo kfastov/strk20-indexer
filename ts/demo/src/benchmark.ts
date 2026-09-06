@@ -14,6 +14,8 @@ export interface Observation {
   block: number;
   ms: number;
   attempts: number;
+  startedAt: number;
+  retries: { error: string; attemptMs: number; waitMs: number; waitFor: "feed" | "backoff" }[];
   error?: string;
 }
 export interface Comparison {
@@ -40,10 +42,13 @@ export async function observeAt(
     provider: NotesProvider,
   ): Promise<Notes> => {
     const started = performance.now();
+    const startedAt = Date.now();
+    const retries: Observation["retries"] = [];
     let attempts = 0;
     try {
       for (;;) {
         attempts++;
+        const attemptStarted = performance.now();
         try {
           const found = await provider.discoverNotes(
             BigInt(wallet.address),
@@ -56,7 +61,7 @@ export async function observeAt(
             source,
             block,
             ms: performance.now() - started,
-            attempts,
+            attempts, startedAt, retries,
           });
           onUpdate(result);
           return found;
@@ -68,12 +73,16 @@ export async function observeAt(
             )
           )
             throw error;
-          if (provider.waitForBlock && /BOUND_UNAVAILABLE/.test(String(error)))
-            await provider.waitForBlock(block);
+          const attemptMs = performance.now() - attemptStarted;
+          const waitStarted = performance.now();
+          const waitFor = provider.waitForBlock && /BOUND_UNAVAILABLE/.test(String(error)) ? "feed" : "backoff";
+          if (waitFor === "feed")
+            await provider.waitForBlock!(block);
           else
             // Reference API and transient transport failures have no readiness
             // subscription. This backoff is not used for our feed availability.
             await new Promise((resolve) => setTimeout(resolve, 1000));
+          retries.push({ error: String(error), attemptMs, waitMs: performance.now() - waitStarted, waitFor });
         }
       }
     } catch (error) {
@@ -81,7 +90,7 @@ export async function observeAt(
         source,
         block,
         ms: performance.now() - started,
-        attempts,
+        attempts, startedAt, retries,
         error: String(error),
       });
       onUpdate(result);

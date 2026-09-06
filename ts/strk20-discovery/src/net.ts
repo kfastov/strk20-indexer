@@ -44,7 +44,7 @@ export class PublicTransport {
     };
     if (json.error)
       throw new Error(
-        `RPC_UNAVAILABLE: ${json.error.code} ${json.error.message}`,
+        `RPC_UNAVAILABLE: ${json.error.code} ${json.error.message} [${method}]`,
       );
     if (json.result === undefined)
       throw new Error("RPC_UNAVAILABLE: missing result");

@@ -302,7 +302,17 @@ async function discover(): Promise<void> {
             const line = document.createElement("p");
             line.className = "benchmark-row";
             line.textContent = `${row.source}: ${(row.ms / 1000).toFixed(2)} s · block ${row.block} · ${row.attempts} attempt(s)${row.error ? ` · Failed: ${row.error}` : ""}`;
-            return line;
+            if (!row.retries.length) return line;
+            const details = document.createElement("details");
+            const summary = document.createElement("summary");
+            summary.append(line);
+            details.append(summary);
+            for (const retry of row.retries) {
+              const item = document.createElement("p");
+              item.textContent = `${retry.error}: attempt ${(retry.attemptMs / 1000).toFixed(2)} s; ${retry.waitFor === "feed" ? "waiting for feed" : "retry backoff"} ${(retry.waitMs / 1000).toFixed(2)} s`;
+              details.append(item);
+            }
+            return details;
           }),
         );
         if (result.equal !== undefined) {
