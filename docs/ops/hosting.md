@@ -27,39 +27,65 @@ Deployment remains manual:
 4. `docker compose up -d --no-build`. Check both local and public health, head
    progress, logs, metrics and a complete consumer checkpoint verification.
    Verify full SSE payloads through nginx, not just a successful connection.
-5. Build the demo locally with `npm --prefix ts run build`, then publish with
+5. If Rust consumer/WASM code changed, first run `wasm-pack build --release
+   --target web --out-dir pkg --out-name strk20_engine` in `crates/wasm`.
+   The npm build copies the existing WASM; it does not compile Rust. Build the
+   demo locally with `npm --prefix ts run build`, then publish with
    `rsync -a --delete --delay-updates ts/demo/dist/ root@157.173.104.231:/var/www/strk20-demo/`.
    Check the hosted page and its assets. nginx needs no restart for this step.
 
-The 2026-09-06 performance deployment now runs backend code `e553c2c`
-(image `c2909f49c573`, server checkout `429f07d`, whose only further change is
-a test race fix) and demo `8d24318`. CI passed at `429f07d`. Both services
-passed health and complete consumer checkpoint checks after activation: Sepolia
-14638746 and mainnet 14450663, both `rpc-verified` without verification failure.
-Consistent pre-activation volume archives, demo, nginx config and checksums are
-in `/root/strk20-deploy-20260906-head-availability/`; the rollback image is
-`strk20-indexer:rollback-4bbef8a`. Its `activated-at` records the switch.
+The 2026-09-06 deployment runs backend `1dbd6be`, image
+`fe756d5309d30bff2b3ed64d5bdc0b090789f3b95bbf0a0ec5cfd471643d1b81`.
+The demo runs `6c2fdfa` (foreground queue priority); both versions passed CI.
+Every hosted demo file was compared byte-for-byte with the local release,
+including its Worker and WASM. `demo-before-priority.tar.gz` in the backup
+directory below preserves demo `1dbd6be`; `demo-priority-activated-at` records
+this later static-only publication.
 
-For the preceding `4bbef8a` deployment:
-Consistent volume backups and the previous demo are in
-`/root/strk20-deploy-20260906-single-pass/`, including `SHA256SUMS`; the saved
-image is `strk20-indexer:rollback-f386ee0`. The additional
-`demo-before-parallel-proof.tar.gz` archive contains demo `639d856`;
-`demo-before-retry-trace.tar.gz` contains demo `66847ea`. Roll back a deployment by tagging
-the saved image as `strk20-indexer:latest` and running
-`docker compose up -d --no-build`. This does not require a rebuild or change
-volumes. Restore volumes only if data recovery is actually needed, with the
-containers stopped. Restore the demo from its matching archive separately.
+After activation, the actual Node/WASM consumer independently
+verified Sepolia `14643219` and mainnet `14455072`, both `rpc-verified` with
+`verificationFailed: false`. Both public health endpoints reported OK and
+heads advanced. Public HTTPS SSE delivered complete epoch and head payloads.
 
-Do not interpret health alone as proof of upstream RPC quality: after this
-deployment, both heads advanced without a verification mismatch, but
-`strk20_l1_answer_rejected_total` and logs showed regressing L1-height answers
-from upstream. The indexer retained the previously recorded height. The client
-checkpoint mode verifies accepted Starknet state and does not claim L1 finality.
-Post-deployment checks through the shared Node/WASM consumer returned
-`rpc-verified` at Sepolia block `14630316` and mainnet block `14442288`, each
-with `verificationFailed: false`. Public HTTPS health checks also returned
-`OK` for both networks.
+The current public `.env` overrides are:
+
+```dotenv
+MAINNET_RPC_URL=https://starknet-rpc.publicnode.com
+MAINNET_RPC_FALLBACK=https://rpc.starknet.lava.build
+```
+
+Mainnet ordinary live RPC reads use PublicNode. Proof capability selection
+prefers endpoints that have served proofs, allowing Lava to serve proofs
+without becoming the ordinary live RPC. A pruned-history response can also
+route that individual historical read to the archive without changing the
+active live endpoint. Sepolia retains Cartridge with PublicNode fallback.
+CLI archival defaults are unchanged. These are method/capability roles, not
+a claim that either endpoint is always fastest or freshest.
+
+Consistent pre-activation volumes, demo, nginx, `.env` and checksums are in
+`/root/strk20-deploy-20260906-watchdog-recovery/`; `activated-at` records the
+switch. The rollback image is `strk20-indexer:rollback-0c7a33e` and the backed-up
+demo is `9e42967`. Earlier complete rollback points remain in
+`/root/strk20-deploy-20260906-root-reuse/` (rollback `9e42967`, prior `.env`
+absence recorded), `/root/strk20-deploy-20260906-proof-parallel/` (rollback
+`7e444be`) and `/root/strk20-deploy-20260906-demand/` (rollback `778849f`).
+
+Roll back by tagging the saved image as `strk20-indexer:latest` and running
+`docker compose up -d --no-build`; restore the matching `.env` separately when
+required. Restore volumes only if data recovery is needed, with containers
+stopped. Restore the demo from its matching archive separately. Backend and
+demo source versions may differ because a client-only fix requires no image
+rebuild.
+
+The first Sepolia WebSocket connection after this activation again failed to
+acknowledge subscription. It now timed out after two seconds and reconnected
+successfully, rather than waiting the former sixty seconds. Transport pings
+cannot indefinitely hide a missing subscription or a stalled head stream.
+The header liveness deadline is ten seconds; reconnection remains a recovery
+path, not a block-polling loop. Mainnet still logged intermittent unavailable
+proof checks, followed by successful checks on later blocks. Health alone does
+not establish proof-provider availability or L1 finality. Client checkpoint mode verifies accepted Starknet
+state, not Ethereum finalization.
 
 ## Run it
 
@@ -114,7 +140,8 @@ published snapshot depend on that one method.
 
 Two rules follow, both already enforced in code (§12 B1/B4, LIVE-6):
 
-- A proof refusal is **retried on the same endpoint**, not failed over. On a
+- A proof refusal is **retried on the same endpoint** within its bounded
+  budget before trying the remaining proof endpoints. On a
   load-balanced pool only some backends carry archive tries, so a single
   refusal means "this backend cannot", not "this block cannot".
 - A proof refusal **never moves the active endpoint**. Failing a proof over
@@ -162,7 +189,8 @@ for i in $(seq 1 10); do
 done
 ```
 
-A usable endpoint does not need a high hit rate, it needs a non-zero one.
+For bounded archival retries, occasional successful proofs can be sufficient.
+A low hit rate is not sufficient evidence of usable live discovery latency.
 Measured against the mainnet default `rpc.starknet.lava.build` on 2026-09-01,
 twelve attempts per block, head at 14,168,818:
 

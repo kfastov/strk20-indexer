@@ -323,6 +323,59 @@ DB revision did not change. Empty blocks can reuse the root; each block's proof
 is still acquired and bound separately. No feed format or client trust boundary
 changes.
 
+### Subscription recovery and foreground scheduling (2026-09-06)
+
+A live startup reproduced an open WebSocket that never acknowledged its
+subscription: ingestion was only awakened again by a reader. The former
+60-second inactivity wait allowed the published head to fall behind. An
+absolute two-second ACK deadline and ten-second head deadline now bound these
+states, independent of ping traffic. On deployment the ACK failure recurred
+and recovered through reconnect within seconds. This does not remove delays
+before the upstream source publishes its notification.
+
+A failed requested checkpoint no longer pins future SSE verification to an
+unavailable old block. This matters with limited-history proof services: in
+one concurrent Cartridge probe, distances 0–16 behind its own head returned
+proofs while distances 32–512 returned error 42. This is one observed window,
+not a universal retention guarantee. No working alternative public Sepolia
+proof service was established by the probes above.
+
+After backend `1dbd6be`, two 20-pair VPS series completed without a local
+one-second transport backoff. Local ranges were 1–396 and 2–643 ms; these
+include cached reads. The second series exposed queued background work ahead
+of foreground reads: its 593 ms case included three verification spans and a
+114 ms save; another 643 ms case included a 345 ms proof wait and two
+verification spans. Its 628 ms case combined waiting for feed publication,
+an initial proof refusal and recovery. The official API returned HTTP 503 in
+that last case and completed in 1,252 ms after the harness's one-second retry.
+
+The worker now keeps foreground and background queues. State mutations remain
+serialized; waiting client requests precede the next coalesced SSE update or
+cache write. An active operation still completes before another starts. A
+real-WASM regression pauses the current verification, queues an SSE head and
+then a foreground read: the old order requested proofs for 98,99,97, whereas
+the corrected order serves 98,97 first. The test owns its Worker host rather
+than replacing global handlers.
+
+A subsequent 20-pair VPS series with this scheduling change produced local
+1–422 ms (fresh work 203–422 ms, cached 1–3 ms), versus official 122–153 ms.
+Two local cases waited for an SSE update and completed in 365 and 385 ms.
+These short public-network samples do not establish a latency ceiling or
+that fresh independent verification beats the official API. Benchmarks use
+the same requested block and actual SDK/WASM on the VPS with an empty test
+identity; cached local state and uncached official responses are reported
+separately. They are not funded-transaction discovery measurements.
+
+Mainnet restored 24,116,066 bytes in 1,255 ms, then independently verified
+14455072 with 213 ms checkpoint wait and 1,066 ms apply time. Sepolia restored
+4,536,620 bytes in 172 ms and independently verified 14643219. Startup restore,
+fresh catch-up and cold full verification remain different measurements.
+
+An experiment sharing immutable trie structures was discarded: measured
+steady verification medians of roughly 97 versus 92 ms did not establish a
+worthwhile end-to-end improvement. The deployed WASM uses the original
+representation, rebuilt from committed Rust source.
+
 ### Earlier state-only measurements
 
 The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it
