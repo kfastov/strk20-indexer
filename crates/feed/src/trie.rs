@@ -269,7 +269,7 @@ mod tests {
             for _ in 0..8 {
                 rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let key = Felt::from((rng >> 32) % 128);
-                if rng % 4 == 0 {
+                if rng.is_multiple_of(4) {
                     slots.remove(&key);
                 } else {
                     slots.insert(key, Felt::from(rng));
