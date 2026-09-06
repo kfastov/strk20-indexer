@@ -39,6 +39,7 @@ let info: EngineInfo | undefined,
   deployed = false,
   busy = false,
   error = "";
+let observedTransaction: string | undefined;
 const comparisons: Comparison[] = [];
 const operations = new Operations(() => {
   renderOperations(operations.entries);
@@ -48,6 +49,12 @@ mount(network);
 const text = (id: string, value: string) => {
   element(id).textContent = value;
 };
+function latestPrivateTransaction() {
+  return Object.entries(wallet?.completed ?? {})
+    .filter(([action]) => action !== "deploy")
+    .map(([, record]) => record)
+    .sort((a, b) => b.block - a.block)[0];
+}
 function step(): {
   label: string;
   description: string;
@@ -93,14 +100,8 @@ function step(): {
             "Export a backup, then send a small amount of STRK to the address below. Keep enough public STRK for transaction fees.",
           action: "fund",
         };
-  const records = Object.entries(wallet.completed).filter(
-    ([action]) => action !== "deploy",
-  ) as [Action, { hash: string; block: number }][];
-  const latest = records.sort((a, b) => b[1].block - a[1].block)[0];
-  if (
-    latest &&
-    (typeof notes?.timestamp !== "number" || notes.timestamp < latest[1].block)
-  )
+  const latest = latestPrivateTransaction();
+  if (latest && observedTransaction !== latest.hash)
     return {
       label: "Discover transaction",
       description:
@@ -286,7 +287,11 @@ async function initialize(): Promise<void> {
 async function discover(): Promise<void> {
   if (!wallet || !provider || !transactions) return;
   await operations.run("Discover transaction", async () => {
-    const block = await transactions!.rpc.getBlockNumber();
+    const latest = latestPrivateTransaction();
+    const block = Math.max(
+      await transactions!.rpc.getBlockNumber(),
+      latest?.block ?? 0,
+    );
     let comparison: Comparison | undefined;
     notes = await observeAt(
       wallet!,
@@ -313,6 +318,9 @@ async function discover(): Promise<void> {
       },
     );
     if (comparison) comparisons.push(comparison);
+    // SSE can restore notes first, but the explicit observation still records
+    // this transaction's timing and optional comparison before the next spend.
+    observedTransaction = latest?.hash;
     await provider!.subscribe();
     await publicState();
   });
