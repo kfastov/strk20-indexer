@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile, mkdtemp, readdir, stat, rm } from "node:fs/promises";
+import {
+  readFile,
+  writeFile,
+  mkdtemp,
+  readdir,
+  stat,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -120,5 +127,22 @@ test("Node worker verifies real state and restores the account with the server o
     await provider.close();
     server.close();
     await rm(cacheDirectory, { recursive: true, force: true });
+  }
+});
+
+test("failed cache initialization still closes the worker cleanly", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "strk20-node-failure-"));
+  await writeFile(join(directory, "file"), "not a directory");
+  const provider = new NodeDiscoveryProvider({
+    network: "mainnet",
+    feedUrl: "https://unused.invalid",
+    cacheDirectory: join(directory, "file", "cache"),
+  });
+  try {
+    await assert.rejects(provider.ready, /ENOTDIR/);
+    await provider.close();
+  } finally {
+    await provider.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

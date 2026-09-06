@@ -1,10 +1,10 @@
-import { Decompress } from "fzstd";
+import { inflateWithin } from "./decompress.ts";
+import { CheckpointSource } from "./checkpoint.ts";
 import type { Engine, EngineModule } from "./engine.ts";
 import type {
   RuntimeOptions,
   EngineInfo,
   Manifest,
-  Checkpoint,
   EpochEntry,
   WorkerEvent,
 } from "./types.ts";
@@ -22,77 +22,6 @@ const digest = async (bytes: Uint8Array) =>
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 const hex = (value: string) => `0x${BigInt(value).toString(16)}`;
-export function inflateWithin(
-  bytes: Uint8Array,
-  cap = 256 * 1024 * 1024,
-): Uint8Array {
-  checkFrame(bytes, cap);
-  const parts: Uint8Array[] = [];
-  let length = 0;
-  const decoder = new Decompress((chunk) => {
-    length += chunk.length;
-    if (length > cap) throw new Error("DECOMPRESS_LIMIT");
-    parts.push(chunk);
-  });
-  // Avoid passing a malicious frame's claimed size to a whole-frame allocator.
-  for (let offset = 0; offset < bytes.length; offset += 16_384)
-    decoder.push(
-      bytes.subarray(offset, offset + 16_384),
-      offset + 16_384 >= bytes.length,
-    );
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-// Validate the single canonical zstd frame before fzstd allocates its window.
-function checkFrame(bytes: Uint8Array, cap: number): void {
-  const fail = () => {
-    throw new Error("DECOMPRESS_LIMIT: invalid or oversized zstd frame");
-  };
-  if (
-    bytes.length < 6 ||
-    bytes[0] !== 0x28 ||
-    bytes[1] !== 0xb5 ||
-    bytes[2] !== 0x2f ||
-    bytes[3] !== 0xfd
-  )
-    fail();
-  const flag = bytes[4]!,
-    single = (flag & 32) !== 0,
-    sizeFlag = flag >>> 6;
-  if (flag & 24) fail();
-  const window = single
-    ? 0
-    : 2 ** (10 + (bytes[5]! >>> 3)) * (1 + (bytes[5]! & 7) / 8);
-  let at = single ? 5 : 6;
-  at += [0, 1, 2, 4][flag & 3]!;
-  const count = sizeFlag ? 2 ** sizeFlag : single ? 1 : 0;
-  if (at + count > bytes.length) fail();
-  let size = 0n;
-  for (let i = 0; i < count; i++)
-    size += BigInt(bytes[at + i]!) << BigInt(8 * i);
-  if (sizeFlag === 1) size += 256n;
-  if ((single && size > BigInt(cap)) || window > cap) fail();
-  at += count;
-  for (;;) {
-    if (at + 3 > bytes.length) fail();
-    const header = bytes[at]! | (bytes[at + 1]! << 8) | (bytes[at + 2]! << 16);
-    at += 3;
-    const kind = (header >>> 1) & 3;
-    if (kind === 3) fail();
-    at += kind === 1 ? 1 : header >>> 3;
-    if (at > bytes.length) fail();
-    if (header & 1) break;
-  }
-  if (flag & 4) at += 4;
-  if (at !== bytes.length) fail();
-}
-
 /** Worker-only host. All expensive state, network and IndexedDB operations stay here. */
 export class WorkerRuntime {
   private engine!: Engine;
@@ -118,11 +47,10 @@ export class WorkerRuntime {
   >();
   private liveQueued = false;
   private needsCatchup = true;
-  private chainChecked = false;
   private saved = false;
   private stopped = false;
   private readonly module: EngineModule;
-  private readonly opts: RuntimeOptions;
+  private readonly checkpoints: CheckpointSource;
   private readonly emit: (event: WorkerEvent) => void;
   private readonly enqueue: (job: () => Promise<void>) => void;
   constructor(
@@ -133,7 +61,6 @@ export class WorkerRuntime {
     cacheFactory: CacheFactory = (name) => new StateCache(name),
   ) {
     this.module = module;
-    this.opts = opts;
     this.emit = emit;
     this.enqueue = enqueue;
     this.profile = resolveProfile(opts.network);
@@ -148,6 +75,7 @@ export class WorkerRuntime {
     this.net = new PublicTransport(opts.feedUrl, (value) =>
       emit({ event: "request", value }),
     );
+    this.checkpoints = new CheckpointSource(this.net, opts, this.profile);
     this.cache = cacheFactory(
       `strk20-folded-v2:${this.profile.chainId}:${hex(this.profile.pool)}`,
     );
@@ -208,55 +136,6 @@ export class WorkerRuntime {
       throw new Error("CHAIN_MISMATCH: feed genesis");
     this.manifest = JSON.parse(decode(m.bytes)) as Manifest;
     this.needsCatchup = false;
-  }
-  private async checkpoint(
-    block?: number,
-  ): Promise<{ checkpoint: Checkpoint; proof: string }> {
-    if (!this.chainChecked) {
-      const id = await this.net.rpc(this.opts.rpcUrl, "starknet_chainId", []);
-      const expected = `0x${[...this.profile.chainId].map((c) => c.charCodeAt(0).toString(16)).join("")}`;
-      if (typeof id !== "string" || hex(id) !== hex(expected))
-        throw new Error("CHAIN_MISMATCH: checkpoint RPC");
-      this.chainChecked = true;
-    }
-    const number = block ?? this.manifest!.head.number;
-    const header = (await this.net.rpc(
-      this.opts.rpcUrl,
-      "starknet_getBlockWithTxHashes",
-      [{ block_number: number }],
-    )) as {
-      block_number: number;
-      block_hash: string;
-      new_root: string;
-      status: string;
-    };
-    if (
-      header.block_number !== number ||
-      !["ACCEPTED_ON_L1", "ACCEPTED_ON_L2"].includes(header.status)
-    )
-      throw new Error("CHECKPOINT_UNAVAILABLE: accepted block header required");
-    const cp = {
-      chain_id: this.profile.chainId,
-      pool: hex(this.profile.pool),
-      block_number: number,
-      block_hash: header.block_hash,
-      state_root: header.new_root,
-    };
-    let proof: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        proof = await this.net.rpc(
-          this.opts.proofRpcUrl,
-          "starknet_getStorageProof",
-          [{ block_hash: header.block_hash }, [], [hex(this.profile.pool)], []],
-        );
-        break;
-      } catch (e) {
-        if (attempt === 2 || !/RPC_UNAVAILABLE: (42|24|-32603)/.test(String(e)))
-          throw e;
-      }
-    }
-    return { checkpoint: cp, proof: JSON.stringify(proof) };
   }
   async sync(block?: number, retry = 0): Promise<EngineInfo> {
     const previous = this.info();
@@ -330,7 +209,7 @@ export class WorkerRuntime {
     )
       throw new Error("BOUND_UNAVAILABLE: block not present in feed");
     const cp = await this.span("Fetch checkpoint proof", () =>
-      this.checkpoint(block),
+      this.checkpoints.acquire(block ?? m.head.number),
     );
     this.engine.stage_checkpoint(JSON.stringify(cp.checkpoint), cp.proof);
     const info = this.info();
@@ -476,8 +355,12 @@ export class WorkerRuntime {
     if (this.stopped) return;
     this.stopped = true;
     this.liveAbort?.abort();
-    await this.save();
-    this.engine.free();
+    if (!this.engine) return; // initialization can fail while opening storage
+    try {
+      await this.save();
+    } finally {
+      this.engine.free();
+    }
   }
 }
 

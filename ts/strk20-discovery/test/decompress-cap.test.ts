@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decompress } from "fzstd";
 
-import { inflateWithin } from "../src/worker.ts";
+import { inflateWithin } from "../src/decompress.ts";
 
 /**
  * A minimal, hand-built zstd frame whose header DECLARES `declared` bytes of

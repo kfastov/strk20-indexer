@@ -37,14 +37,19 @@ The current contracts are [consumer path](spec/consumer-path.md),
    Node integration test verifies real fixture state and restores discovered
    notes and cursors with the HTTP server offline; no transaction is submitted.
 3. Measure incremental catch-up and discovery on a funded account. Full-mainnet
-   empty-account measurements: cold 37.85 s; fresh Worker/cache restores
-   292–299 ms. The repeat-start target is met for that measurement; this is not
+   empty-account measurements include a 33-block catch-up in 1.625 s, with
+   176 ms spent verifying state; cold 40.31 s and fresh Worker restores
+   308–342 ms. The repeat-start target is met for that measurement; this is not
    a cold-start or all-device guarantee.
-4. Complete transaction failure/recovery review, including a lost submission
-   response without a transaction hash. The page currently blocks automatic
-   resubmission and retains the keys; there is no unknown-outcome recovery UI.
-5. Review Worker responsibility boundaries and remaining stale documentation,
-   then deploy and verify the hosted page. Git push is not a production deployment.
+4. Verify receipt recovery in the funded run. The signer now persists the exact
+   SDK-computed hash before signing, so a lost send response can be resumed after
+   reload. Tests mock cryptographic signing and network submission, and verify
+   that resuming does not submit again. Legacy pending entries without a hash
+   still require manual investigation; no automatic resubmission is attempted.
+5. Deploy and verify the hosted page after the user supplies the server/deploy
+   route. Checkpoint acquisition and bounded decompression now have separate
+   modules; the Worker owns sequencing, state and persistence. Git push is not
+   a production deployment.
 6. Finish the hackathon video and submission metadata against the current rules.
    External wallet adoption or upstream acceptance is not implied by a demo.
 

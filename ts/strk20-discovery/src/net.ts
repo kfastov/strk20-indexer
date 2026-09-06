@@ -20,7 +20,11 @@ export class PublicTransport {
   async get(path: string): Promise<{ bytes: Uint8Array; etag: string }> {
     if (!feedPath(path) || path === "live")
       throw new Error("SCOPE_VIOLATION: non-public feed path");
-    return this.request(`${this.base.replace(/\/$/, "")}/${path}`);
+    return this.request(
+      `${this.base.replace(/\/$/, "")}/${path}`,
+      undefined,
+      path === "manifest.json" ? "no-cache" : "default",
+    );
   }
   async rpc(
     url: string,
@@ -49,10 +53,12 @@ export class PublicTransport {
   private async request(
     url: string,
     body?: string,
+    cache: RequestCache = "default",
   ): Promise<{ bytes: Uint8Array; etag: string }> {
     const start = performance.now();
     const res = await fetch(url, {
       method: body ? "POST" : "GET",
+      cache,
       credentials: "omit",
       redirect: "error",
       ...(body

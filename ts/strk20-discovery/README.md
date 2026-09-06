@@ -99,6 +99,8 @@ wallet signing or viewing keys. AEAD is deferred until after the main implementa
 SSE carries complete head and epoch payloads. The same decoder handles HTTP catch-up
 following a gap or oversized event. Routine stream updates need no GET for their
 data; independent checkpoint RPC requests are still necessary. Queues are bounded.
+Explicit HTTP catch-up revalidates the mutable manifest instead of waiting for
+the browser's cached copy to expire.
 
 ## Checks
 

@@ -55,6 +55,26 @@ No funded transaction was signed or submitted during these checks. A recorded
 shield → transfer → withdrawal run remains necessary before claiming a verified
 end-to-end live transaction demonstration.
 
+The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it
+in 341.5, 312.4 and 308.4 ms. Catch-up to 14,440,963 took 1,624.7 ms, including
+245.1 ms for the queued cache save, 961.5 ms for checkpoint acquisition and
+176.1 ms for verification. The HTTP response bodies totalled 204,417 bytes;
+this is decoded body size, not compressed wire traffic. Two subsequent polls
+returned the same checkpoint and are not counted as further chain advances.
+Cold discovery took 40.31 s; the maximum 50 ms main-thread interval was 51.7 ms.
+With manifest revalidation enabled, another full-state run took 40.54 s cold,
+306–313 ms on restore, and 1.331 s to advance from 14,441,166 to 14,441,197
+(177.1 ms verification). The following two polls again returned that same block.
+Separate direct HTTP samples also observed an unchanged published head across
+an 11-second interval; this observation does not establish the cause of the delay.
+
+Transaction intent and the SDK-computed transaction hash are saved before the
+signer can enable broadcast. If the RPC response is lost, the normal resume
+button looks up that saved hash. A test retains the actual SDK transaction
+construction, replaces cryptographic signing and RPC submission, simulates a
+lost response, reloads the wallet and confirms that resume does not send again.
+Legacy pending records without a hash remain a manual recovery case.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,
