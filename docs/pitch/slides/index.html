@@ -13,6 +13,7 @@
     --edge: #94a3b8;
     --neutral-fill: #1e293b;
     --neutral-stroke: #64748b;
+    --area-neutral-fill: #131c2e;
     --wallet-fill: #1e1b4b;
     --wallet-stroke: #818cf8;
     --service-fill: #2a2310;
@@ -33,6 +34,7 @@
     --edge: #6b7280;
     --neutral-fill: #f3f4f6;
     --neutral-stroke: #9ca3af;
+    --area-neutral-fill: #f9fafb;
     --wallet-fill: #eef2ff;
     --wallet-stroke: #6366f1;
     --service-fill: #fffbeb;
@@ -84,6 +86,13 @@
   .key-red { fill: none; stroke: var(--red); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
   .key-green { fill: none; stroke: var(--local-stroke); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
   .badge-q { fill: var(--red-solid); }
+
+  .area-neutral { fill: var(--area-neutral-fill); stroke: var(--neutral-stroke); stroke-width: 4; }
+  .box-worker { fill: var(--local-fill); stroke: var(--local-stroke); stroke-width: 3; stroke-dasharray: 14 10; }
+  .node-stage { fill: var(--key-fill); stroke: var(--local-stroke); stroke-width: 3; }
+  .node-stage-strong { fill: var(--key-fill); stroke: var(--local-stroke); stroke-width: 6; }
+  .edge-key { fill: none; stroke: var(--local-stroke); stroke-width: 4; }
+  .wire-label { fill: var(--green); }
   .badge-q-text { fill: var(--on-red); font-weight: 800; }
 </style>
 </head>
@@ -210,6 +219,118 @@
   <text class="label" font-size="26" x="620" y="846" text-anchor="middle">Block header + storage proof</text>
 
   <text class="accent-green" x="960" y="1000" text-anchor="middle" font-size="50">The discovery server never receives your viewing key.</text>
+</svg>
+</section>
+
+<!-- 3. Snapshot or diffs. The official engine, in the browser. -->
+<section class="slide" id="slide-3">
+<svg viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title-3">
+  <title id="title-3">Snapshot or diffs. The official engine, in the browser.</title>
+  <defs>
+    <marker id="arrow-green-3" markerUnits="userSpaceOnUse" markerWidth="30" markerHeight="30" refX="28" refY="15" orient="auto">
+      <path class="head-green" d="M0 0 L30 15 L0 30 Z"/>
+    </marker>
+    <marker id="arrow-gray-3" markerUnits="userSpaceOnUse" markerWidth="26" markerHeight="26" refX="24" refY="13" orient="auto">
+      <path class="head" d="M0 0 L26 13 L0 26 Z"/>
+    </marker>
+    <marker id="arrow-gray-sm" markerUnits="userSpaceOnUse" markerWidth="16" markerHeight="16" refX="14" refY="8" orient="auto-start-reverse">
+      <path class="head" d="M0 0 L16 8 L0 16 Z"/>
+    </marker>
+    <marker id="arrow-green-sm" markerUnits="userSpaceOnUse" markerWidth="16" markerHeight="16" refX="14" refY="8" orient="auto">
+      <path class="head-green" d="M0 0 L16 8 L0 16 Z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1920" height="1080"/>
+
+  <text class="heading" font-size="52" x="960" y="92" text-anchor="middle">Snapshot or diffs. The official engine, in the browser.</text>
+
+  <!-- ===== Your browser ===== -->
+  <rect class="area-local" x="80" y="150" width="680" height="875" rx="32"/>
+  <text class="title" font-size="30" x="420" y="196" text-anchor="middle">Your browser</text>
+
+  <!-- Web Worker -->
+  <rect class="box-worker" x="110" y="230" width="620" height="650" rx="24"/>
+  <text class="label" font-size="22" font-weight="700" x="420" y="266" text-anchor="middle">Web Worker · WASM</text>
+
+  <rect class="node-neutral-sm" x="140" y="286" width="560" height="80" rx="16"/>
+  <text class="sub" font-size="22" x="420" y="318" text-anchor="middle"><tspan font-weight="700">IndexedDB</tspan> · folded state cache</text>
+  <text class="sub" font-size="20" x="420" y="348" text-anchor="middle">reload restores it, catch-up adds only missing diffs</text>
+
+  <path class="edge" d="M420 372 V404" marker-start="url(#arrow-gray-sm)" marker-end="url(#arrow-gray-sm)"/>
+
+  <rect class="node-stage" x="140" y="410" width="560" height="110" rx="16"/>
+  <text class="title" font-size="26" x="420" y="452" text-anchor="middle">Fold</text>
+  <text class="sub" font-size="22" x="420" y="490" text-anchor="middle">snapshot + diffs → the full pool state, in memory</text>
+
+  <path class="edge" d="M420 520 V574" marker-end="url(#arrow-gray-sm)"/>
+
+  <rect class="node-stage" x="140" y="580" width="560" height="110" rx="16"/>
+  <text class="title" font-size="26" x="420" y="622" text-anchor="middle">Verify</text>
+  <text class="sub" font-size="22" x="420" y="660" text-anchor="middle">full-state storage root = checkpoint</text>
+
+  <path class="edge" d="M420 690 V744" marker-end="url(#arrow-gray-sm)"/>
+
+  <rect class="node-stage-strong" x="140" y="750" width="560" height="100" rx="16"/>
+  <text class="title" font-size="26" x="420" y="790" text-anchor="middle">discovery-core</text>
+  <text class="sub" font-size="22" x="420" y="826" text-anchor="middle">the official engine, compiled to WASM</text>
+
+  <!-- Wallet row -->
+  <rect class="node-key" x="140" y="905" width="260" height="95" rx="16"/>
+  <g transform="translate(182 952)">
+    <g class="key-green" transform="translate(-2 0)">
+      <circle cx="-8" cy="0" r="8"/>
+      <path d="M0 0 H20 M13 0 V7 M19 0 V7"/>
+    </g>
+  </g>
+  <text class="title" font-size="24" x="222" y="946" >Viewing key</text>
+  <text class="sub" font-size="20" x="222" y="974">Stays here</text>
+  <path class="edge-key" d="M270 905 V856" marker-end="url(#arrow-green-sm)"/>
+
+  <rect class="node-stage" x="440" y="905" width="260" height="95" rx="16"/>
+  <text class="title" font-size="20" x="570" y="933" text-anchor="middle">Official SDK interface</text>
+  <text class="sub" font-size="19" x="570" y="960" text-anchor="middle">notes + witnesses →</text>
+  <text class="sub" font-size="19" x="570" y="986" text-anchor="middle">transaction builder</text>
+  <path class="edge" d="M570 850 V899" marker-end="url(#arrow-gray-sm)"/>
+
+  <!-- ===== STRK20 Indexer ===== -->
+  <rect class="area-neutral" x="1060" y="150" width="380" height="400" rx="32"/>
+  <text class="title" font-size="30" x="1250" y="196" text-anchor="middle">STRK20 Indexer</text>
+
+  <rect class="node-neutral-sm" x="1080" y="230" width="340" height="60" rx="14"/>
+  <text class="title" font-size="22" x="1250" y="254" text-anchor="middle">Ingest</text>
+  <text class="sub" font-size="20" x="1250" y="280" text-anchor="middle">state diffs + pool events</text>
+  <path class="edge" d="M1250 290 V314" marker-end="url(#arrow-gray-sm)"/>
+
+  <rect class="node-neutral-sm" x="1080" y="320" width="340" height="60" rx="14"/>
+  <text class="title" font-size="22" x="1250" y="344" text-anchor="middle">Mirror</text>
+  <text class="sub" font-size="20" x="1250" y="370" text-anchor="middle">pool storage, per block</text>
+  <path class="edge" d="M1250 380 V404" marker-end="url(#arrow-gray-sm)"/>
+
+  <rect class="node-neutral-sm" x="1080" y="410" width="340" height="110" rx="14"/>
+  <text class="title" font-size="22" x="1250" y="434" text-anchor="middle">Feed</text>
+  <text class="sub" font-size="20" x="1250" y="462" text-anchor="middle">Epochs · hash-chained diffs</text>
+  <text class="sub" font-size="20" x="1250" y="486" text-anchor="middle">Snapshot · folded state</text>
+  <text class="sub" font-size="20" x="1250" y="510" text-anchor="middle">Head · live tail over SSE</text>
+
+  <!-- Starknet -> Ingest -->
+  <rect class="node-neutral" x="1520" y="220" width="280" height="80" rx="20"/>
+  <text class="title" font-size="34" x="1660" y="252" text-anchor="middle">Starknet</text>
+  <text class="sub" font-size="22" x="1660" y="284" text-anchor="middle">Public pool data</text>
+  <path class="edge" d="M1520 260 H1442" marker-end="url(#arrow-gray-3)"/>
+  <text class="label" font-size="20" x="1480" y="244" text-anchor="middle">via RPC</text>
+
+  <!-- The wire: feed -> browser -->
+  <path class="edge-green" d="M1060 440 H762" marker-end="url(#arrow-green-3)"/>
+  <path class="edge-green" d="M1060 495 H762" marker-end="url(#arrow-green-3)"/>
+  <text class="wire-label" font-size="20" x="910" y="415" text-anchor="middle"><tspan font-weight="700">Snapshot</tspan> · cold start, once</text>
+  <text class="wire-label" font-size="20" x="910" y="475" text-anchor="middle">public · same for everyone</text>
+  <text class="wire-label" font-size="20" x="910" y="525" text-anchor="middle"><tspan font-weight="700">Diffs</tspan> · epochs + live head</text>
+
+  <!-- Independent RPC -> Verify -->
+  <rect class="node-neutral" x="1520" y="595" width="280" height="80" rx="20"/>
+  <text class="sub" font-size="26" font-weight="600" x="1660" y="644" text-anchor="middle">Independent RPC</text>
+  <path class="edge" d="M1520 635 H762" marker-end="url(#arrow-gray-3)"/>
+  <text class="label" font-size="22" x="1140" y="612" text-anchor="middle">Block header + storage proof</text>
 </svg>
 </section>
 
