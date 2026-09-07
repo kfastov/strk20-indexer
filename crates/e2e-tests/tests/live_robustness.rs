@@ -29,8 +29,7 @@
 //! T26 #21     the canonicity walkback does not stop at a row marked final
 //!             above the height the mirror itself recorded as final
 //!
-//! The R legs are the mirror REPAIR path (docs/pre-submission-corrections.md
-//! plan A): a hole below the frontier is found, patched and republished
+//! The R legs exercise mirror repair: a hole below the frontier is found, patched and republished
 //! without a full re-backfill.
 //!
 //! R1 repair  the seeker pass names every missing/undercounted block exactly

@@ -88,8 +88,7 @@ Error: rpc error from starknet_getStorageProof:
 
 Measured proof window (bisection against lava mainnet, head 14,151,406):
 OK at head−968, error 42 at head−975 — i.e. a **~1024-block sliding window**
-(pathfinder's default trie retention), not the "~25–55k blocks" recorded in
-implementation-notes.md §5. Meanwhile `l1_accepted` lags head by ~5,000 blocks
+(pathfinder's default trie retention), not the earlier estimate of "~25–55k blocks". Meanwhile `l1_accepted` lags head by ~5,000 blocks
 (14,128,517 vs 14,123,420 in this run). The cutter verifies at
 `min(l1_accepted, frontier)`, which is *by construction* outside the window.
 **Consequence: the mirror-completeness check that the whole trust story rests on

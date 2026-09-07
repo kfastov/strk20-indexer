@@ -872,8 +872,7 @@ async fn enumerate_slots(
     Ok(())
 }
 
-/// The seeker pass, and with `--repair` the targeted re-ingest that follows it
-/// (docs/pre-submission-corrections.md plan A steps 1–2).
+/// The seeker pass, and with `--repair` the targeted re-ingest that follows it.
 ///
 /// A hole below the ingest frontier is invisible to every forward mechanism
 /// this binary has: the scan starts at `cursor + 1`, the §5.6 rescan only

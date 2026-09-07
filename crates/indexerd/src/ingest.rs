@@ -1142,7 +1142,7 @@ mod tests {
 
     /// The dangerous direction: a height above `latest` would let
     /// `cut_ready_epochs` publish an epoch as immutable over blocks that are
-    /// still revocable en masse (docs/research-answers.md Q12).
+    /// still revocable en masse.
     #[test]
     fn an_answer_above_latest_is_rejected() {
         assert!(l1_answer_rejection(

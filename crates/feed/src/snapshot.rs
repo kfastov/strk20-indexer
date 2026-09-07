@@ -43,8 +43,7 @@ pub struct SnapshotHeader {
     /// exactly what such a client never fetches, and the anchors log records
     /// the class at a HEAD block, which may legitimately differ after an
     /// upgrade. The field is inside the content hash and useful to an auditor;
-    /// spec leg m(vi) is not implementable without the sidecar (see the
-    /// implementation-notes delta log).
+    /// spec leg m(vi) is not implementable without the sidecar.
     pub class: Felt,
 }
 

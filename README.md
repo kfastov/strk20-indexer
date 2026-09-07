@@ -29,8 +29,8 @@ const discovery = new LocalDiscoveryProvider({
 const mine = discovery.forAccount({ address, viewingKey });
 
 await discovery.ready;
-const cached = await mine.restore(); // previously verified local results
-await discovery.subscribe();        // full state updates over SSE
+const cached = await mine.restore(); // discover from the verified local state
+await discovery.subscribe();        // keep state current through SSE diffs
 const { notes } = await mine.discoverNotes();
 
 // On teardown:
@@ -61,7 +61,8 @@ follow the primary action button:
 2. Fund its displayed address with STRK and deploy the account.
 3. Shield STRK, discover the note locally, transfer privately and withdraw.
 
-The page shows operation timings, with expandable verification details. An
+The page shows the stages and timings of the requested wallet operation;
+background synchronization and cache timings stay out of that log. An
 optional comparison observes the same block through both discovery providers.
 Enabling it explicitly sends this demo wallet's viewing key to the official
 service. It does not send a second transaction.
@@ -86,7 +87,7 @@ Starknet head notification → block, receipts and storage changes → Rust inde
                                                                     │
                                                   public snapshot + diffs
                                                                     │
-                          browser / Node Worker ← HTTP bootstrap + full SSE
+                          browser / Node Worker ← HTTP bootstrap + SSE diffs
                                      │
                           independently checked pool state
                                      │
@@ -155,7 +156,7 @@ Sepolia scripts have been removed and remain in Git history.
 - [Why event-only indexing is insufficient](docs/spec/sound-ingest.md)
 - [Full architecture](docs/spec/architecture.md)
 - [Packaging-only upstream fork](docs/ops/fork.md)
-- [Submission checklist and deferred work](docs/roadmap.md)
+- [Current release and limits](docs/roadmap.md)
 
 Rust, real-WASM/TypeScript, SDK compatibility and packaging checks validate the
 implementation. The upstream discovery engine uses a feature-gated dependency

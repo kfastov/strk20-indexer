@@ -1,19 +1,9 @@
 # Sound ingest — spec
 
-Status: FINAL for implementation. Replaces the ingest-soundness reasoning in
-[architecture.md](architecture.md) §5.6 (the "rescan recent epochs" recovery
-path) and closes LIVE-8's open end. Deltas of the shipped build live in
-[implementation-notes.md](implementation-notes.md).
-
-Council input: one proposal survived phase Propose — s2-pragmatic
-(`docs/research/council/sound-ingest/s2-pragmatic.md` in git history, removed
-2026-09-02). Both upstream measurement phases (MECHANISM/PREVALENCE, INDEX COSTS) failed, and S2
-re-established them itself. **An unopposed proposal resting on
-self-supplied measurements is exactly the shape of the failure this exercise
-exists to prevent**, so instead of grafting from losers, this document
-re-derives every claim it could reach without the network and marks the rest by
-provenance. Nine claims were checkable locally; eight held exactly, one was
-wrong in S2's own disfavour, and three unstated risks surfaced. Details in §2.
+The ingestion design covers writes that emit no pool event and supplements the
+recent-range repair path in [architecture.md](architecture.md). The evidence
+below distinguishes observed behavior, sampled measurements and projections;
+current end-to-end acceptance is documented in [demo-app.md](demo-app.md).
 
 Provenance tags used throughout:
 

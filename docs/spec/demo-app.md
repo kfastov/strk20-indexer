@@ -8,7 +8,8 @@ RPCs; the default build contains no synthetic replay or mock discovery engine.
 One primary button advances through wallet creation, funding detection,
 deployment, shield, local discovery, private transfer, discovery and withdrawal.
 The activity log shows user operations and their durations. Expand an operation
-to inspect the proof, verification and discovery work beneath it. WASM runs only
+to inspect explicit transaction stages such as proof generation and confirmation.
+Background Worker synchronization and cache timings are not added to this log. WASM runs only
 in a Worker, so proof verification cannot freeze the action button or spinner.
 
 The wallet is generated locally. Signing and viewing keys persist in a separate

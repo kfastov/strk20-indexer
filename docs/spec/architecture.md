@@ -1,6 +1,8 @@
 # strk20-indexer — Final Unified Architecture Spec (v1)
 
-Status: FINAL DRAFT for implementation. Backbone = Proposal 2 (operational-simplicity-first), the judges' consensus winner (2 of 3 verdicts). Every judge-mandated graft is incorporated below; conflicts between judges are resolved in §0. Ground truth for all upstream facts: `/Users/konstantinfastov/Projects/strk20-indexer/docs/research-answers.md`.
+Server and feed architecture. The current browser/Node verification contract is
+documented in [consumer-path.md](consumer-path.md); it takes precedence over
+the native slot-verification mode described here.
 
 ---
 
@@ -433,7 +435,7 @@ Key input is file/stdin ONLY (never argv — process lists leak); read → zeroi
 
 ## 9. Trust & privacy model summary
 
-Per-mode leakage (full table: `docs/research-answers.md`, Q7/Q9):
+Per-mode leakage:
 
 | Mode | Server learns | Posture |
 |---|---|---|
