@@ -73,12 +73,19 @@ or when selecting a lower checkpoint.
 
 ## Subscription
 
-SSE sends canonical head payloads and new immutable epoch payloads. HTTP and
-SSE use the same verification code. Stable event IDs derive from event content.
-Clients coalesce heads, limit queued epochs and use HTTP catch-up after a gap or
-an oversized event. A head replaces the mutable tail; no per-client server
-journal is needed. Normal streamed payloads need no follow-up GET for their data.
-Independent RPC header/proof checks still cost network round trips.
+SSE starts with a canonical head payload and the latest immutable epoch payload.
+Subsequent `head` events carry `delta: {base_etag, header, append, end}` when the
+tail's record prefix is unchanged: the header/trailer retain their newlines and
+`append` contains only new complete NDJSON records. `payload` is null in a delta.
+The SDK assembles every delta before coalescing verification jobs. The resulting
+bytes pass through the same Rust parser and checkpoint verification as HTTP.
+An unknown base causes reconnect; reconnect, epoch rollover or a changed record
+prefix sends a full current head. Oversized artifacts use HTTP catch-up. Deltas
+are computed against the last state sent on that connection, so coalesced server
+publications need no replay journal or client-supplied cursor. Legacy clients
+can use their existing HTTP fallback for null payloads. Event IDs hash the actual
+event content. Proofs arrive separately over SSE; independent header RPC checks
+remain necessary. Normal updates need no follow-up data GET.
 
 ## Verification
 

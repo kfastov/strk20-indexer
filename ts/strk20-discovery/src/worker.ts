@@ -11,6 +11,7 @@ import type {
 } from "./types.ts";
 import { resolveProfile } from "./profiles.ts";
 import { PublicTransport } from "./net.ts";
+import { LiveHeadAssembler, type LiveHead } from "./live-head.ts";
 import { StateCache, type CacheStore, type CacheFactory } from "./storage.ts";
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
@@ -32,16 +33,8 @@ export class WorkerRuntime {
   private readonly cache: CacheStore;
   private readonly genesis: string;
   private liveAbort: AbortController | undefined;
-  private queuedHead:
-    | {
-        payload: string;
-        etag: string;
-        head: number;
-        head_hash: string;
-        l1_accepted: number;
-        resync: boolean;
-      }
-    | undefined;
+  private queuedHead: LiveHead | undefined;
+  private readonly liveHeads = new LiveHeadAssembler();
   private queuedEpochs = new Map<
     number,
     { entry: EpochEntry; payload: string }
@@ -405,7 +398,10 @@ export class WorkerRuntime {
                 hex(data.pool) !== hex(this.profile.pool))
             )
               throw new Error("CHAIN_MISMATCH: stream");
-            if (name === "hello") this.checkpoints.stream(data.proofs === true);
+            if (name === "hello") {
+              this.liveHeads.reset();
+              this.checkpoints.stream(data.proofs === true);
+            }
             if (name === "proof") {
               if (data.reset) this.checkpoints.reset();
               else this.checkpoints.receive(data);
@@ -422,10 +418,13 @@ export class WorkerRuntime {
               }
             }
             if (name === "head") {
+              // Assemble every event immediately, before expensive sync jobs
+              // coalesce queued heads. Otherwise the next delta loses its base.
+              const head = this.liveHeads.receive(data);
               this.checkpoints.head(data.head);
-              this.queuedHead = data;
+              this.queuedHead = head;
               this.emit({ event: "head", value: data.head });
-              if (!data.payload || data.resync || this.queuedEpochs.size > 4)
+              if (!head.payload || head.resync || this.queuedEpochs.size > 4)
                 this.needsCatchup = true;
               if (!this.liveQueued) {
                 this.liveQueued = true;
@@ -439,6 +438,11 @@ export class WorkerRuntime {
             }
           }, control.signal);
         } catch (e) {
+          if (String(e).includes("FEED_LIVE_GAP")) {
+            this.needsCatchup = true;
+            this.queuedHead = undefined;
+            this.queuedEpochs.clear();
+          }
           this.checkpoints.stream(false);
           if (control.signal.aborted) return;
           this.emit({ event: "error", value: String(e) });

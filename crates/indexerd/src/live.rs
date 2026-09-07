@@ -1,7 +1,7 @@
-//! SSE transports the same canonical head and epoch payloads as HTTP.
-//! Each head replaces the mutable tail, so reconnect and coalesced updates
-//! need no per-client journal. A client missing immutable epochs catches up
-//! over HTTP before applying the tail. Hash-based event IDs deduplicate repeats.
+//! SSE bootstraps the canonical head, then sends only appended records and
+//! the new header/trailer. Deltas name the previously sent head's ETag; a
+//! reconnect, epoch rollover or changed prefix sends a full replacement.
+//! Coalesced updates diff against the last sent state, with no replay journal.
 //! Published files are the source; a slow subscriber never blocks publishing.
 
 use crate::db::Db;
@@ -265,6 +265,39 @@ fn snapshot_event(manifest: &Value) -> Option<String> {
     Some(json!({"e": s["e"], "block": s["block"], "hash": s["hash"]}).to_string())
 }
 
+/// NDJSON parts retain their newlines, so applying a delta reproduces the
+/// canonical HTTP artifact byte-for-byte (including its counts/class trailer).
+fn head_parts(payload: &str) -> Option<(&str, &str, &str)> {
+    let first = payload.find('\n')? + 1;
+    let last = payload.strip_suffix('\n')?.rfind('\n')? + 1;
+    (first <= last).then(|| (&payload[..first], &payload[first..last], &payload[last..]))
+}
+
+fn head_update(next: &str, prev: Option<&str>) -> String {
+    let delta = (|| -> Option<String> {
+        let previous: Value = serde_json::from_str(prev?).ok()?;
+        let mut current: Value = serde_json::from_str(next).ok()?;
+        if previous["tail_from"] != current["tail_from"] {
+            return None;
+        }
+        let (_, old_records, _) = head_parts(previous["payload"].as_str()?)?;
+        let (header, records, end) = head_parts(current["payload"].as_str()?)?;
+        let append = records.strip_prefix(old_records)?;
+        let change = json!({
+            "base_etag": previous["etag"].as_str()?,
+            "header": header,
+            "append": append,
+            "end": end,
+        });
+        current["payload"] = Value::Null;
+        current["delta"] = change;
+        Some(current.to_string())
+    })();
+    // Tiny tails need no delta overhead. Old clients see payload=null and
+    // safely use the existing HTTP catch-up path; the feed URL is unchanged.
+    delta.filter(|data| data.len() < next.len()).unwrap_or_else(|| next.to_owned())
+}
+
 /// The connect burst plus the delta loop, as one byte stream.
 ///
 /// `hello` first, so a proxy pointed at the wrong network dies before any
@@ -300,7 +333,11 @@ pub async fn stream_to(
         ] {
             if let Some(data) = next {
                 if Some(data) != prev.as_ref() {
-                    out.push_str(&event(name, data));
+                    if name == "head" {
+                        out.push_str(&event(name, &head_update(data, prev.as_deref())));
+                    } else {
+                        out.push_str(&event(name, data));
+                    }
                 }
             }
         }
@@ -334,4 +371,46 @@ async fn send(
         .await
         .map_err(|_| ())?
         .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(block: u64, from: u64, records: &str) -> String {
+        let payload = format!("{{\"t\":\"hdr\",\"head\":{block}}}\n{records}{{\"t\":\"end\"}}\n");
+        json!({"head":block,"tail_from":from,"etag":format!("head-{block}"),
+            "payload":payload,"resync":false}).to_string()
+    }
+
+    #[test]
+    fn live_delta_sends_only_new_records_and_reconstructs_exact_bytes() {
+        let old_records = format!("{{\"t\":\"blk\",\"data\":\"{}\"}}\n", "a".repeat(4096));
+        let first = state(10, 1, &old_records);
+        for append in ["", "{\"t\":\"blk\",\"number\":11}\n{\"t\":\"blk\",\"number\":12}\n"] {
+            // Direct 10 -> 12 covers watch-channel coalescing: no intermediate
+            // published head is required by the subscriber.
+            let next = state(12, 1, &format!("{old_records}{append}"));
+            let wire = head_update(&next, Some(&first));
+            assert!(wire.len() < next.len() / 4);
+            let data: Value = serde_json::from_str(&wire).unwrap();
+            assert!(data["payload"].is_null());
+            assert_eq!(data["delta"]["base_etag"], "head-10");
+            assert_eq!(data["delta"]["append"], append);
+            let rebuilt = format!("{}{}{}{}", data["delta"]["header"].as_str().unwrap(),
+                old_records, data["delta"]["append"].as_str().unwrap(), data["delta"]["end"].as_str().unwrap());
+            let expected: Value = serde_json::from_str(&next).unwrap();
+            assert_eq!(rebuilt, expected["payload"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn live_delta_reconnect_rollover_and_reorg_replace_the_tail() {
+        let records = format!("{{\"t\":\"blk\",\"data\":\"{}\"}}\n", "a".repeat(4096));
+        let first = state(10, 1, &records);
+        assert_eq!(head_update(&first, None), first);
+        for next in [state(11, 11, &records), state(9, 1, ""), state(10, 1, &records.replace('a', "b"))] {
+            assert_eq!(head_update(&next, Some(&first)), next);
+        }
+    }
 }

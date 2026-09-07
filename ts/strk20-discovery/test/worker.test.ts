@@ -499,6 +499,7 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       ),
     );
   const update = {
+    tail_from: 200,
     head: 199,
     head_hash: "0xb10c00c7",
     l1_accepted: 199,
@@ -589,6 +590,28 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   await advance(202);
   assert.equal(live.info().verifiedAt, 202, "an unavailable old proof must not stall the live stream");
   unavailableProofAt = undefined;
+
+  // Two deltas arrive while the verification queue is held. Both must be
+  // assembled, even though only the latest head gets staged in real WASM.
+  requests.length = 0;
+  const deltaQueued = new Promise<void>((resolve) => { notify = resolve; });
+  for (const height of [203, 204]) {
+    const hash = `0x${(0xb10c0000 + height).toString(16)}`;
+    const rows = new TextDecoder().decode(head).trim().split("\n").map((r) => JSON.parse(r));
+    Object.assign(rows[0], { head: height, head_hash: hash });
+    const added = { t: "blk", b: height, h: hash,
+      p: `0x${(0xb10c0000 + height - 1).toString(16)}`, ts: height,
+      d: [], e: [], fin: "l2" };
+    Object.assign(rows.at(-1), { blocks: height - 202 });
+    send("head", { ...update, head: height, head_hash: hash, etag: `live-${height}`, payload: null,
+      delta: { base_etag: `live-${height - 1}`, header: JSON.stringify(rows[0]) + "\n",
+        append: JSON.stringify(added) + "\n", end: JSON.stringify(rows.at(-1)) + "\n" } });
+  }
+  await deltaQueued;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  while (liveTasks.length) await liveTasks.shift()!();
+  assert.equal(live.info().verifiedAt, 204, "coalesced deltas pass the real checkpoint verifier");
+  assert.equal(requests.filter((r) => !r.body).length, 0, "delta updates never refetch the head");
 
   for (const request of requests) {
     if (request.body) {

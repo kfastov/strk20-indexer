@@ -122,8 +122,11 @@ folded storage, cached tree nodes, discovery cursors and witnesses. A failed can
 cannot replace the last verified state. Clearing discovery cache must not delete
 wallet signing or viewing keys. AEAD is deferred until after the main implementation.
 
-SSE carries complete head and epoch payloads and, on supporting servers, public
-storage proofs. The server shares proof acquisition across subscribers. The SDK
+SSE starts with the current head and epoch, then sends the new header and only
+appended records, plus public storage proofs on supporting servers. The SDK
+reconstructs canonical head bytes before the existing WASM verification. A
+reconnect, epoch rollover or changed record prefix replaces the complete tail;
+an unknown delta base triggers reconnect. The server shares proof acquisition across subscribers. The SDK
 defaults to `proofSource: 'feed'`: it receives live proofs as events and uses
 `/feed/proofs/{block}` for bootstrap or a missed event. A missing event has a
 five-second recovery deadline; disconnect wakes recovery immediately. Older servers
