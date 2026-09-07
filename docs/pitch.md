@@ -46,9 +46,9 @@ Viewing key не следует изображать как ключ подпи�
 ```mermaid
 flowchart RL
     S["Starknet<br/>Public pool data"]
-    I["STRK20 Indexer<br/>Publishes a public feed"]
+    I["STRK20 Indexer<br/>Public snapshot + incremental diffs"]
     subgraph Wallet["Your wallet / browser"]
-        V["Verify pool state<br/>Discover your notes locally"]
+        V["Verify full pool state<br/>Discover notes on this machine"]
         K["Viewing key<br/>Stays here"]
         K --> V
     end
@@ -66,7 +66,9 @@ flowchart RL
 Небольшой блок RPC — под основной линией, без подробностей устройства доказательств.
 В кошельке достаточно двух строк: **“Verify locally” / “Find my notes”** и значка ключа.
 Не называть решение полностью trustless: клиент доверяет выбранному RPC и своему
-локальному кэшу. Это замена discovery-пути; hosted prover остаётся отдельным сервисом.
+локальному кэшу. При одинаковом кэше и целевом блоке запросы публичных данных
+не зависят от viewing key и принадлежности нот. Это не обещание анонимности IP
+или одинакового сетевого трафика при разных кэшах и времени подключения. Это замена discovery-пути; hosted prover остаётся отдельным сервисом.
 
 ## Что показываю и что говорю
 
@@ -76,28 +78,28 @@ flowchart RL
 
 > STRK20 makes token transfers private. But to find your private notes through the standard discovery service, your wallet sends it a viewing key. The service can then decrypt and identify your notes. So private funds still come with a trust decision: who gets to see them?
 
-### 0:22–0:45 — вторая карточка
+### 0:22–0:50 — вторая карточка
 
 **Экран:** схема решения. Показать публичный feed, затем ключ внутри кошелька.
 После этого перейти в уже подготовленную вкладку демо.
 
-> My solution moves discovery into the wallet. STRK20 Indexer publishes public pool data. The wallet checks the reconstructed state against an independent RPC and finds its notes locally. The discovery server never receives the viewing key. Here is that workflow running on Starknet mainnet.
+> My solution processes the full public pool state on the client, rather than asking a server for my wallet’s slots. Everyone uses the same public snapshot and diffs. Requests do not depend on the viewing key or which notes belong to you. Verification and discovery run entirely on your machine. Here it is on Starknet mainnet.
 
-### 0:45–1:10 — тёплая загрузка
+### 0:50–1:15 — тёплая загрузка
 
 **Экран:** mainnet-демо с заранее прогретым кэшем. Перезагрузить страницу в кадре,
 дождаться восстановления, показать приватный баланс и номер проверенного блока.
 Не очищать данные браузера. Ожидание оставить целиком.
 
-> This wallet already has a verified local cache. Reloading restores that state and the wallet’s notes. It does not repeat the first-time download and verification. The block number tells us which state we have verified; it is not a claim that cached notes are always at the latest head.
+> The snapshot has already been processed and saved. Reloading restores the verified state and discovery progress. Catch-up applies only the missing diffs; it does not replay the snapshot. The block number shows which state has been verified.
 
-### 1:10–2:00 — локальный discovery
+### 1:15–2:00 — локальный discovery
 
 **Экран:** вызвать discovery текущей доступной кнопкой. После завершения показать
 найденный баланс и раскрыть нужную операцию в Activity. Сравнение с официальным
 сервисом оставить выключенным: оно отправляет ему viewing key.
 
-> Now I refresh discovery. Public updates come from the feed, while verification and note discovery run in a browser Worker. The viewing key stays on this client. The result fits the official discovery interface, so a wallet can use it with the existing transaction builder.
+> Now I refresh discovery. The feed sends incremental public updates. A browser Worker applies them, verifies the complete pool state against an independent RPC checkpoint, and finds my notes locally. The result fits the official discovery interface and works with the existing transaction builder.
 
 ### 2:00–2:40 — результат в демо
 
