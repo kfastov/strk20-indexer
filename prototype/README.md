@@ -141,7 +141,7 @@ Grounded in this repo (`data/mainnet/feed`, `docs/`):
 Invented:
 
 - **every duration.** The cold ≈ 6 s / warm ≈ 0.03 s shape comes from a
-  **native Rust CLI** run (`docs/pitch.md`, mainnet, 2026-08-31). Fold time
+  **native Rust CLI** run (mainnet, 2026-08-31). Fold time
   *inside a browser* has never been measured — `docs/roadmap.md` calls it "the
   remaining sizing question";
 - per-epoch byte sizes (a seeded curve normalised to the real total);

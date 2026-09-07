@@ -33,8 +33,8 @@ The current contracts are [consumer path](spec/consumer-path.md),
   timing limits are recorded in [demo evidence](spec/demo-app.md).
 - The mainnet cycle completed on 2026-09-07: the locally discovered transfer note
   was withdrawn, the accepted receipt recovered after a WS subscription timeout,
-  and local discovery confirmed zero private balance. The video script is now
-  [pitch.md](pitch.md), with two opening workflow diagrams (problem and solution), followed by an unedited live demo.
+  and local discovery confirmed zero private balance. The video plan uses two
+  opening workflow diagrams (problem and solution), followed by an unedited live demo.
 - Optional same-block dual observation, explicit viewing-key disclosure consent,
   failures and cache conditions recorded. One transaction serves both observers.
 - Removed the mock engine, duplicate wrappers, synthetic replay bundle and stale
@@ -128,7 +128,7 @@ No extra submission PR is required; the repository at the deadline is the entry.
 
 1. **Done:** mainnet withdrawal, accepted receipt and post-withdrawal local discovery.
    The entire cycle is recorded in the demo evidence; no repeat transaction is required.
-2. **Draft revised:** `docs/pitch.md` contains two opening Mermaid diagram prototypes,
+2. **Draft revised:** the local video script contains two opening diagram prototypes,
    English narration and a continuous demo plan. No closing card or montage.
    The 2–3-minute target still requires rehearsal; the author will review demo actions.
    Warm mainnet reloads restored notes in 3.12 / 2.86 s (5.26 / 4.75 s from navigation);

@@ -8,3 +8,6 @@ ts/strk20-discovery/src/wasm/
 
 # npm release archives
 ts/strk20-discovery/release/
+
+# Local video script
+/docs/pitch.md
