@@ -120,6 +120,25 @@ p {
   letter-spacing: 0.12em;
   font-weight: 650;
 }
+.wallet-actions:not([hidden]) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.wallet-actions button {
+  border: 1px solid #33465d;
+  border-radius: 8px;
+  background: #101723;
+  color: #adbad0;
+  padding: 10px 8px;
+  font-size: 13px;
+}
+.wallet-actions button[aria-pressed="true"] {
+  border-color: #81b7fd;
+  color: #eaeef6;
+  background: #233a57;
+}
 .status {
   letter-spacing: 0;
   font-weight: 450;

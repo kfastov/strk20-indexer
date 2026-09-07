@@ -23,6 +23,7 @@ import {
 import { Operations } from "./operations.ts";
 import { Transactions } from "./transactions.ts";
 import { observeAt, type Comparison } from "./benchmark.ts";
+import { latestTransaction, walletStep, type WalletAction } from "./flow.ts";
 import { element, mount, renderOperations, renderStartup, downloadJson } from "./ui.ts";
 
 type Notes = Awaited<ReturnType<AccountDiscovery["discoverNotes"]>>;
@@ -42,6 +43,7 @@ let info: EngineInfo | undefined,
   error = "",
   backgroundError = "";
 let observedTransaction: string | undefined;
+let selectedAction: WalletAction | undefined;
 let startup: StartupProgress | undefined;
 const comparisons: Comparison[] = [];
 const operations = new Operations(() => {
@@ -54,10 +56,7 @@ const text = (id: string, value: string) => {
   if (node.textContent !== value) node.textContent = value;
 };
 function latestPrivateTransaction() {
-  return Object.entries(wallet?.completed ?? {})
-    .filter(([action]) => action !== "deploy")
-    .map(([, record]) => record)
-    .sort((a, b) => b.block - a.block)[0];
+  return wallet ? latestTransaction(wallet) : undefined;
 }
 function step(): {
   label: string;
@@ -68,7 +67,6 @@ function step(): {
     | "fund"
     | "discover"
     | "resume"
-    | "refresh"
     | "initialize";
 } {
   if (!provider || info?.verifiedAt == null)
@@ -91,11 +89,7 @@ function step(): {
       action: "initialize",
     };
   if (wallet.pending)
-    return {
-      label: "Resume pending transaction",
-      description: "Check the existing transaction before sending another one.",
-      action: "resume",
-    };
+    return walletStep(wallet, observedTransaction, selectedAction);
   if (!deployed)
     return balance > 0n
       ? {
@@ -110,41 +104,7 @@ function step(): {
             "Export a backup, then send a small amount of STRK to the address below. Keep enough public STRK for transaction fees.",
           action: "fund",
         };
-  const latest = latestPrivateTransaction();
-  if (latest && observedTransaction !== latest.hash)
-    return {
-      label: "Discover transaction",
-      description:
-        "Verify pool state and find this transaction’s effect locally.",
-      action: "discover",
-    };
-  if (!wallet.completed.shield)
-    return {
-      label: "Shield STRK",
-      description:
-        "Move STRK into the privacy pool. The next spend uses notes found by our local discovery provider.",
-      action: "shield",
-    };
-  if (!wallet.completed.transfer)
-    return {
-      label: "Transfer privately",
-      description:
-        "Send to yourself for a complete demo, or enter another registered private recipient.",
-      action: "transfer",
-    };
-  if (!wallet.completed.withdraw)
-    return {
-      label: "Withdraw STRK",
-      description:
-        "Return private funds to a public wallet. Gas and the pool fee are paid from this demo wallet’s public balance.",
-      action: "withdraw",
-    };
-  return {
-    label: "Refresh private balance",
-    description:
-      "The flow is complete. Your backup also preserves access to any private change and remaining public STRK.",
-    action: "refresh",
-  };
+  return walletStep(wallet, observedTransaction, selectedAction);
 }
 function render(): void {
   renderStartup(startup);
@@ -168,6 +128,12 @@ function render(): void {
   for (const id of ["import", "backup"])
     element<HTMLButtonElement>(id).disabled = busy;
   element("wallet").hidden = !wallet;
+  element("wallet-actions").hidden = !wallet || !deployed || !transactions;
+  for (const action of ["shield", "transfer", "withdraw", "discover"] as const) {
+    const choice = element<HTMLButtonElement>(`choose-${action}`);
+    choice.disabled = busy || !!wallet?.pending;
+    choice.setAttribute("aria-pressed", String(current.action === action));
+  }
   element("amount-row").hidden = !["shield", "transfer", "withdraw"].includes(
     current.action,
   );
@@ -360,6 +326,7 @@ async function discover(): Promise<void> {
     // SSE can restore notes first, but the explicit observation still records
     // this transaction's timing and optional comparison before the next spend.
     observedTransaction = latest?.hash;
+    selectedAction = undefined;
     await provider!.subscribe();
     await publicState();
   });
@@ -398,7 +365,6 @@ async function next(): Promise<void> {
       });
       break;
     case "discover":
-    case "refresh":
       await discover();
       break;
     default: {
@@ -416,12 +382,24 @@ async function next(): Promise<void> {
         amount,
         recipient || wallet!.address,
       );
+      selectedAction = undefined;
+      element<HTMLInputElement>("recipient").value = current.action === "transfer" ? wallet!.address : "";
       notes = undefined;
       await publicState();
     }
   }
 }
 element("next").onclick = () => void run(next);
+for (const action of ["shield", "transfer", "withdraw", "discover"] as const) {
+  element(`choose-${action}`).onclick = () => {
+    if (busy || wallet?.pending) return;
+    selectedAction = action;
+    error = "";
+    // A private recipient must not silently become a public withdrawal target.
+    element<HTMLInputElement>("recipient").value = action === "withdraw" ? wallet?.address ?? "" : "";
+    render();
+  };
+}
 element("backup").onclick = () => {
   if (wallet) exportWallet(wallet);
 };
@@ -445,6 +423,7 @@ element<HTMLInputElement>("backup-file").onchange = (event) =>
     await saveWallet(imported);
     localStorage.setItem("strk20-demo-network", imported.network);
     wallet = imported;
+    selectedAction = undefined;
     network = wallet.network;
     element<HTMLSelectElement>("network").value = network;
     await initialize();
@@ -456,6 +435,7 @@ element<HTMLSelectElement>("network").onchange = () =>
     localStorage.setItem("strk20-demo-network", selected);
     network = selected;
     wallet = selectedWallet;
+    selectedAction = undefined;
     info = undefined;
     notes = undefined;
     balance = 0n;

@@ -4,6 +4,25 @@ import { CheckpointSource } from "../src/checkpoint.ts";
 import { PublicTransport } from "../src/net.ts";
 import { resolveProfile } from "../src/profiles.ts";
 
+test("a missing feed proof endpoint fails; only expired historical proofs use archive RPC", async (t) => {
+  const profile = resolveProfile("sepolia");
+  const net = new PublicTransport("https://feed.test", () => {});
+  let status = 404, archiveCalls = 0;
+  t.mock.method(net, "get", async () => { throw new Error(`TRANSPORT: HTTP ${status}`); });
+  t.mock.method(net, "rpc", async (_url: string, method: string) => {
+    if (method === "starknet_chainId") return `0x${Buffer.from(profile.chainId).toString("hex")}`;
+    if (method === "starknet_getStorageProof") { archiveCalls++; return {}; }
+    return { block_number: 123, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
+  });
+  const source = new CheckpointSource(net, { network: "sepolia", feedUrl: "https://feed.test",
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" }, profile);
+  await assert.rejects(source.acquire(123), /HTTP 404/);
+  assert.equal(archiveCalls, 0);
+  status = 410;
+  assert.equal((await source.acquire(123)).checkpoint.block_number, 123);
+  assert.equal(archiveCalls, 1);
+});
+
 test("a live proof completes an acquisition without proof HTTP or RPC; disconnect catches up once", async (t) => {
   const profile = resolveProfile("sepolia");
   const net = new PublicTransport("https://feed.test", () => {});

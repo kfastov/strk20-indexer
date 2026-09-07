@@ -293,8 +293,7 @@ fn head_update(next: &str, prev: Option<&str>) -> String {
         current["delta"] = change;
         Some(current.to_string())
     })();
-    // Tiny tails need no delta overhead. Old clients see payload=null and
-    // safely use the existing HTTP catch-up path; the feed URL is unchanged.
+    // Tiny tails need no delta overhead.
     delta.filter(|data| data.len() < next.len()).unwrap_or_else(|| next.to_owned())
 }
 

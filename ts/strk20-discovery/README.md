@@ -1,9 +1,10 @@
 # strk20-discovery
 
-STRK20 discovery over public pool state. The Worker downloads the snapshot and
-incremental diffs, verifies the complete pool storage root at a trusted checkpoint,
-and runs upstream discovery locally. Viewing keys and account-specific reads stay
-in the browser. The feed still sees IP addresses and request timing.
+Discover STRK20 notes locally, without giving the indexer your viewing key.
+The client downloads public pool data, verifies the complete storage root against
+an independently fetched Starknet checkpoint, and runs discovery in a Worker.
+All wallets use the same public feed URLs. The feed can still see IP addresses
+and request timing.
 
 ## Install
 
@@ -11,23 +12,11 @@ in the browser. The feed still sees IP addresses and request timing.
 npm install strk20-discovery
 ```
 
-Use a bundler with module Worker support, such as Vite, for browser applications.
-Node applications require Node 24+. The release includes compiled Worker/WASM
-assets and the unmodified official Privacy SDK 0.14.3-rc.5; no Rust toolchain,
-GitHub Packages token or local vendor checkout is required to install it.
+Browser apps need a bundler with module Worker support, such as Vite. Node apps
+need Node 24+. Worker/WASM assets and the unmodified official Privacy SDK are
+included; installation requires no Rust toolchain or GitHub Packages login.
 
-The official SDK is available through `strk20-discovery/privacy-sdk`, so the
-builder and discovery provider share the same SDK classes and types:
-
-```ts
-import { LocalDiscoveryProvider } from 'strk20-discovery';
-import { createPrivateTransfers } from 'strk20-discovery/privacy-sdk';
-```
-
-The [demo source](https://github.com/kfastov/strk20-indexer/tree/main/ts/demo)
-is the maintained complete example, including signing, proving and recovery.
-
-## Use
+## Browser
 
 ```ts
 import { LocalDiscoveryProvider } from 'strk20-discovery';
@@ -38,47 +27,39 @@ const discovery = new LocalDiscoveryProvider({
 });
 const mine = discovery.forAccount({ address, viewingKey });
 
-// Startup verifies and saves pool state on the first visit.
-// With a verified cache, startup restores locally without network access.
-await discovery.ready;
-const cached = await mine.restore();
-// Catch up and verify against a newly selected accepted RPC checkpoint.
-const { notes, cursor } = await mine.discoverNotes();
-await discovery.subscribe();
+await discovery.ready;                    // verified startup or local cache restore
+const cached = await mine.restore();       // saved private discovery result
+const { notes } = await mine.discoverNotes(); // catch up and verify current state
+await discovery.subscribe();              // receive subsequent updates over SSE
+
+// When the wallet closes:
+await discovery.close();
 ```
 
-This startup contract applies from 0.1.1. Version 0.1.0 defers cold verification
-until the first discovery call and defaults to the discontinued Lava mainnet
-proof endpoint. Upgrade to 0.1.1, or explicitly set `proofRpcUrl` to
-`https://api.cartridge.gg/x/starknet/mainnet` when using 0.1.0.
-Proofs remain bound to the accepted header from the configured `rpcUrl`.
-`ready` resolves only after a verified state is available. Cold startup includes
-the initial download, complete state verification and cache save; missing or invalid
-proofs reject it. A valid trusted cache restores without network access. The
-`onEvent` callback receives `startup` events for engine loading, cache restoration,
-feed metadata, checkpoint acquisition, data loading, verification, saving and readiness.
-Data loading reports completed/total files. These are work stages, not elapsed-time
-percentages; verification remains one synchronous WASM operation in the Worker.
+The provider implements the official SDK's `discoverNotes`, `discoverChannels`
+and `discoverRequirement`. Results contain real SDK witnesses and cursors.
+The Worker maintains discovery progress; supplied cursors do not replace it.
 
-From 0.1.3, snapshot and epoch downloads allow up to 30 seconds without new
-bytes and five minutes in total, with a 32 MiB response limit. A slow transfer
-that keeps making progress can therefore finish beyond 30 seconds. RPC and
-metadata requests retain their 30-second total deadline. Download timeout errors
-identify the public artifact path and the number of bytes received.
+Use the bundled SDK to keep classes and types consistent:
 
-`LocalDiscoveryProvider` implements the official `DiscoveryProviderInterface`:
-`discoverNotes`, `discoverChannels` and `discoverRequirement`. Notes contain actual
-SDK `Witness` objects, channels contain token and note nonces, and cursors contain
-real progress positions. The Worker owns the incremental cursor; caller-provided
-cursors do not replace it. The returned note set contains all currently unspent
-notes matching the token filter.
+```ts
+import { createPrivateTransfers } from 'strk20-discovery/privacy-sdk';
 
-Pass the provider to `createPrivateTransfers({ discoveryProvider: discovery, ... })`.
-For a proof builder, use `discovery.atBlock(blockNumber)` so every discovery method,
-including requirement checks, uses the same proving block. Explicit numbers and
-`latest` are supported; unsupported block tags fail rather than select another block.
+const transfers = createPrivateTransfers({
+  account,
+  viewingKeyProvider,
+  poolContractAddress,
+  provingProvider,
+  discoveryProvider: discovery.atBlock(provingBlock),
+});
+```
 
-## Node scripts
+`atBlock(number)` binds every discovery method to the same proving block.
+The [demo](https://strk20.nullref.cc/demo/) and its
+[source](https://github.com/kfastov/strk20-indexer/tree/main/ts/demo) show the
+complete deposit, private transfer and withdrawal flow.
+
+## Node
 
 ```ts
 import { NodeDiscoveryProvider } from 'strk20-discovery/node';
@@ -89,110 +70,42 @@ const discovery = new NodeDiscoveryProvider({
   cacheDirectory: '/your/private/discovery-cache',
 });
 try {
+  await discovery.ready;
   const mine = discovery.forAccount({ address, viewingKey });
-  const cached = await mine.restore();
   const current = await mine.discoverNotes();
 } finally {
-  await discovery.close(); // flushes cache and terminates the worker thread
+  await discovery.close();
 }
 ```
 
-The Node host runs the same Worker runtime in `worker_threads`. It atomically
-replaces a mode-0600 cache file; the directory is explicitly trusted and contains
-private discovery results. No IndexedDB shim or second discovery implementation
-is used. The demo is the maintained integration example; standalone lifecycle examples
-are not the primary supported entry point.
+Node uses the same runtime in `worker_threads` and writes cache files with mode
+0600. The cache directory contains private discovery results.
 
-## Verification and persistence
+## Sync and verification
 
-The default trust root is an independently fetched, accepted Starknet RPC header.
-The verifier checks its block hash and state commitment, contract Patricia path,
-class hash, nonce and storage root, then compares the root of the complete locally
-reconstructed pool state. `rpcUrl` and `proofRpcUrl` can be supplied separately.
-A missing or invalid proof prevents discovery from an updated state.
+- **First startup:** download the snapshot and subsequent changes, verify pool
+  state, then save it. `ready` rejects if verification fails. `onEvent` reports
+  startup stages and completed/total downloads.
+- **Warm startup:** restore a trusted local cache without network access.
+  Discovery then catches up from that state.
+- **Live updates:** SSE sends a starting tail, then a new header and only appended
+  records. Proofs also arrive as events. Reconnects, epoch rollovers and changed
+  record prefixes replace the tail; a missing delta base triggers reconnect.
+- **Trust:** WASM verifies the reconstructed storage root and contract proof
+  against an accepted header from independent `rpcUrl`. Feed proofs add no trust
+  in the indexer. Bootstrap and missed proofs use the feed's proof endpoint;
+  historical blocks outside its retention window use `proofRpcUrl`.
+- **Persistence:** changed state saves in the background; unchanged reads do not
+  save again. `close()` flushes pending changes. Verification and serialization
+  still execute in the single Worker.
 
-This proves state at one block B. It does not authenticate intermediate history or
-publisher-supplied last-write timestamps. SDK note `created` is the conservative
-block by which the note value was verified, so a cold discovery may require extra
-maturity blocks before spending. No Ethereum L1-finality claim is made.
+Verification establishes state at a checkpoint, not the authenticity of earlier
+write timestamps or Ethereum finality. Cold-discovered notes may need additional
+maturity blocks before spending. The cache is trusted local storage: its checksum
+detects corruption, not malicious replacement.
 
-The demo explicitly trusts its same-origin IndexedDB cache. Its SHA-256 checksum
-catches corruption; it does not authenticate a malicious cache. The cache includes
-folded storage, cached tree nodes, discovery cursors and witnesses. A failed candidate
-cannot replace the last verified state. Clearing discovery cache must not delete
-wallet signing or viewing keys. AEAD is deferred until after the main implementation.
-
-SSE starts with the current head and epoch, then sends the new header and only
-appended records, plus public storage proofs on supporting servers. The SDK
-reconstructs canonical head bytes before the existing WASM verification. A
-reconnect, epoch rollover or changed record prefix replaces the complete tail;
-an unknown delta base triggers reconnect. The server shares proof acquisition across subscribers. The SDK
-defaults to `proofSource: 'feed'`: it receives live proofs as events and uses
-`/feed/proofs/{block}` for bootstrap or a missed event. A missing event has a
-five-second recovery deadline; disconnect wakes recovery immediately. Older servers
-(HTTP 404) and blocks outside the recent proof window (HTTP 410) use `proofRpcUrl`.
-Set `proofSource: 'rpc'` to acquire every proof directly from that RPC.
-The accepted header still comes from independent `rpcUrl`, and WASM verifies every
-proof against it. Delivery from the feed adds no trust in the feed.
-
-The same decoder handles HTTP catch-up following a gap or oversized event.
-Routine stream updates need no GET for their data; independent header RPC requests
-are still necessary. Queues are bounded.
-Explicit HTTP catch-up revalidates the mutable manifest instead of waiting for
-the browser's cached copy to expire. Bounded reads reuse already staged artifacts
-but still verify their independent checkpoint. `await discovery.waitForBlock(B)`
-waits for an advertised SSE head at or above B (120-second timeout, cancelled on
-close); it is an availability hint, not a verification result. Use a subsequent
-`discoverNotes(..., { blockIdentifier: B })` to obtain verified notes. A foreground
-read waiting for B takes priority over background checkpoint selection, so the
-same update does not trigger proofs for two different blocks.
-
-Reads of already verified state can run while synchronization awaits network I/O.
-Changed state is saved outside the command queue with one writer; unchanged reads
-do not serialize or save it again. `close()` flushes pending changes. Serialization
-and WASM verification remain synchronous within the single Worker, so a read can
-still wait for an in-progress serialization or verification step.
-
-## Checks
-
-```sh
-npm run typecheck --workspace strk20-discovery
-npm test --workspace strk20-discovery
-npm run scan:chokepoint --workspace strk20-discovery
-```
-
-Tests run the actual compiled WASM against native discovery goldens, exercise both
-cold modes, real SDK objects, cache-only restart, verification failures, decompression
-limits and public request paths. The WASM smoke also checks key-buffer zeroization.
-
-## Build and package from source
-
-From the repository root:
-
-```sh
-./examples/mainnet/setup.sh
-./crates/wasm/build.sh
-npm --prefix ts ci
-npm --prefix ts run pack:release --workspace strk20-discovery
-```
-
-The archive is written to `ts/strk20-discovery/release/`. The packaging script
-replaces the development-only SDK path with the exact bundled version and keeps
-public transitive dependencies as normal npm dependencies. Publish this archive,
-not the development workspace directory. Upstream attribution is in `UPSTREAM.txt`
-and the bundled package's license. The repository's Apache-2.0 license also ships.
-
-Maintainer releases use `.github/workflows/publish-sdk.yml` on `main`. Configure
-the package's npm trusted publisher for GitHub user `kfastov`, repository
-`strk20-indexer`, workflow `publish-sdk.yml`, with direct `npm publish` allowed.
-After committing and pushing a new package version and its lockfile, run:
-
-```sh
-gh workflow run publish-sdk.yml --ref main
-```
-
-The GitHub-hosted runner builds WASM and the pinned official SDK, runs tests and
-the isolated consumer check, then publishes the tested archive with OIDC and
-provenance. No npm token or local npm login is needed for this workflow. A
-previously published version cannot be overwritten; inspect the run and registry
-before retrying an uncertain publication.
+Snapshot/epoch downloads permit 30 seconds without progress and five minutes in
+total; RPC/metadata requests have a 30-second deadline. For API details,
+verification limits and source-build instructions, see the
+[consumer specification](https://github.com/kfastov/strk20-indexer/blob/main/docs/spec/consumer-path.md)
+and [repository](https://github.com/kfastov/strk20-indexer).

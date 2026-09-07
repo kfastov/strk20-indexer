@@ -82,8 +82,7 @@ bytes pass through the same Rust parser and checkpoint verification as HTTP.
 An unknown base causes reconnect; reconnect, epoch rollover or a changed record
 prefix sends a full current head. Oversized artifacts use HTTP catch-up. Deltas
 are computed against the last state sent on that connection, so coalesced server
-publications need no replay journal or client-supplied cursor. Legacy clients
-can use their existing HTTP fallback for null payloads. Event IDs hash the actual
+publications need no replay journal or client-supplied cursor. Event IDs hash the actual
 event content. Proofs arrive separately over SSE; independent header RPC checks
 remain necessary. Normal updates need no follow-up data GET.
 

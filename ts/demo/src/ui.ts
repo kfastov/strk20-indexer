@@ -19,6 +19,12 @@ export function mount(network: Network): void {
           <div class="balances"><div><span>Public</span><strong id="public-balance">—</strong></div><div><span>Private</span><strong id="private-balance">—</strong></div></div>
           <div class="backup-row"><button id="backup" class="text-button">Export wallet backup</button><span>Keys are stored in this browser. Use small amounts.</span></div>
         </div>
+        <div id="wallet-actions" class="wallet-actions" role="group" aria-label="Choose operation" hidden>
+          <button id="choose-shield" type="button" aria-pressed="false">Deposit</button>
+          <button id="choose-transfer" type="button" aria-pressed="false">Private transfer</button>
+          <button id="choose-withdraw" type="button" aria-pressed="false">Withdraw</button>
+          <button id="choose-discover" type="button" aria-pressed="false">Discover</button>
+        </div>
         <div id="amount-row" class="field" hidden><label for="amount">Amount · STRK</label><input id="amount" value="0.01" inputmode="decimal" autocomplete="off" /></div>
         <div id="recipient-row" class="field" hidden><label id="recipient-label" for="recipient">Recipient</label><input id="recipient" placeholder="0x…" autocomplete="off" spellcheck="false" /></div>
         <div id="startup" class="startup" role="status" hidden><div class="startup-title"><strong id="startup-label"></strong><span id="startup-step"></span></div><progress id="startup-progress" max="8" value="0" aria-label="Initialization stages"></progress><p id="startup-detail"></p></div>

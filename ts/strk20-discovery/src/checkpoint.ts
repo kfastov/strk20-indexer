@@ -11,7 +11,6 @@ export class CheckpointSource {
   private liveHead = -1;
   private proofHead = -1;
   private readonly wake = new Set<() => void>();
-  private feedAvailable: boolean | undefined;
 
   reset(): void {
     this.proofs.clear(); this.proofHead = -1; this.cancel();
@@ -31,7 +30,7 @@ export class CheckpointSource {
     for (const notify of this.wake) notify();
   }
   private async proof(block: number, signal: AbortSignal): Promise<unknown> {
-    if (this.opts.proofSource !== "rpc" && this.feedAvailable !== false) {
+    if (this.opts.proofSource !== "rpc") {
       // Healthy streams deliver proofs themselves. HTTP is bootstrap or gap
       // recovery, including a publisher that coalesced past this exact block.
       if (!this.proofs.has(block) && this.live && block >= this.liveHead && this.proofHead <= block) {
@@ -55,13 +54,11 @@ export class CheckpointSource {
         const data = JSON.parse(new TextDecoder().decode(response.bytes));
         if (data.block !== block) throw new Error("CHECKPOINT_FAILED: wrong feed proof block");
         this.receive(data);
-        this.feedAvailable = true;
         return data.proof;
       } catch (error) {
-        // Older servers have no proof route; historical bounds outside the
-        // public retention window still use the configured independent RPC.
-        if (!/TRANSPORT: HTTP (404|410)\b/.test(String(error))) throw error;
-        if (String(error).includes("404")) this.feedAvailable = false;
+        // Historical bounds outside the public retention window need an
+        // archive proof. Missing current endpoints are configuration errors.
+        if (!/TRANSPORT: HTTP 410\b/.test(String(error))) throw error;
       }
     }
     return this.available(this.opts.proofRpcUrl, "starknet_getStorageProof",
