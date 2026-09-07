@@ -6,6 +6,27 @@ decision and are deliberately not in this repo.
 
 ## Current production deployment
 
+Update, 2026-09-07: the demo uses operator-configured QuickNode HTTP and
+WebSocket endpoints automatically on both networks. Build with
+`VITE_MAINNET_RPC_URL`, `VITE_MAINNET_RPC_WS_URL`, `VITE_SEPOLIA_RPC_URL` and
+`VITE_SEPOLIA_RPC_WS_URL`; these URLs are included in the public browser bundle.
+Deployment values live outside the repository. Judges do not enter a URL or
+configure a connection. There is no RPC settings form in the demo.
+
+The action picker is a split-button menu; current activity is separate from the
+scrollable history. Desktop/mobile layouts and keyboard selection were checked
+in an isolated browser. Wallets, history and pending transaction hashes survive
+refreshing the page; use Resume for an already sent transaction.
+
+A temporary switch of both indexers to the free QuickNode account encountered
+HTTP 429 responses. Both server HTTP/WS configurations were restored from
+`/root/strk20-deploy-20260907-quicknode/env.before`; containers remain on the
+existing backend image. QuickNode quota is reserved for the demo. Subscriptions
+to the two supplied accepted Sepolia transactions returned status in about two
+seconds. The existing demo waiter, with an initial not-found test gate,
+completed in 1.14/2.23 seconds. These are accepted-transaction subscription
+checks, not new-transaction inclusion times.
+
 Latest update, 2026-09-07 (19:52 UTC): backend `4cd7f69`, image
 `257cbc9815035a5b19936b73e286757b38df5bc627fa438109028fe510c86d2d`.
 The backend was activated at 19:40 UTC with consistent volume backups in
