@@ -550,6 +550,15 @@ and the next head with one HTTP block-number read and two checks: mainnet
 14493815 → 14493816, Sepolia 14682532 → 14682533. These checks prove transport
 operation, not funded transaction latency or a discovery speed advantage.
 
+Demo commit `279fb65` passed the complete CI and fork-delta check and is deployed
+using the isolated npm-package consumer build. All five public build files match
+local SHA-256 digests; the entry bundle is `index-Dj_80CHH.js` (122.20 kB gzip).
+Headless Chrome under the deployed CSP also received subsequent heads on both
+networks with one catch-up read each and no page errors. The prior demo is backed
+up at `/root/strk20-deploy-20260907-heads/demo-before.tar.gz`. Backend services and
+wallet data were not changed. A newly submitted funded transaction is still
+needed to quantify the end-to-end improvement.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,
