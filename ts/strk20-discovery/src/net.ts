@@ -25,6 +25,7 @@ export class PublicTransport {
       undefined,
       path === "manifest.json" || path.startsWith("proofs/") ? "no-cache" : "default",
       signal,
+      path.startsWith("snapshots/") || path.startsWith("epochs/"),
     );
   }
   async rpc(
@@ -59,27 +60,58 @@ export class PublicTransport {
     body?: string,
     cache: RequestCache = "default",
     signal?: AbortSignal,
+    download = false,
   ): Promise<{ bytes: Uint8Array; etag: string }> {
     const start = performance.now();
-    const res = await fetch(url, {
-      method: body ? "POST" : "GET",
-      cache,
-      credentials: "omit",
-      redirect: "error",
-      ...(body
-        ? { body, headers: { "content-type": "application/json" } }
-        : {}),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) throw new Error(`TRANSPORT: HTTP ${res.status}`);
-    const bytes = await readBounded(res, 32 * 1024 * 1024);
-    this.record({
-      url,
-      method: body ? "POST" : "GET",
-      bytes: bytes.length,
-      ms: performance.now() - start,
-    });
-    return { bytes, etag: res.headers.get("etag") ?? "" };
+    // Large immutable artifacts can take longer than an RPC while still making
+    // steady progress. Bound idle time as well as total time and response size.
+    const control = download ? new AbortController() : undefined;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let received = 0;
+    const fail = (reason: string) => control!.abort(new Error(
+      `TRANSPORT: ${reason}: ${new URL(url).pathname} (${received} bytes received)`,
+    ));
+    const progress = control ? (size: number) => {
+      received = size;
+      clearTimeout(idle);
+      idle = setTimeout(() => fail("download idle for 30s"), 30_000);
+    } : undefined;
+    if (progress) {
+      progress(0);
+      deadline = setTimeout(() => fail("download exceeded 5 minutes"), 300_000);
+    }
+    const timeout = control?.signal ?? AbortSignal.timeout(30_000);
+    try {
+      const res = await fetch(url, {
+        method: body ? "POST" : "GET",
+        cache,
+        credentials: "omit",
+        redirect: "error",
+        ...(body
+          ? { body, headers: { "content-type": "application/json" } }
+          : {}),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      });
+      if (!res.ok) {
+        await res.body?.cancel();
+        throw new Error(`TRANSPORT: HTTP ${res.status}`);
+      }
+      const bytes = await readBounded(res, 32 * 1024 * 1024, progress);
+      this.record({
+        url,
+        method: body ? "POST" : "GET",
+        bytes: bytes.length,
+        ms: performance.now() - start,
+      });
+      return { bytes, etag: res.headers.get("etag") ?? "" };
+    } catch (error) {
+      if (control?.signal.aborted) throw control.signal.reason;
+      throw error;
+    } finally {
+      clearTimeout(idle);
+      clearTimeout(deadline);
+    }
   }
   async live(
     onEvent: (name: string, data: string) => void,
@@ -152,6 +184,7 @@ export class PublicTransport {
 async function readBounded(
   response: Response,
   limit: number,
+  progress?: (size: number) => void,
 ): Promise<Uint8Array> {
   if (!response.body) throw new Error("TRANSPORT: empty response");
   const reader = response.body.getReader();
@@ -163,6 +196,7 @@ async function readBounded(
       if (done) break;
       size += value.length;
       if (size > limit) throw new Error("TRANSPORT: response too large");
+      if (value.length) progress?.(size);
       parts.push(value);
     }
   } finally {

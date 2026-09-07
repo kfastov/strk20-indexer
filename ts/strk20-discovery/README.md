@@ -60,6 +60,12 @@ feed metadata, checkpoint acquisition, data loading, verification, saving and re
 Data loading reports completed/total files. These are work stages, not elapsed-time
 percentages; verification remains one synchronous WASM operation in the Worker.
 
+From 0.1.3, snapshot and epoch downloads allow up to 30 seconds without new
+bytes and five minutes in total, with a 32 MiB response limit. A slow transfer
+that keeps making progress can therefore finish beyond 30 seconds. RPC and
+metadata requests retain their 30-second total deadline. Download timeout errors
+identify the public artifact path and the number of bytes received.
+
 `LocalDiscoveryProvider` implements the official `DiscoveryProviderInterface`:
 `discoverNotes`, `discoverChannels` and `discoverRequirement`. Notes contain actual
 SDK `Witness` objects, channels contain token and note nonces, and cursors contain
