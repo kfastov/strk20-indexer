@@ -395,6 +395,9 @@ label {
   border-top: 1px solid #202b3e;
   padding-top: 16px;
 }
+.connection-save { border: 1px solid #3b506e; border-radius: 8px; padding: 10px 16px; background: #1c2d44; color: #c7dfff; font-size: 12px; }
+.rpc-options .field { max-width: 520px; }
+.rpc-options input { font-size: 13px; }
 .options > summary {
   font-size: 12px;
 }

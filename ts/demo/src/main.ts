@@ -20,6 +20,7 @@ import {
   parseStrk,
   type Network,
 } from "./network.ts";
+import { networkConfig, parseRpcSettings, rpcSettingsKey } from "./rpc-settings.ts";
 import { Operations } from "./operations.ts";
 import { Transactions } from "./transactions.ts";
 import { observeAt, type Comparison } from "./benchmark.ts";
@@ -51,6 +52,7 @@ const operations = new Operations(() => {
   render();
 });
 mount(network);
+element<HTMLInputElement>("rpc-url").value = localStorage.getItem(rpcSettingsKey(network)) ?? "";
 const text = (id: string, value: string) => {
   const node = element(id);
   if (node.textContent !== value) node.textContent = value;
@@ -109,6 +111,8 @@ function step(): {
 function render(): void {
   renderStartup(startup);
   const current = step();
+  text("rpc-status", localStorage.getItem(rpcSettingsKey(network)) ? "QuickNode · saved in this browser" : "Default public RPC");
+  text("rpc-network", network === "mainnet" ? "Starknet mainnet HTTPS URL" : "Starknet Sepolia HTTPS URL");
   text("title", current.label);
   text("description", current.description);
   text("button-text", current.label);
@@ -125,7 +129,7 @@ function render(): void {
   button.disabled = busy;
   button.setAttribute("aria-busy", String(busy));
   element<HTMLSelectElement>("network").disabled = busy;
-  for (const id of ["import", "backup"])
+  for (const id of ["import", "backup", "save-rpc"])
     element<HTMLButtonElement>(id).disabled = busy;
   element("wallet").hidden = !wallet;
   const walletDetails = element<HTMLDetailsElement>("wallet-details");
@@ -213,7 +217,7 @@ async function initialize(pageLoad = false): Promise<void> {
         account = undefined;
         transactions = undefined;
         await previous?.close();
-        const config = NETWORKS[network];
+        const config = networkConfig(network);
         provider = new LocalDiscoveryProvider({
           network,
           feedUrl: config.feedUrl,
@@ -434,6 +438,7 @@ element<HTMLInputElement>("backup-file").onchange = (event) =>
     wallet = imported;
     selectedAction = undefined;
     network = wallet.network;
+    element<HTMLInputElement>("rpc-url").value = localStorage.getItem(rpcSettingsKey(network)) ?? "";
     element<HTMLSelectElement>("network").value = network;
     await initialize();
   });
@@ -443,6 +448,7 @@ element<HTMLSelectElement>("network").onchange = () =>
     const selectedWallet = await loadWallet(selected);
     localStorage.setItem("strk20-demo-network", selected);
     network = selected;
+    element<HTMLInputElement>("rpc-url").value = localStorage.getItem(rpcSettingsKey(network)) ?? "";
     wallet = selectedWallet;
     selectedAction = undefined;
     info = undefined;
@@ -451,6 +457,21 @@ element<HTMLSelectElement>("network").onchange = () =>
     deployed = false;
     await initialize();
   });
+element("save-rpc").onclick = () => void run(async () => {
+  const value = element<HTMLInputElement>("rpc-url").value.trim();
+  const config = parseRpcSettings(network, value);
+  const response = await fetch(config?.rpc ?? NETWORKS[network].rpc, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "starknet_chainId", params: [] }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const result = await response.json();
+  if (!response.ok || result.error || result.result !== NETWORKS[network].chainId)
+    throw new Error("RPC connection check failed. Check the URL and selected network.");
+  if (config) localStorage.setItem(rpcSettingsKey(network), value);
+  else localStorage.removeItem(rpcSettingsKey(network));
+  await initialize();
+});
 element("metrics").onclick = () =>
   downloadJson(
     { network, operations: operations.entries, comparisons },

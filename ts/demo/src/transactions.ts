@@ -12,10 +12,11 @@ import {
   ProvingServiceProofProvider,
   type DiscoveryProviderInterface,
 } from "strk20-discovery/privacy-sdk";
-import { NETWORKS, STRK } from "./network.ts";
+import { STRK } from "./network.ts";
 import { saveWallet, type Wallet, type Action } from "./wallet.ts";
 import { Operations, type Operation } from "./operations.ts";
 import { SubmissionSigner } from "./submission-signer.ts";
+import { networkConfig } from "./rpc-settings.ts";
 import { waitForReceipt } from "./confirmation.ts";
 import { waitForBlock } from "./block-wait.ts";
 
@@ -37,7 +38,7 @@ export class Transactions {
     this.wallet = wallet;
     this.operations = operations;
     this.discovery = discovery;
-    const config = NETWORKS[wallet.network];
+    const config = networkConfig(wallet.network);
     this.rpc = new RpcProvider({ nodeUrl: config.rpc, batch: false });
     this.account = new Account({
       provider: this.rpc,
@@ -65,7 +66,7 @@ export class Transactions {
     this.transfers = this.makeTransfers(discovery);
   }
   private makeTransfers(discovery: DiscoveryProviderInterface) {
-    const config = NETWORKS[this.wallet.network];
+    const config = networkConfig(this.wallet.network);
     return createPrivateTransfers({
       account: this.account,
       poolContractAddress: config.pool,
@@ -81,7 +82,7 @@ export class Transactions {
     });
   }
   async verifyNetwork(): Promise<void> {
-    if ((await this.rpc.getChainId()) !== NETWORKS[this.wallet.network].chainId)
+    if ((await this.rpc.getChainId()) !== networkConfig(this.wallet.network).chainId)
       throw new Error("RPC reports another network.");
     await this.rpc.getClass(this.wallet.classHash, "latest");
   }
@@ -130,7 +131,7 @@ export class Transactions {
     hash: string,
   ): Promise<{ hash: string; block: number }> {
     const receipt = await waitForReceipt(
-      hash, NETWORKS[this.wallet.network].ws, () => this.rpc.getTransactionReceipt(hash),
+      hash, networkConfig(this.wallet.network).ws, () => this.rpc.getTransactionReceipt(hash),
     );
     if (receipt.execution_status === "REVERTED") {
       delete this.wallet.pending;
@@ -242,7 +243,7 @@ export class Transactions {
           async () => {
             if (action === "shield")
               return (await this.rpc.getBlockNumber()) - PROOF_DEPTH;
-            return waitForBlock(NETWORKS[this.wallet.network].ws,
+            return waitForBlock(networkConfig(this.wallet.network).ws,
               () => this.rpc.getBlockNumber(), async (head) => {
               const found = await this.transfers.discoverNotes();
               const notes = found.notes.get(BigInt(STRK)) ?? [];

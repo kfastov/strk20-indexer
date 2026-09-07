@@ -44,6 +44,11 @@ export function mount(network: Network): void {
         <div id="log" tabindex="0" role="region" aria-label="Operation history"><p class="empty">No operations yet.</p></div>
         <div class="activity-foot">Latest first · select an operation for details</div>
       </aside></div>
+      <details class="options rpc-options"><summary>RPC connection · <span id="rpc-status">Default public RPC</span></summary>
+        <p>Use your QuickNode endpoint for this network. The URL is saved only in this browser. Leave it empty to use the default connection.</p>
+        <div class="field"><label id="rpc-network" for="rpc-url">Starknet Sepolia HTTPS URL</label><input id="rpc-url" type="password" placeholder="https://…quiknode.pro/…" autocomplete="off" spellcheck="false" /></div>
+        <button id="save-rpc" class="connection-save" type="button">Save &amp; reconnect</button>
+      </details>
       <details class="options"><summary>Compare discovery &amp; verification details</summary>
         <label class="check"><input id="compare" type="checkbox" /> Compare with the official indexer</label>
         <p>This sends this demo wallet’s viewing key to the official discovery service. It sees the same transaction and block. No duplicate transaction is sent. Local discovery reuses any saved state; the reference starts without a supplied cursor. This comparison includes those cache conditions.</p>
