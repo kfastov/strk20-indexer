@@ -6,7 +6,40 @@ decision and are deliberately not in this repo.
 
 ## Current production deployment
 
-Latest update, 2026-09-07: demo entry `index-wK6em-u-.js`, built in an
+Latest update, 2026-09-07 (17:25 UTC): backend `735aeb3`, image
+`2a9eb9d69f7da2f65354e3637100ce7ed74dbe0b03a18b7ac54f2f4cc9bbe291`,
+and demo entry `index-BmQA0GAP.js`, built in an isolated consumer of the SDK
+0.1.2 archive. All five public files match the isolated build byte-for-byte.
+Both network containers are healthy and advancing. Complete, consistent volume
+backups, previous static files, nginx configuration and environment are in
+`/root/strk20-deploy-20260907-efficiency/`; the previous image is tagged
+`strk20-indexer:rollback-before-efficiency`. nginx already allows `/feed/*`,
+including the new recent-block proof route, and needed no changes.
+
+SDK 0.1.2 was published from `735aeb3` through GitHub Actions OIDC with
+provenance (npm shasum `cee23f1038bb158e148e61196c5948a0addfe3f6`). Local
+workspace tests, strict Clippy, SDK/demo tests and isolated package checks passed.
+CI passed on its second attempt: the unchanged snapshot equivalence test first
+observed different `l1_accepted` values across sequential fixture reads. That
+test was rerun, not changed or removed.
+
+The SDK now reads verified state while synchronization awaits network I/O and
+skips unchanged cache saves. Serialization and verification still run synchronously
+in one Worker. Mainnet Node/WASM measurements before deployment showed warm
+startup at 357–366 ms; one same-block read still waited 180 ms for serialization
+of changed state. No overall network latency improvement is claimed. A cold
+mainnet attempt hit the existing download deadline; cold startup remains distinct
+from a verified-cache restart.
+
+The feed pushes shared public storage proofs over SSE, with `/feed/proofs/{block}`
+for bootstrap and missed events. Independent header selection and Rust verification
+remain mandatory. The deployed Sepolia SDK verified blocks 14704720–14704722
+with zero proof RPC or proof HTTP requests during the subscription and no errors.
+The public mainnet stream delivered head/proof events, but two fresh mainnet SDK
+runs timed out downloading cold-start data after obtaining the proof and header;
+full mainnet SDK acceptance of this deployment is therefore not confirmed.
+
+Earlier update, 2026-09-07: demo entry `index-wK6em-u-.js`, built in an
 isolated consumer of the prepared SDK 0.1.1 archive. Mainnet proof RPC is now
 `https://api.cartridge.gg/x/starknet/mainnet`: Lava returned HTTP 410 and
 `This endpoint has been discontinued.`, reproduced as a discovery error in the
