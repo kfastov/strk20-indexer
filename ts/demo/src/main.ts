@@ -224,8 +224,6 @@ async function initialize(pageLoad = false): Promise<void> {
               startup = event.value;
               render();
             }
-            if (event.event === "span")
-              operations.detail(event.value.name, event.value.ms, event.value.bytes);
             if (event.event === "state") {
               info = event.value;
               backgroundError = "";
