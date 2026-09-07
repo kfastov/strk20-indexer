@@ -25,7 +25,7 @@ flowchart LR
     S -->|"Pool data via RPC"| D
     D -->|"Your notes + witnesses"| W
     style W fill:#eef2ff,stroke:#6366f1,color:#111827
-    style D fill:#fff1f2,stroke:#dc2626,stroke-width:3px,color:#111827
+    style D fill:#fffbeb,stroke:#d97706,stroke-width:3px,color:#111827
     style S fill:#f3f4f6,stroke:#9ca3af,color:#111827
     linkStyle 0 stroke:#dc2626,stroke-width:4px,color:#dc2626
 ```
