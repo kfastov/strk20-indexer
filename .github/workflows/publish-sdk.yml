@@ -1,0 +1,70 @@
+name: Publish SDK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # OIDC authentication needs npm >=11.5.1. No npm token is used.
+      - run: npm install --global npm@11.18.0
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: npm install --global wasm-pack@0.15.0
+
+      - name: Build the WASM engine
+        working-directory: crates/wasm
+        run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
+
+      - name: Build the pinned official SDK
+        run: ./examples/mainnet/setup.sh
+
+      - run: npm ci
+        working-directory: ts
+
+      - run: npm run build && npm run typecheck
+        working-directory: ts
+
+      - name: Generate real WASM fixtures
+        run: cargo run --release --locked -p strk20-engine --example make_fixture
+
+      - run: npm test
+        working-directory: ts
+
+      - name: Build and test the isolated release archive
+        working-directory: ts
+        run: npm run check:release --workspace strk20-discovery
+
+      - name: Publish the tested archive through npm OIDC
+        run: |
+          version=$(node -p "require('./ts/strk20-discovery/package.json').version")
+          npm publish "ts/strk20-discovery/release/strk20-discovery-${version}.tgz" --access public --ignore-scripts --provenance
+          npm view "strk20-discovery@${version}" version dist.integrity dist.attestations --json
