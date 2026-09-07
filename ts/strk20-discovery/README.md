@@ -24,17 +24,41 @@ import { LocalDiscoveryProvider } from 'strk20-discovery';
 const discovery = new LocalDiscoveryProvider({
   network: 'mainnet',
   feedUrl: 'https://strk20.nullref.cc/mainnet/feed',
+  onEvent(event) {
+    if (event.event === 'state') {
+      // The new pool state has passed verification. Discover this wallet's
+      // notes locally, without another network request.
+      void publishNotes().catch(reportError);
+    }
+    if (event.event === 'error') reportError(new Error(event.value));
+  },
 });
 const mine = discovery.forAccount({ address, viewingKey });
 
-await discovery.ready;                    // verified startup or local cache restore
-const cached = await mine.restore();       // saved private discovery result
-const { notes } = await mine.discoverNotes(); // catch up and verify current state
-await discovery.subscribe();              // receive subsequent updates over SSE
+async function publishNotes() {
+  const result = await mine.restore();
+  if (result) renderNotes(result.notes);
+}
 
-// When the wallet closes:
-await discovery.close();
+await discovery.ready;
+await publishNotes();        // initial result, including a warm cache restore
+await discovery.subscribe(); // keep verifying updates and emitting state events
+
+// Call this when the wallet/component closes, not immediately after subscribe.
+const stop = () => discovery.close();
 ```
+
+`renderNotes` and `reportError` are your application's callbacks. `onEvent` is
+the update channel in both browser and Node providers. `state` means verification
+finished; `head` only announces feed availability and must not update a balance.
+`mine.restore()` runs discovery against the latest verified local state, including
+newly received records. It does not merely return an old saved note list.
+
+Each result contains the wallet's **full current unspent note set**, with real
+SDK witnesses. Replace the displayed set on each callback, or compare note IDs
+to identify additions and removals. Updates can coalesce; this is a state
+subscription, not a transaction-by-transaction history. Handle errors from both
+the event stream and the asynchronous local read, as shown above.
 
 The provider implements the official SDK's `discoverNotes`, `discoverChannels`
 and `discoverRequirement`. Results contain real SDK witnesses and cursors.
