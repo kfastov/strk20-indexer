@@ -128,11 +128,18 @@ function render(): void {
   for (const id of ["import", "backup"])
     element<HTMLButtonElement>(id).disabled = busy;
   element("wallet").hidden = !wallet;
+  const walletDetails = element<HTMLDetailsElement>("wallet-details");
+  if (walletDetails.dataset.deployed !== String(deployed)) {
+    walletDetails.open = !deployed;
+    walletDetails.dataset.deployed = String(deployed);
+  }
   element("wallet-actions").hidden = !wallet || !deployed || !transactions;
+  element<HTMLButtonElement>("wallet-actions").disabled = busy || !!wallet?.pending;
+  if (busy || wallet?.pending || element("wallet-actions").hidden) element("action-menu").hidePopover();
   for (const action of ["shield", "transfer", "withdraw", "discover"] as const) {
     const choice = element<HTMLButtonElement>(`choose-${action}`);
     choice.disabled = busy || !!wallet?.pending;
-    choice.setAttribute("aria-pressed", String(current.action === action));
+    choice.setAttribute("aria-checked", String(current.action === action));
   }
   element("amount-row").hidden = !["shield", "transfer", "withdraw"].includes(
     current.action,
@@ -394,6 +401,8 @@ for (const action of ["shield", "transfer", "withdraw", "discover"] as const) {
   element(`choose-${action}`).onclick = () => {
     if (busy || wallet?.pending) return;
     selectedAction = action;
+    element("action-menu").hidePopover();
+    element("wallet-actions").focus();
     error = "";
     // A private recipient must not silently become a public withdrawal target.
     element<HTMLInputElement>("recipient").value = action === "withdraw" ? wallet?.address ?? "" : "";
