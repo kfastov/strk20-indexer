@@ -156,3 +156,18 @@ replaces the development-only SDK path with the exact bundled version and keeps
 public transitive dependencies as normal npm dependencies. Publish this archive,
 not the development workspace directory. Upstream attribution is in `UPSTREAM.txt`
 and the bundled package's license. The repository's Apache-2.0 license also ships.
+
+Maintainer releases use `.github/workflows/publish-sdk.yml` on `main`. Configure
+the package's npm trusted publisher for GitHub user `kfastov`, repository
+`strk20-indexer`, workflow `publish-sdk.yml`, with direct `npm publish` allowed.
+After committing and pushing a new package version and its lockfile, run:
+
+```sh
+gh workflow run publish-sdk.yml --ref main
+```
+
+The GitHub-hosted runner builds WASM and the pinned official SDK, runs tests and
+the isolated consumer check, then publishes the tested archive with OIDC and
+provenance. No npm token or local npm login is needed for this workflow. A
+previously published version cannot be overwritten; inspect the run and registry
+before retrying an uncertain publication.
