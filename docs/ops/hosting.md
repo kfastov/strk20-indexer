@@ -6,7 +6,41 @@ decision and are deliberately not in this repo.
 
 ## Current production deployment
 
-Latest update, 2026-09-07 (17:25 UTC): backend `735aeb3`, image
+Latest update, 2026-09-07 (19:52 UTC): backend `4cd7f69`, image
+`257cbc9815035a5b19936b73e286757b38df5bc627fa438109028fe510c86d2d`.
+The backend was activated at 19:40 UTC with consistent volume backups in
+`/root/strk20-deploy-20260907-sse-delta/`; rollback image is
+`strk20-indexer:rollback-before-sse-delta`. Both networks are healthy and advancing.
+The subsequent static deployment uses source `ffb15c1`, SDK 0.1.5,
+entry `index-D7mBwpvE.js` and worker `worker-entry-vezKQu9i.js`.
+All five hosted files match the isolated SDK-consumer build byte-for-byte.
+Static rollback files are in `/root/strk20-deploy-20260907-wallet-actions/`.
+The demo now permits repeated deposit, transfer, withdrawal and discovery without
+clearing wallet history, while preserving the pending-transaction gate.
+
+SDK 0.1.5 was published through Actions OIDC, shasum
+`aa32d4e20d6cfa9c718cdb62805f06fda3e2c720`. Its npm README matches the current
+source and no longer includes old-version instructions. CI passed for both
+`4cd7f69` and `ffb15c1`, including the SSE recovery tests; the final SDK/demo
+suite passed 17/26 tests respectively, plus isolated package verification.
+
+A fresh public-registry Node/WASM consumer verified mainnet block 14520464 in
+43.03 seconds and restored block 14520500 from cache in 366 ms with zero network
+requests. The live leg verified 14 distinct blocks across a forced SSE disconnect.
+Every reconstructed head matched its canonical SHA-256 ETag. Twelve incremental
+head frames totalled 9,710 bytes; their corresponding full NDJSON bodies totalled
+2,668,711 bytes. Both connection openings sent a full current tail. The forced
+disconnect cut the block-14520492 proof; one automatic proof GET recovered it.
+There were no manifest/head GETs during the live leg and no SDK errors. These are
+Node measurements through a local forwarding proxy, not browser latency claims.
+
+Large snapshot/epoch downloads now use a 30-second idle deadline and a five-minute
+total limit: continuing downloads no longer fail at 30 seconds. RPC/metadata
+deadlines remain unchanged. SSE sends only new records and header/trailer changes
+when the existing record prefix is unchanged; reconnect, rollover or a changed
+prefix replaces the tail. Serialization and WASM verification remain in one Worker.
+
+Earlier update, 2026-09-07 (17:25 UTC): backend `735aeb3`, image
 `2a9eb9d69f7da2f65354e3637100ce7ed74dbe0b03a18b7ac54f2f4cc9bbe291`,
 and demo entry `index-BmQA0GAP.js`, built in an isolated consumer of the SDK
 0.1.2 archive. All five public files match the isolated build byte-for-byte.
