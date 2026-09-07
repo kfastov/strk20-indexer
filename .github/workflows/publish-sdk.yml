@@ -67,4 +67,5 @@ jobs:
         run: |
           version=$(node -p "require('./ts/strk20-discovery/package.json').version")
           npm publish "ts/strk20-discovery/release/strk20-discovery-${version}.tgz" --access public --ignore-scripts --provenance
-          npm view "strk20-discovery@${version}" version dist.integrity dist.attestations --json
+          # npm publish confirms acceptance. Registry read replicas may still
+          # return 404 immediately afterwards; that must not fail a release.

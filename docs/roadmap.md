@@ -49,23 +49,23 @@ historical decision record, not a current checklist. Source reviewed: `1955dd9`.
 The deadline is September 7, 23:59 UTC (September 8, 02:59 Moscow), according to
 the [current rules](https://github.com/starkience/strk20-hackathon#submitting).
 
-The September 7 live recheck of `projects.json` still reports four verified
-mainnet transactions, `demo=true`, `mainnet=true`, `video=false`, status `building`.
-Its indexed source is `e47419c`, older than local HEAD `4bb6261`; the additional
-three hashes and current fixes remain local. All seven local hashes were checked
-against mainnet receipts: SUCCEEDED and pool events present. No extra submission
-PR is required; the repository at the deadline is the entry.
+September 7 release update: all seven mainnet hashes and acceptance fixes are
+committed and pushed. Direct receipt checks confirm SUCCEEDED, ACCEPTED_ON_L1
+and STRK20 pool events for every hash. The hub has indexed all seven; its latest
+mainnet flags disagree with direct chain verification because its checker uses
+a discontinued RPC default. That external issue is outside this release's scope.
+No extra submission PR is required; the repository at the deadline is the entry.
 
 | Original items | Current evidence / remaining acceptance |
 |---|---|
 | A: mainnet repair and backward epoch recut (1–2) | Repair/recut code and published snapshots exist; full consumer state checks now pass on both networks. This audit did not repeat the old all-history event-count comparison. State-root agreement does not prove intermediate history. |
 | B: CORS, Docker, compose, health, cache headers (3–7) | Deployed on both networks; backups, rollback, advancing heads and complete public SSE payloads checked. Final release smoke remains part of acceptance. |
 | C: packaging-only fork, single pin, delta CI, upstream PR (8–11) | Implemented. Upstream PR #984 remains open; merging is outside our control and is not a submission dependency. |
-| D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Release 0.1.0 bundles the unchanged official SDK and WASM. Installation, Node discovery against Sepolia, and a demo build passed in an isolated consumer without a source checkout or GitHub Packages credentials. [0.1.0 is published on npm](https://www.npmjs.com/package/strk20-discovery). |
+| D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Release 0.1.1 bundles the unchanged official SDK and WASM. Installation, Node discovery against Sepolia, and a demo build passed in an isolated consumer without a source checkout or GitHub Packages credentials. [0.1.1 is published on npm with GitHub OIDC provenance](https://www.npmjs.com/package/strk20-discovery/v/0.1.1). |
 | D: transaction-history API (13) | Still optional, not implemented as the proposed complete transaction-history surface. Do not imply current-state verification authenticates transaction history. |
 | E: README, diagram, pitch (14–16) | README reflects the completed mainnet cycle. On September 7, pitch was revised to two opening diagrams showing the viewing-key trust boundary and local discovery, followed by a continuous live demo. No closing card or edited waits. The dataflow diagram was also reconciled with mandatory checkpoint verification, folded live-tail cache and actual trust boundaries. |
 | E: Sepolia scripts (17) | The old standalone Sepolia scripts were removed on the user's instruction; the SDK and browser demo are now the maintained integration path. |
-| F: main branch and mainnet hashes (18–19) | Four earlier hashes are hub-verified. Three additionally rechecked hashes from the completed SDK mainnet cycle are now in local metadata. September 7 fixes and metadata edits remain uncommitted/unpushed; the public hub has not indexed those edits. |
+| F: main branch and mainnet hashes (18–19) | All seven mainnet hashes and acceptance fixes are committed and pushed in 17e2b68. CI passed on that commit and on the subsequent release setup. Direct receipts confirm successful pool calls; external hub validation is tracked separately above. |
 | F: video and final metadata (20–21) | Not done: no video URL, no final metadata/hub acceptance. Empty optional `contracts` is not a missing deployed contract. |
 
 ### Later accepted requirements
@@ -103,7 +103,7 @@ PR is required; the repository at the deadline is the entry.
   restart stays local. Actual work stages drive the startup progress bar. Tests,
   isolated package installation, browser cold/restart checks and static deployment
   are recorded in [demo evidence](spec/demo-app.md#startup-verification-and-visible-progress-2026-09-07).
-  A 0.1.1 archive is prepared and installation-tested; public npm remains 0.1.0 until release.
+  Version 0.1.1 is published. Installation from the public npm registry, real Node/WASM cold and offline-restart tests, TypeScript checks and a Vite demo build passed outside the repository.
 - **Deferred by the user on 2026-09-07:** separate foreground transaction spans from background SSE/cache spans. The
   current global `Operations.active` attaches concurrent Worker events to whichever
   foreground action is open; nested durations cannot be summed as serial work.
@@ -154,10 +154,11 @@ assets, all seven mainnet receipts, SDK/demo tests and isolated packaging passed
 The dataflow diagram and stale acceptance notes were reconciled.
 See [the complete check and limitations](spec/demo-app.md#non-video-submission-recheck-2026-09-07).
 
-Still required apart from video: commit/push, CI on the resulting commit, npm
-0.1.1 publication and hub refresh. The archive is prepared; npm authentication
-returned E401. No new full mainnet cycle, transport rewrite, history API or
-upstream merge is required to close this release.
+Commit/push, source CI, npm 0.1.1 publication and installation verification are
+complete. npm trusted publishing is configured for `publish-sdk.yml`; releases
+require no local npm login or long-lived npm token. The remaining submission
+artifact is the video and its URL in metadata. No new full mainnet cycle,
+transport rewrite, history API or upstream merge is required to close this release.
 
 ### Performance work boundary
 

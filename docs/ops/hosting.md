@@ -19,8 +19,19 @@ The mainnet container was recreated with its existing image and volumes after
 changing only `MAINNET_RPC_FALLBACK` in the deployment environment. Sepolia was
 not restarted. Fresh full Node/WASM verification passed on both networks;
 mainnet browser restore and explicit discovery then passed in 3.48 and 4.14 seconds.
-These source edits remain uncommitted. Public npm is still 0.1.0; `npm whoami`
-returned E401 during the release preflight, so publishing 0.1.1 requires login.
+The acceptance edits are committed and pushed in `17e2b68`. SDK 0.1.1 was
+published from `8cba0c9` using GitHub Actions OIDC, with npm provenance. An
+isolated install from the public registry passed real Node/WASM cold startup,
+offline restart, TypeScript checks and a Vite demo build. The initial release
+run's publication succeeded, but an immediate `npm view` read hit a stale
+registry replica and made its final step fail; the redundant immediate read
+was removed. The published package is available and must not be republished.
+
+The npm trusted publisher authorizes `kfastov/strk20-indexer`, workflow
+`publish-sdk.yml`, including direct `npm publish`. Future SDK releases run with
+`gh workflow run publish-sdk.yml --ref main` after a version bump and push.
+No local npm login or long-lived npm token is needed. This publishes the SDK;
+static demo and server deployment remain separate operations.
 
 The earlier static deployment `index-CIUMHzjB.js` added a one-shot receipt
 catch-up after terminal WebSocket failure. Mainnet withdrawal and subsequent
