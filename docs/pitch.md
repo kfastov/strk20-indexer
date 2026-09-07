@@ -7,6 +7,9 @@
 
 ## Карточки
 
+Готовые карточки: [pitch/slides/index.html](pitch/slides/index.html), переключение
+стрелками ←/→.
+
 ### 1. Проблема: “Private notes. A shared viewing key.”
 
 Слева кошелёк, в центре discovery service, справа Starknet. Красная стрелка —
