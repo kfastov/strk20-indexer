@@ -8,6 +8,7 @@ and discovers notes locally. The same Rust engine runs in a browser Worker or a
 Node worker thread. A self-hostable Rust indexer publishes the shared feed.
 
 [Try the live demo](https://strk20.nullref.cc/demo/) ·
+[Watch the demo video](https://youtu.be/ngoYvunrOsI) ·
 [SDK reference](ts/strk20-discovery/README.md) ·
 [Verification and measurements](docs/spec/demo-app.md) ·
 [Self-hosting](docs/ops/hosting.md)
