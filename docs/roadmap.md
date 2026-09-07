@@ -1,6 +1,6 @@
 # Implementation status and next work
 
-Updated 2026-09-06. Work resumed on the user's instruction after the SDK and
+Updated 2026-09-07. Work resumed on the user's instruction after the SDK and
 demo stages were committed and pushed.
 The current contracts are [consumer path](spec/consumer-path.md),
 [SDK API](../ts/strk20-discovery/README.md), and [demo](spec/demo-app.md).
@@ -31,6 +31,10 @@ The current contracts are [consumer path](spec/consumer-path.md),
   signatures on 2026-09-06. Our discovered note was spent, the replacement was
   withdrawn, and official/local note and witness results agreed. Receipts and
   timing limits are recorded in [demo evidence](spec/demo-app.md).
+- The mainnet cycle completed on 2026-09-07: the locally discovered transfer note
+  was withdrawn, the accepted receipt recovered after a WS subscription timeout,
+  and local discovery confirmed zero private balance. The video script is now
+  [pitch.md](pitch.md), with two opening workflow diagrams (problem and solution), followed by an unedited live demo.
 - Optional same-block dual observation, explicit viewing-key disclosure consent,
   failures and cache conditions recorded. One transaction serves both observers.
 - Removed the mock engine, duplicate wrappers, synthetic replay bundle and stale
@@ -45,11 +49,12 @@ historical decision record, not a current checklist. Source reviewed: `1955dd9`.
 The deadline is September 7, 23:59 UTC (September 8, 02:59 Moscow), according to
 the [current rules](https://github.com/starkience/strk20-hackathon#submitting).
 
-The hub's current `projects.json` reports four verified mainnet transactions,
-`demo=true`, `mainnet=true`, `video=false`, status `building`. Its indexed source
-is still `5152e07`, so it is not evidence that the newest implementation was
-reviewed. Local `strk20.json.demo_video` is also empty. No extra submission PR is
-required; the repository at the deadline is the entry.
+The September 7 live recheck of `projects.json` still reports four verified
+mainnet transactions, `demo=true`, `mainnet=true`, `video=false`, status `building`.
+Its indexed source is `e47419c`, older than local HEAD `4bb6261`; the additional
+three hashes and current fixes remain local. All seven local hashes were checked
+against mainnet receipts: SUCCEEDED and pool events present. No extra submission
+PR is required; the repository at the deadline is the entry.
 
 | Original items | Current evidence / remaining acceptance |
 |---|---|
@@ -58,9 +63,9 @@ required; the repository at the deadline is the entry.
 | C: packaging-only fork, single pin, delta CI, upstream PR (8–11) | Implemented. Upstream PR #984 remains open; merging is outside our control and is not a submission dependency. |
 | D: consumer/WASM/cache/SSE/SDK (12) | Implemented, including actual SDK interface and account-bound sugar. Release 0.1.0 bundles the unchanged official SDK and WASM. Installation, Node discovery against Sepolia, and a demo build passed in an isolated consumer without a source checkout or GitHub Packages credentials. [0.1.0 is published on npm](https://www.npmjs.com/package/strk20-discovery). |
 | D: transaction-history API (13) | Still optional, not implemented as the proposed complete transaction-history surface. Do not imply current-state verification authenticates transaction history. |
-| E: README, diagram, pitch (14–16) | README rewritten around the SDK and demo, with explicit trust and performance limits. Still outstanding: pitch claims a final-state root proves every historical write, advertises old 0.03 s measurements and says snapshots are unpublished. Diagram still shows polling and a SQLite snapshot. Rewrite before using them for judging/video. |
+| E: README, diagram, pitch (14–16) | README reflects the completed mainnet cycle. On September 7, pitch was revised to two opening diagrams showing the viewing-key trust boundary and local discovery, followed by a continuous live demo. No closing card or edited waits. The dataflow diagram was also reconciled with mandatory checkpoint verification, folded live-tail cache and actual trust boundaries. |
 | E: Sepolia scripts (17) | The old standalone Sepolia scripts were removed on the user's instruction; the SDK and browser demo are now the maintained integration path. |
-| F: main branch and mainnet hashes (18–19) | Commits are pushed; four existing mainnet hashes are verified by the hub. They do not establish a mainnet lifecycle using our newly implemented provider. |
+| F: main branch and mainnet hashes (18–19) | Four earlier hashes are hub-verified. Three additionally rechecked hashes from the completed SDK mainnet cycle are now in local metadata. September 7 fixes and metadata edits remain uncommitted/unpushed; the public hub has not indexed those edits. |
 | F: video and final metadata (20–21) | Not done: no video URL, no final metadata/hub acceptance. Empty optional `contracts` is not a missing deployed contract. |
 
 ### Later accepted requirements
@@ -68,12 +73,12 @@ required; the repository at the deadline is the entry.
 - **Real state proofs:** implemented. Complete state at accepted RPC checkpoint B;
   no proof of all intermediate writes or Ethereum finality. Cache remains explicitly trusted.
 - **Self-contained wallet demo:** real Sepolia shield → local discovery → spend →
-  withdraw passed. Mainnet state verification passed, but a complete funded mainnet
-  lifecycle with the new provider is not yet established. The previous Sepolia run
-  included fixes and reloads; it is not a clean final video run.
+  withdraw passed. Mainnet state verification passed, and a complete funded mainnet
+  lifecycle completed on September 7, including saved-hash receipt recovery.
+  These funded runs included fixes and reloads; they are not clean continuous video takes.
 - **Restart and transfer size:** earlier funded restarts exceeded two seconds; later
-  individual restores were faster. Repeat navigation-to-cached-notes acceptance on
-  the final build is still needed. Record actual cold transferred bytes, WASM work
+  individual restores were faster. September 7 browser reloads restored notes in 3.12 / 2.86 seconds,
+  or 5.26 / 4.75 seconds from navigation; these are observations, not latency bounds. Record actual cold transferred bytes, WASM work
   and catch-up separately; current-state snapshot size and full-history size are
   different quantities. Do not use the former 8/16 MB figures as current cold traffic.
 - **Same-transaction benchmark:** implemented. Latest 20-pair VPS series after queue
@@ -81,7 +86,7 @@ required; the repository at the deadline is the entry.
   fresh-path speed victory established. Final funded evidence remains separate.
 - **Recovery:** both wallet keys persist separately from disposable state, with
   export/import. Precomputed transaction hashes are saved before signing and
-  response-loss behavior is tested. A funded receipt-resume acceptance run remains.
+  response-loss behavior is tested. Funded mainnet receipt-resume acceptance completed on September 7 without a new send.
 - **Simplification/test isolation:** mock engine and duplicate wrappers were removed;
   test ports, child logging and Worker host isolation improved. This is not a completed
   whole-project bloat audit: `ingest.rs` has roughly 1,100 lines before its test module,
@@ -91,19 +96,21 @@ required; the repository at the deadline is the entry.
   example; contact a team only with explicit message authorization. Adoption and
   upstream acceptance remain bonus evidence, not gates for submission.
 
-### Mandatory fixes before submission: mainnet acceptance findings
+### Mainnet acceptance findings and current priorities
 
-- Provider initialization must perform the first snapshot download and complete
-  state verification before reporting readiness. Do not defer a cold sync to the
-  first shield/builder call or merely rename that work. Preserve the trusted-cache
-  fast restart path. Requested by the user on 2026-09-06 after the 53.77 s shield.
-- Separate foreground transaction spans from background SSE/cache spans. The
+- **Done in source and hosted demo, 2026-09-07:** provider initialization downloads,
+  verifies and saves the first state before reporting readiness; a trusted-cache
+  restart stays local. Actual work stages drive the startup progress bar. Tests,
+  isolated package installation, browser cold/restart checks and static deployment
+  are recorded in [demo evidence](spec/demo-app.md#startup-verification-and-visible-progress-2026-09-07).
+  A 0.1.1 archive is prepared and installation-tested; public npm remains 0.1.0 until release.
+- **Deferred by the user on 2026-09-07:** separate foreground transaction spans from background SSE/cache spans. The
   current global `Operations.active` attaches concurrent Worker events to whichever
   foreground action is open; nested durations cannot be summed as serial work.
-- Instrument signing/submission, balance/fee preflight RPCs and persistence so the
+- **Deferred:** instrument signing/submission, balance/fee preflight RPCs and persistence so the
   unaccounted part of transaction latency is visible. The first mainnet transfer
   took 15.53 s; its named foreground stages cover only 13.06 s.
-- Investigate the warm discovery fluctuation observed after the mainnet transfer:
+- **Deferred:** investigate the warm discovery fluctuation observed after the mainnet transfer:
   7.02 s total, with verification spans 1.74–1.89 s and cache-save spans
   1.48–2.18 s, versus earlier 0.15–0.21 s verification. Attribute queue delay,
   execution and background work separately before claiming stable warm latency.
@@ -119,23 +126,38 @@ required; the repository at the deadline is the entry.
 
 ### Ordered remaining work
 
-1. Finish the pitch and single dataflow diagram; README is rewritten. Center the pitch on
-   discovery without disclosing the viewing key and independently checked state;
-   remove historical-proof and universal-speed claims. Keep measurements in the
-   demo evidence rather than multiplying contradictory copies.
-2. Rehearse the final deployed flow from entry through funding, shield, discovery,
-   transfer and withdrawal. Complete mainnet acceptance with our provider; retain
-   hashes and exported timing evidence. Verify reload/receipt recovery and repeated
-   warm starts. Use the same run as the basis for the video.
+1. **Done:** mainnet withdrawal, accepted receipt and post-withdrawal local discovery.
+   The entire cycle is recorded in the demo evidence; no repeat transaction is required.
+2. **Draft revised:** `docs/pitch.md` contains two opening Mermaid diagram prototypes,
+   English narration and a continuous demo plan. No closing card or montage.
+   The 2–3-minute target still requires rehearsal; the author will review demo actions.
+   Warm mainnet reloads restored notes in 3.12 / 2.86 s (5.26 / 4.75 s from navigation);
+   see the startup evidence. No separate slide directory or deck was created.
 3. Keep the release focused on SDK and demo. The user explicitly moved the bloat
    audit and large-server-module revision after submission. Fix release-blocking
    defects found during acceptance without starting that refactor.
-4. Record and publish the three-minute video. Show real transactions, our discovered
-   note supplying the next spend, and the privacy distinction. Explain any compressed
-   waits; do not turn cached-vs-fresh timings into a universal speed claim.
+4. Rehearse, record and publish the three-minute video: problem diagram, solution
+   diagram, then live demo with a prepared wallet and warm cache. Keep the take
+   continuous, including waits; reduce the number of actions if needed. Do not
+   turn cached-vs-fresh timings into a universal speed claim.
 5. Insert the real video URL into `strk20.json`, retain valid mainnet hashes, push,
    then verify the hub recognizes all requirements. Check public demo/assets,
    clean build and CI once more on the final release.
+
+### Final non-video acceptance, September 7
+
+The recheck found and fixed a real hosted discovery failure: mainnet proof RPC
+Lava returned HTTP 410. Cartridge now serves this role in SDK/demo defaults and
+the deployed mainnet environment; native/compose/example defaults were updated.
+The restored browser discovery passed. Fresh state verification, public SSE,
+assets, all seven mainnet receipts, SDK/demo tests and isolated packaging passed.
+The dataflow diagram and stale acceptance notes were reconciled.
+See [the complete check and limitations](spec/demo-app.md#non-video-submission-recheck-2026-09-07).
+
+Still required apart from video: commit/push, CI on the resulting commit, npm
+0.1.1 publication and hub refresh. The archive is prepared; npm authentication
+returned E401. No new full mainnet cycle, transport rewrite, history API or
+upstream merge is required to close this release.
 
 ### Performance work boundary
 

@@ -7,5 +7,7 @@ export type {
   Span,
   RequestRecord,
   WorkerEvent,
+  StartupProgress,
+  StartupStage,
 } from "./types.ts";
 export type { AccountDiscovery } from "./provider.ts";

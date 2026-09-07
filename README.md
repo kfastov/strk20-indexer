@@ -27,6 +27,7 @@ const discovery = new LocalDiscoveryProvider({
 });
 const mine = discovery.forAccount({ address, viewingKey });
 
+await discovery.ready;
 const cached = await mine.restore(); // previously verified local results
 await discovery.subscribe();        // full state updates over SSE
 const { notes } = await mine.discoverNotes();
@@ -69,13 +70,15 @@ discovery cache does not delete the wallet. Use small amounts and keep the backu
 The hosted proving service receives proving inputs: private local discovery does
 not make every part of transaction creation private from that service.
 
-The full Sepolia shield → local discovery → spend → withdraw flow has succeeded
-on chain. Both networks have passed complete pool-state verification. A final
-funded mainnet flow using this SDK remains a separate acceptance item; existing
-mainnet transaction hashes alone do not prove that integration. Receipts and
+The full shield → local discovery → spend → withdraw flow has succeeded on
+Sepolia and mainnet using this provider. The mainnet withdrawal needed receipt
+recovery after a status-subscription timeout; it was not sent twice. Both networks
+have passed complete pool-state verification. Receipts, recovery evidence and
 measurement conditions are in [the evidence](docs/spec/demo-app.md).
 
 ## How it works
+
+[Dataflow and trust boundaries](docs/diagrams/dataflow.md).
 
 ```text
 Starknet head notification → block, receipts and storage changes → Rust indexer

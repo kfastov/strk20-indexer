@@ -2,6 +2,7 @@ import {
   LocalDiscoveryProvider,
   type AccountDiscovery,
   type EngineInfo,
+  type StartupProgress,
 } from "strk20-discovery";
 import {
   loadWallet,
@@ -22,7 +23,7 @@ import {
 import { Operations } from "./operations.ts";
 import { Transactions } from "./transactions.ts";
 import { observeAt, type Comparison } from "./benchmark.ts";
-import { element, mount, renderOperations, downloadJson } from "./ui.ts";
+import { element, mount, renderOperations, renderStartup, downloadJson } from "./ui.ts";
 
 type Notes = Awaited<ReturnType<AccountDiscovery["discoverNotes"]>>;
 let network: Network =
@@ -41,6 +42,7 @@ let info: EngineInfo | undefined,
   error = "",
   backgroundError = "";
 let observedTransaction: string | undefined;
+let startup: StartupProgress | undefined;
 const comparisons: Comparison[] = [];
 const operations = new Operations(() => {
   renderOperations(operations.entries);
@@ -69,6 +71,12 @@ function step(): {
     | "refresh"
     | "initialize";
 } {
+  if (!provider || info?.verifiedAt == null)
+    return {
+      label: "Initialize discovery",
+      description: "Load and verify pool state before starting a transaction.",
+      action: "initialize",
+    };
   if (!wallet)
     return {
       label: "Create demo wallet",
@@ -139,6 +147,7 @@ function step(): {
   };
 }
 function render(): void {
+  renderStartup(startup);
   const current = step();
   text("title", current.label);
   text("description", current.description);
@@ -217,74 +226,92 @@ async function publicState(): Promise<void> {
   ]);
 }
 async function initialize(pageLoad = false): Promise<void> {
-  await operations.run(
-    wallet ? "Restore wallet and discovery" : "Initialize discovery",
-    async () => {
-      backgroundError = "";
-      const previous = provider;
-      provider = undefined;
-      account = undefined;
-      transactions = undefined;
-      await previous?.close();
-      const config = NETWORKS[network];
-      provider = new LocalDiscoveryProvider({
-        network,
-        feedUrl: config.feedUrl,
-        rpcUrl: config.rpc,
-        proofRpcUrl: config.proofRpc,
-        onEvent: (event) => {
-          if (event.event === "span")
-            operations.detail(event.value.name, event.value.ms, event.value.bytes);
-          if (event.event === "state") {
-            info = event.value;
-            backgroundError = "";
-            render();
-            // The stream updates pool state; discover this account locally
-            // after background updates, without another network round trip.
-            if (!busy && account) {
-              const current = account;
-              void current
-                .restore()
-                .then((found) => {
-                  if (account === current) {
-                    notes = found;
-                    backgroundError = "";
-                    render();
-                  }
-                })
-                .catch((cause: unknown) => {
-                  if (account === current) {
-                    backgroundError = String(cause);
-                    render();
-                  }
-                });
+  startup = { stage: "engine" };
+  info = undefined;
+  notes = undefined;
+  render();
+  try {
+    await operations.run(
+      wallet ? "Restore wallet and discovery" : "Initialize discovery",
+      async () => {
+        backgroundError = "";
+        const previous = provider;
+        provider = undefined;
+        account = undefined;
+        transactions = undefined;
+        await previous?.close();
+        const config = NETWORKS[network];
+        provider = new LocalDiscoveryProvider({
+          network,
+          feedUrl: config.feedUrl,
+          rpcUrl: config.rpc,
+          proofRpcUrl: config.proofRpc,
+          onEvent: (event) => {
+            if (event.event === "startup") {
+              startup = event.value;
+              render();
             }
-          }
-          if (event.event === "error") {
-            backgroundError = event.value;
-            render();
-          }
-        },
-      });
-      info = await provider.ready;
-      account = wallet
-        ? provider.forAccount({
-            address: wallet.address,
-            viewingKey: BigInt(wallet.viewingKey),
-          })
-        : undefined;
-      notes = await account?.restore();
-      if (pageLoad)
-        operations.detail("Navigation to restored discovery result", performance.now());
-      transactions = wallet
-        ? new Transactions(wallet, provider, operations)
-        : undefined;
-      render();
-    },
-  );
-  if (transactions)
-    await operations.run("Check public wallet balance", publicState);
-  if (account && info?.verifiedAt !== null) await provider!.subscribe();
+            if (event.event === "span")
+              operations.detail(event.value.name, event.value.ms, event.value.bytes);
+            if (event.event === "state") {
+              info = event.value;
+              backgroundError = "";
+              render();
+              // The stream updates pool state; discover this account locally
+              // after background updates, without another network round trip.
+              if (!busy && account) {
+                const current = account;
+                void current
+                  .restore()
+                  .then((found) => {
+                    if (account === current) {
+                      notes = found;
+                      backgroundError = "";
+                      render();
+                    }
+                  })
+                  .catch((cause: unknown) => {
+                    if (account === current) {
+                      backgroundError = String(cause);
+                      render();
+                    }
+                  });
+              }
+            }
+            if (event.event === "error") {
+              backgroundError = event.value;
+              render();
+            }
+          },
+        });
+        info = await provider.ready;
+        account = wallet
+          ? provider.forAccount({
+              address: wallet.address,
+              viewingKey: BigInt(wallet.viewingKey),
+            })
+          : undefined;
+        notes = await account?.restore();
+        if (pageLoad)
+          operations.detail("Navigation to restored discovery result", performance.now());
+        transactions = wallet
+          ? new Transactions(wallet, provider, operations)
+          : undefined;
+        render();
+      },
+    );
+    if (transactions)
+      await operations.run("Check public wallet balance", publicState);
+    if (account) await provider!.subscribe();
+  } catch (cause) {
+    info = undefined;
+    account = undefined;
+    transactions = undefined;
+    throw cause;
+  } finally {
+    startup = undefined;
+    render();
+  }
 }
 async function discover(): Promise<void> {
   if (!wallet || !provider || !transactions) return;

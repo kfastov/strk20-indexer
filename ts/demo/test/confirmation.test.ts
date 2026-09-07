@@ -129,7 +129,7 @@ test("a stalled confirmation times out without receipt polling", async (t) => {
   await result;
   t.mock.timers.reset();
   assert.equal(requests, 1);
-  assert.equal(receipts, 1);
+  assert.equal(receipts, 2, "one initial read and one final catch-up, no periodic polling");
 });
 
 test("failed WS handshakes stop after bounded reconnects and keep the pending transaction resumable", async (t) => {
@@ -146,5 +146,73 @@ test("failed WS handshakes stop after bounded reconnects and keep the pending tr
     throw Object.assign(new Error("Not found"), { code: 29 });
   }), /connection lost.*Resume/);
   assert.equal(handshakes, 4);
-  assert.equal(reads, 1);
+  assert.equal(reads, 2, "one final catch-up after exhausting reconnects");
+});
+
+for (const [label, finalReceipt, succeeds] of [
+  ["accepted", receipt, true],
+  ["wrong hash", { ...receipt, transaction_hash: "0x456" }, false],
+  ["still pending", { ...receipt, finality_status: "PRE_CONFIRMED" }, false],
+] as const) {
+  test(`subscription timeout checks the saved hash once: ${label}`, async (t) => {
+    const url = await server(t, (ws) => ws.on("message", () => {
+      ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1,
+        error: { code: -32603, message: "connection timeout exceeded" } }));
+    }));
+    let reads = 0;
+    const result = waitForReceipt(hash, url, async () => {
+      if (++reads === 1) throw Object.assign(new Error("Not found"), { code: 29 });
+      return finalReceipt as Receipt;
+    });
+    if (succeeds) assert.equal((await result).block_number, 42);
+    else await assert.rejects(result, /Invalid receipt hash|Status subscription failed/);
+    assert.equal(reads, 2);
+  });
+}
+
+test("subscription failure waits for an in-flight initial receipt before its final catch-up", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const url = await server(t, (ws) => ws.on("message", () => {
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1,
+      error: { code: -32603, message: "connection timeout exceeded" } }));
+    // Keep the initial HTTP read in flight while the subscription fails.
+    setTimeout(release, 20);
+  }));
+  let reads = 0, active = 0, maxActive = 0;
+  const result = await waitForReceipt(hash, url, async () => {
+    active++;
+    maxActive = Math.max(active, maxActive);
+    try {
+      if (++reads === 1) {
+        await gate;
+        throw Object.assign(new Error("Not found"), { code: 29 });
+      }
+      return receipt as Receipt;
+    } finally { active--; }
+  });
+  assert.equal(result.block_number, 42);
+  assert.equal(reads, 2);
+  assert.equal(maxActive, 1);
+});
+
+test("a stalled final catch-up has its own bounded deadline", async (t) => {
+  let entered!: () => void;
+  const checking = new Promise<void>((resolve) => { entered = resolve; });
+  const url = await server(t, (ws) => ws.on("message", () => {
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1,
+      error: { code: -32603, message: "connection timeout exceeded" } }));
+  }));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let reads = 0;
+  const result = assert.rejects(waitForReceipt(hash, url, async () => {
+    if (++reads === 1) throw Object.assign(new Error("Not found"), { code: 29 });
+    entered();
+    return new Promise<Receipt>(() => {});
+  }), /Status subscription failed/);
+  await checking;
+  t.mock.timers.tick(15_000);
+  await result;
+  t.mock.timers.reset();
+  assert.equal(reads, 2);
 });

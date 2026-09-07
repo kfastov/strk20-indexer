@@ -19,7 +19,7 @@ cd ts && npm ci && npm run build
 - Never read `~/.strk20`, `data/**/vk*.txt`, `*keystore*`, `accounts.json`. Keys are not context.
 - Never touch `data/mainnet` without the orchestrator's say-so; it takes hours to rebuild.
 - Never run `git stash`, `checkout`, `reset` or `clean`. Other agents share this working tree.
-- Do not commit unless asked. Leave changes in the working tree.
+- Commit and push completed, verified work autonomously. Preserve unrelated working-tree changes.
 
 ## How to work here
 

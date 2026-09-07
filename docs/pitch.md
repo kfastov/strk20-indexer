@@ -1,213 +1,137 @@
-# Make persistence safe instead of forbidden
+# STRK20 Indexer — сценарий демо-видео
 
-Every STRK20 wallet has the same problem. To find its own money it has to walk
-pool contract storage with its viewing key, and that walk is expensive: about two
-storage reads per note per user, every session. Upstream measured it —
-**~2,250 reads and roughly a second at 1,125 notes** on a dedicated node, with a
-ceiling of 7–9 requests per second per RPC node, and none of it cacheable because
-every read is keyed to one user.
+Формат: **две карточки со схемами → живое демо одним непрерывным дублем**.
+Цель по длительности: 2–3 минуты. Без склеек, ускорения и заключительной карточки.
+Речь — на английском; указания к записи — по-русски. Тайминг ниже — план для
+репетиции, а не измеренная длительность будущего прогона.
 
-The reference answer is to do the walk on the server. The wallet uploads its
-viewing key in every request body, the service decrypts the amounts, and the
-service keeps nothing: it is stateless by design, with a hot cache and an indexer
-written down as future work. So the wallet is told, in effect, **not to persist a
-note registry** — re-derive it each session and pay the 2N reads again.
+## Карточки
 
-That advice is sound given the design. It is also the whole cost. Persistence is
-forbidden because nothing in the pipeline makes a saved registry safe to trust:
-no immutability boundary, no way to tell whether what you saved yesterday still
-describes the chain today, no cheap way to check.
+### 1. Проблема: “Private notes. A shared viewing key.”
 
-**Our claim is narrow and mechanical: we make persistence safe, and then it is
-almost free.** A warm re-sync of the full mainnet pool history costs
-**0.03 seconds**.
+Слева кошелёк, в центре discovery service, справа Starknet. Красная стрелка —
+**viewing key пересекает границу кошелька**. Красная подпись под сервисом:
+**“Who do you trust to see your notes?”** Это главный акцент карточки.
 
-## What makes a saved registry safe
+```mermaid
+flowchart LR
+    W["Wallet<br/>Holds your viewing key"]
+    D["Discovery service<br/>Decrypts and finds your notes"]
+    S["Starknet<br/>Public pool data"]
+    W -->|"Viewing key → trust required"| D
+    S -->|"Pool data via RPC"| D
+    D -->|"Your notes + witnesses"| W
+    style W fill:#eef2ff,stroke:#6366f1,color:#111827
+    style D fill:#fff1f2,stroke:#dc2626,stroke-width:3px,color:#111827
+    style S fill:#f3f4f6,stroke:#9ca3af,color:#111827
+    linkStyle 0 stroke:#dc2626,stroke-width:4px,color:#dc2626
+```
 
-Four mechanisms, none of them clever, all of them load-bearing.
+Для финального оформления: три крупных блока, минимум текста; у красной стрелки
+значок ключа и вопросительный знак. Не добавлять путь отправки транзакции:
+здесь объясняется именно **discovery**.
 
-**Epochs are cut only below `l1_accepted`.** An epoch bundle covers a fixed block
-range and is written only once that entire range is L1-final. A reorg therefore
-cannot reach a published epoch — not "is unlikely to", cannot. Only
-`head.ndjson`, the unfinalized tail, is ever rewritten, and it is small enough
-(≤10k blocks, ~16 KB at today's volume) that a client refetches it instead of
-storing it.
+Точность схемы: официальный сервис получает viewing key в запросе, читает
+публичные данные через RPC и возвращает найденные ноты и данные для их расходования.
+По его документации ключ не сохраняется между запросами — проблема в необходимости
+доверить ему ключ и расшифровку, а не в утверждении, что он ключи хранит или публикует.
+Viewing key не следует изображать как ключ подписи, позволяющий потратить средства.
 
-**Epochs are hash-chained and content-addressed.** The payload is canonical
-NDJSON — a deterministic function of chain data — so two independent mirrors
-produce byte-identical epoch files, and each names its predecessor's hash. An
-omitted block is not a subtle difference; it is a fork you can see. The
-acceptance suite runs two independent backfills and asserts the bytes match, and
-rejects a tampered epoch by name.
+### 2. Решение: “Public feed. Local discovery.”
 
-**Reorg tombstones and a per-owner cursor that rewinds only above the floor.**
-The one place a rewrite can happen is the tail, so that is the only place the
-client has rewind logic. It rolls back above the last cut epoch and re-derives;
-everything below the floor is untouched, because it cannot have changed.
+Те же позиции: кошелёк слева, наш индексер в центре, Starknet справа. Теперь через
+границу идёт **публичный feed**, а ключ и поиск нот находятся внутри кошелька.
+Главная подпись: **“The discovery server never receives your viewing key.”**
 
-**The mirror's own storage root is recomputed and checked against the chain.**
-The server rebuilds the pool's Pedersen Merkle-Patricia root from its own slots
-and compares it with `starknet_getStorageProof`. Because pool slots are
-write-once — measured: **134,879 distinct slots across 139,131 writes, 96.9% of
-writes are first writes** — a root match at block *B* attests every write at or
-below *B*. One check covers all of history beneath it.
+```mermaid
+flowchart RL
+    S["Starknet<br/>Public pool data"]
+    I["STRK20 Indexer<br/>Publishes a public feed"]
+    subgraph Wallet["Your wallet / browser"]
+        V["Verify pool state<br/>Discover your notes locally"]
+        K["Viewing key<br/>Stays here"]
+        K --> V
+    end
+    S -->|"Public storage + events"| I
+    I -->|"Public feed · no viewing key"| V
+    R["Independent RPC"] -->|"Block header + storage proof"| V
+    style I fill:#f3f4f6,stroke:#9ca3af,color:#111827
+    style S fill:#f3f4f6,stroke:#9ca3af,color:#111827
+    style R fill:#f3f4f6,stroke:#9ca3af,color:#111827
+    style Wallet fill:#ecfdf5,stroke:#059669,stroke-width:3px,color:#111827
+    style K fill:#d1fae5,stroke:#059669,color:#111827
+    linkStyle 2 stroke:#059669,stroke-width:4px,color:#047857
+```
 
-Put together, the persisted state is exactly the part of the feed that can never
-go stale. That has a consequence worth saying out loud: **the browser client
-needs no reorg logic at all.** It comes out simpler than the server, not more
-complex.
+Небольшой блок RPC — под основной линией, без подробностей устройства доказательств.
+В кошельке достаточно двух строк: **“Verify locally” / “Find my notes”** и значка ключа.
+Не называть решение полностью trustless: клиент доверяет выбранному RPC и своему
+локальному кэшу. Это замена discovery-пути; hosted prover остаётся отдельным сервисом.
 
-## What it costs, measured
+## Что показываю и что говорю
 
-Full mainnet pool history, genesis 8,978,970 to head 14,128,517, on a laptop:
+### 0:00–0:22 — первая карточка
 
-| | measured |
-|---|---|
-| feed size, full history | **16 MB** across **515 epochs** |
-| events mirrored | **118,960** across 28,383 pool-active blocks |
-| cold start over HTTP: fetch 16 MB, verify the whole hash chain, fold 515 epochs, run discovery | **5.97 s**, peak RSS 31 MB |
-| cold start from a local directory, no HTTP at all | **6.18 s** |
-| **warm re-sync** | **0.03 s** |
-| client mirror on disk | 60 MB SQLite |
+**Экран:** схема проблемы. Указателем пройти от кошелька по красной стрелке к сервису.
 
-The two cold numbers being equal is the interesting one: the cost is the fold,
-not the network. It also settles a design question in the direction we did not
-want — at 6 seconds native, and WASM will be slower, a browser client cannot
-re-fold history on every page load. The persisted mirror is not an optimization,
-it is the thing that makes a browser client possible. That is why snapshots moved
-up the roadmap from "nice cold-start win" to prerequisite.
+> STRK20 makes token transfers private. But to find your private notes through the standard discovery service, your wallet sends it a viewing key. The service can then decrypt and identify your notes. So private funds still come with a trust decision: who gets to see them?
 
-Against the reference route, per wallet per session: ~2,250 chain reads and ~1 s
-at 1,125 notes, uncacheable, versus **zero chain reads at query time** and 0.03 s
-warm. The ingest cost is paid once, by the indexer, for everyone.
+### 0:22–0:45 — вторая карточка
 
-For scale of the thing being indexed, from `/v1/stats` over the full real
-history: **31,077 notes** — the anonymity set — 2,628 registrations, 25,666
-spends, 16,199 deposits across 31 tokens, 40,204 withdrawals across 34 tokens.
+**Экран:** схема решения. Показать публичный feed, затем ключ внутри кошелька.
+После этого перейти в уже подготовленную вкладку демо.
 
-## The key never moves. Proven twice.
+> My solution moves discovery into the wallet. STRK20 Indexer publishes public pool data. The wallet checks the reconstructed state against an independent RPC and finds its notes locally. The discovery server never receives the viewing key. Here is that workflow running on Starknet mainnet.
 
-The reason persistence has to be made safe *here* rather than server-side is that
-we do not have the key. The wallet fetches public static files —
-`genesis.json`, `manifest.json`, a sequence of `epochs/…zst` — and does the
-decryption locally with the upstream `discovery-core` engine. `Cargo.lock`
-resolves that engine through a fork, which is packaging only: the fork's diff
-against upstream is one `Cargo.toml`, its `src/` is byte-identical, and CI fails
-the build if that stops being true.
+### 0:45–1:10 — тёплая загрузка
 
-In CI, a byte-scanner runs over a full proxy capture of a sync and asserts that no
-encoding of the viewing key, the address, or any derived channel key crosses the
-wire: minimal hex, 64-char padded, decimal, uppercase, raw big- and little-endian
-bytes, base64. The same scanner demonstrably *does* find the key when it is
-planted in a compat-mode body, so the negative is not vacuous.
+**Экран:** mainnet-демо с заранее прогретым кэшем. Перезагрузить страницу в кадре,
+дождаться восстановления, показать приватный баланс и номер проверенного блока.
+Не очищать данные браузера. Ожидание оставить целиком.
 
-Then we ran it on live Sepolia traffic through a recording proxy, with two
-wallets: ours, holding a real key that finds a real note, and an unrelated one
-that finds nothing.
+> This wallet already has a verified local cache. Reloading restores that state and the wallet’s notes. It does not repeat the first-time download and verification. The block number tells us which state we have verified; it is not a claim that cached notes are always at the latest head.
 
-| | result |
-|---|---|
-| viewing key in wallet A's traffic | **not found** in any of 13 encodings |
-| address in wallet A's traffic | **not found** in any of 13 encodings |
-| request streams, A vs B | **byte-identical** — 609 requests, 64,509 bytes each |
-| detector self-test on a planted key | found it |
+### 1:10–2:00 — локальный discovery
 
-Byte-identical is the strong form. It is not that we do not log the key; it is
-that the request stream carries no information about who is asking, so there is
-nothing to log.
+**Экран:** вызвать discovery текущей доступной кнопкой. После завершения показать
+найденный баланс и раскрыть нужную операцию в Activity. Сравнение с официальным
+сервисом оставить выключенным: оно отправляет ему viewing key.
 
-The full path, and which arrows the key is allowed on:
-[docs/diagrams/dataflow.md](diagrams/dataflow.md).
+> Now I refresh discovery. Public updates come from the feed, while verification and note discovery run in a browser Worker. The viewing key stays on this client. The result fits the official discovery interface, so a wallet can use it with the existing transaction builder.
 
-## We minted a note and found it without the key
+### 2:00–2:40 — результат в демо
 
-On Sepolia we made our own note — register, deposit 3 STRK, note creation, all in
-one `apply_actions` at block 14,339,115 — and then pointed the indexer at it. It
-found that note, and only that note, in **1.19 s**, deriving the note id and
-amount from chain data alone. The indexer never saw the SDK's output.
+**Экран:** остаться в демо. Показать результат локального поиска, блок и детали
+проверки. Если на репетиции выбран сценарий с новой приватной транзакцией, показать
+её подтверждение и последующий discovery здесь; длительность ожидания учитывать
+целиком. Не пытаться втиснуть новый полный цикл shield → transfer → withdraw.
 
-A second transaction spent it in a private self-transfer. The nullifier our
-client predicted appeared verbatim in the on-chain `NoteUsed` event: the
-nullifier formula confirmed by the contract itself, not by our own test. Balances
-counted only the unspent note. `strk20-sync verify` then proved both notes and
-both spent-states against Starknet state roots via storage proofs, with the
-indexer entirely out of the trust path.
+> The mainnet flow has already completed: shield, local discovery, private transfer and withdrawal. This demo uses our discovery provider with the official transaction builder. The privacy change is specific: discovery keeps the viewing key local. The hosted prover still receives proving inputs.
 
-The scripts that produced those two transactions ship in
-[historical Sepolia scripts](https://github.com/kfastov/strk20-indexer/tree/5eab0b1/examples/sepolia) so someone else can do it with their own
-testnet account.
+Закончить на экране результата. Отдельного слайда, призыва, перечня технологий или
+экскурсии по исходному коду в конце нет. Действия внутри демо — пока рабочий черновик;
+окончательный порядок уточняется после самостоятельного прогона автором.
 
-## What survived contact with reality
+## Подготовка непрерывного дубля
 
-**A live contract upgrade, mid-run, that nobody announced.** While the Sepolia
-server was running, the pool was upgraded on chain at block 14,339,893 to a class
-we had never seen. `class_history` recorded it automatically, typed decoding went
-to `degraded`, `/health` went `DEGRADED` with a warning naming the class — and
-raw ingest and the feed continued uninterrupted. The keyless discovery above ran
-against that very feed and still found our note, because discovery reads pool
-storage, not decoded event types. A synthetic test asserting this is worth
-something; the same thing happening unannounced, in production, during a run, is
-worth more. Recovery was one flag.
+- Подготовить кошелёк с приватной нотой и один раз дождаться полной инициализации и
+  сохранения кэша **до записи**. После завершённого предыдущего цикла приватный
+  баланс равен нулю: не выдавать его за демонстрацию найденной непотраченной ноты.
+- Использовать тот же браузер, профиль, origin и сеть. Не открывать incognito и не
+  сбрасывать кэш. Первый холодный запуск в этот сценарий не входит.
+- Провести полный пробный дубль с секундомером. Если он длиннее трёх минут,
+  сократить речь или число действий до записи; не вырезать ожидания из результата.
+- Укрупнить интерфейс, скрыть лишние панели. Не показывать backup или ключи.
+- Не включать сравнение с официальным сервисом. Не обещать универсальное ускорение
+  или криптографическое доказательство полной истории транзакций.
 
-**The root check earned its keep by failing.** The first time `verify-root` ran
-successfully against mainnet it did not print OK — it reported a mismatch, and
-the mismatch was real. Bisection with `verify-root --block` localized it to a
-single block, and the cause turned out to be continuation-token paging across an
-aggregating RPC endpoint: a token handed to a different backend node does not
-error, it resumes somewhere else and silently drops the blocks in between. Two
-paginated scans of the same range disagreed by 19 blocks with no error raised in
-either. The fixture RPC in our own suite is a single honest process, so it cannot
-express that failure at all — the only mechanism that could catch it was the root
-check.
+## Фактическая основа — за кадром
 
-That same run proved something we had not been able to prove before: at the block
-before the first dropped one, our mirror reproduces the chain's pool storage root
-**exactly**, a Pedersen MPT root over ~100,000 real mainnet slots matching a proof
-served by the chain. Root construction at scale was an open question. It is
-answered.
+Завершённый mainnet-цикл, а не утверждение, что все три операции выполняются в этом
+трёхминутном дубле:
 
-## Where this goes next
-
-The consumer path splits cleanly. Ingest stays on a backend. The consumer state
-machine — fold the feed, run the upstream engine, emit notes and spent-state —
-runs in two hosts: natively for self-hosters, and in the browser as a **WASM
-module that is a pure computer**: bytes in, notes out, no network, no storage, no
-async. Fetching, IndexedDB, zstd decompression and every `await` live in a
-TypeScript wrapper. The spike is done: the upstream engine already builds for
-`wasm32` unmodified — a two-line feature gate is not what unblocks the target,
-it only sheds 24 crates (142 → 118) for consumers that opt out — and the module
-is 231 KB gzipped.
-
-Two APIs, deliberately. `KeylessClient` is the default and the thing we are
-arguing for: the key stays in the browser. `DelegatedClient` talks to a server you
-run, for SDK compatibility and self-hosters. The names describe the mechanic, not
-a verdict.
-
-## What is not true yet
-
-Honesty is cheaper than a retraction.
-
-- **The mainnet mirror is not currently complete.** The paging defect above cost
-  139 blocks and 489 events in deep history; the repair is in flight, and until
-  `verify-root` returns MATCH over the repaired range we are not claiming a
-  verified mainnet mirror. The Sepolia backfill, by contrast, completed in a
-  single process run with no aborts: 19,030 events across 4,455 pool-active
-  blocks, 606 epochs.
-- **No snapshot is published.** The code writes them; the publication gate
-  requires an honest anchor, and on mainnet that gate is currently closed. The
-  feed serves epochs and the tail, which is what the client needs.
-- **Feed completeness is not provable to a consumer.** It is made auditable:
-  content-addressed hash-chained epochs where an omission is a visible fork,
-  server-side root verification, an append-only anchors log, and client-side
-  storage-proof spot checks against your own RPC. The trustless fallback is
-  self-hosting, and the whole thing is built to be self-hosted.
-- **Compat mode receives viewing keys** by protocol definition. It is off by
-  default, loudly labeled, and meant for your own machine.
-- **Raw targeted mode leaks what direct RPC leaks**, including your address on
-  the incoming path. Off by default, labeled.
-
-Everything above with its raw evidence:
-[docs/research/live/live-run-findings.md](research/live/live-run-findings.md),
-[docs/research/live/sepolia-shield-run.md](research/live/sepolia-shield-run.md),
-[docs/research/live/proof-window.md](research/live/proof-window.md),
-[docs/research-answers.md](research-answers.md).
+- [Shield](https://voyager.online/tx/0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59).
+- [Private transfer](https://voyager.online/tx/0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3).
+- [Withdrawal](https://voyager.online/tx/0x69ea91064cb35315d311493cac956439bf3e0bbe798c95248c7cc437802ef1f).
+- [Условия прогона и измерения](spec/demo-app.md#funded-mainnet-cycle-completed-2026-09-07).
+- [Официальный discovery service: ключ в запросе, обработка и отсутствие хранения](https://github.com/starkware-libs/starknet-privacy/blob/main/crates/discovery-service/README.md).

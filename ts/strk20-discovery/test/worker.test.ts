@@ -16,7 +16,7 @@ import init, { Engine } from "../../../crates/wasm/pkg/strk20_engine.js";
 import { Witness, AddressMap } from "@starkware-libs/starknet-privacy-sdk";
 import { WorkerRuntime, installWorker, type WorkerHost } from "../src/worker.ts";
 import { notesResult, LocalDiscoveryProvider } from "../src/provider.ts";
-import type { DiscoveryResult, RuntimeOptions } from "../src/types.ts";
+import type { DiscoveryResult, RuntimeOptions, StartupProgress } from "../src/types.ts";
 
 const file = (name: string) =>
   new Uint8Array(
@@ -126,6 +126,29 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
       throw new Error(`unexpected GET ${path}`);
     },
   );
+  // Cold startup is a verification gate even before an account/key is supplied.
+  const startupEvents: StartupProgress[] = [];
+  let startupCache: Uint8Array | undefined;
+  const startupRuntime = new WorkerRuntime({ Engine }, options, (event) => {
+    if (event.event === "startup") startupEvents.push(event.value);
+  }, () => {}, () => ({
+    read: async () => startupCache,
+    write: async (bytes) => { startupCache = bytes; },
+    clear: async () => { startupCache = undefined; },
+  }));
+  badProof = true;
+  await assert.rejects(() => startupRuntime.init(), /block hash|block_hash|proof/i);
+  assert.equal(startupCache, undefined, "failed startup must not save unverified state");
+  assert(!startupEvents.some((p) => p.stage === "ready"));
+  badProof = false;
+  startupEvents.length = 0;
+  assert.equal((await startupRuntime.init()).verifiedAt, 99);
+  assert(startupCache);
+  assert.deepEqual([...new Set(startupEvents.map((p) => p.stage))],
+    ["cache", "feed", "checkpoint", "download", "verify", "save", "ready"]);
+  const downloaded = startupEvents.filter((p) => p.stage === "download").at(-1)!;
+  assert.equal(downloaded.completed, downloaded.total);
+  await startupRuntime.close();
   for (const mode of ["snapshot", "epochs"]) {
     const tasks: (() => Promise<void>)[] = [];
     const runtime = new WorkerRuntime(

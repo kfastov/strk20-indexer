@@ -114,7 +114,15 @@ export interface RuntimeOptions {
   rpcUrl: string;
   proofRpcUrl: string;
 }
+/** Actual startup boundaries, not an estimate of elapsed/remaining time. */
+export type StartupStage = "engine" | "cache" | "feed" | "checkpoint" | "download" | "verify" | "save" | "ready";
+export interface StartupProgress {
+  stage: StartupStage;
+  completed?: number;
+  total?: number;
+}
 export type WorkerEvent =
+  | { event: "startup"; value: StartupProgress }
   | { event: "head"; value: number }
   | { event: "span"; value: Span }
   | { event: "request"; value: RequestRecord }

@@ -15,18 +15,14 @@ try {
     'vite@7.1.5', 'typescript@5.9.2', '@types/node@24']);
   for (const name of ['src', 'index.html', 'tsconfig.json', 'vite.config.ts'])
     cpSync(resolve(root, '../demo', name), join(stage, name), { recursive: true });
-  writeFileSync(join(stage, 'check.mjs'), `
-    import assert from 'node:assert/strict';
-    import {NodeDiscoveryProvider} from 'strk20-discovery/node';
-    import {createPrivateTransfers, Witness} from 'strk20-discovery/privacy-sdk';
-    const provider = new NodeDiscoveryProvider({network:'sepolia', feedUrl:'https://unused.invalid', cacheDirectory:'./cache'});
-    try {
-      assert.equal(typeof createPrivateTransfers, 'function');
-      assert.equal(typeof Witness, 'function');
-      assert.equal((await provider.ready).verifiedAt, null);
-    } finally { await provider.close(); }
-  `);
-  run(process.execPath, ['check.mjs']);
+  // Exercise the installed package against the same real-WASM fixture server,
+  // including verified cold startup and an offline cached restart.
+  cpSync(resolve(root, '../../crates/wasm/fixture'), join(stage, 'fixture'), { recursive: true });
+  const nodeTest = readFileSync(join(root, 'test/node.test.ts'), 'utf8')
+    .replace('../dist/node.js', 'strk20-discovery/node')
+    .replace('../../../crates/wasm/fixture/', './fixture/');
+  writeFileSync(join(stage, 'node.test.ts'), nodeTest);
+  run(process.execPath, ['--test', '--experimental-strip-types', 'node.test.ts']);
   run(process.execPath, ['node_modules/typescript/bin/tsc', '--noEmit']);
   run(process.execPath, ['node_modules/vite/bin/vite.js', 'build']);
 } finally { rmSync(stage, { recursive: true, force: true }); }

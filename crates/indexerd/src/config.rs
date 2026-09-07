@@ -8,7 +8,7 @@ pub const MAINNET_POOL: &str =
     "0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a";
 pub const MAINNET_GENESIS_BLOCK: u64 = 8_978_970;
 pub const MAINNET_EPOCH_SIZE: u64 = 10_000;
-pub const MAINNET_RPC_PRIMARY: &str = "https://rpc.starknet.lava.build";
+pub const MAINNET_RPC_PRIMARY: &str = "https://api.cartridge.gg/x/starknet/mainnet";
 pub const MAINNET_RPC_FALLBACK: &str = "https://starknet.publicnode.com";
 /// Verified on-chain (git history: docs/research/q1-version-pin.md, removed
 /// 2026-09-02).

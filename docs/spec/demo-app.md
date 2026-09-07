@@ -468,6 +468,8 @@ lifecycle using this package remains pending.
 
 ## Funded mainnet acceptance in progress, 2026-09-06
 
+Historical intermediate result; the withdrawal completed on September 7 below.
+
 On deployed demo `486d448`, the user funded the browser wallet with 25 STRK
 and submitted deploy, shield and private transfer. The local provider discovered
 0.01 STRK after shield and supplied the next spend. Withdrawal is still pending.
@@ -559,8 +561,153 @@ up at `/root/strk20-deploy-20260907-heads/demo-before.tar.gz`. Backend services 
 wallet data were not changed. A newly submitted funded transaction is still
 needed to quantify the end-to-end improvement.
 
+## Startup verification and visible progress, 2026-09-07
+
+Cold initialization now downloads, verifies and saves state before `ready`
+resolves. A valid trusted cache restores locally without checkpoint RPCs.
+The UI shows actual startup stages and completed/total public data files.
+The synchronous WASM verification stage has no invented elapsed-time percentage.
+A failed initialization leaves the initialization action available for retry.
+
+Validation: 12 SDK/WASM tests and 18 demo tests passed. Cold-start tests require
+a verified checkpoint and saved cache before the first account operation; an
+invalid proof rejects startup without saving state or emitting readiness.
+The SDK archive was installed outside the repository, where real Node/WASM
+verification, offline restore, TypeScript and the production demo build passed.
+The previous HEAD's failed CI run 34094681835 passed on rerun; that rerun covers
+`4bb6261`, not these uncommitted startup changes.
+
+The static demo was deployed from the isolated archive consumer build; entry
+`index-DvnG8D2v.js`, worker `worker-entry-Di5hbhB4.js`. All five public files
+matched local SHA-256 checksums. Previous static files and the source patch are
+backed up in `/root/strk20-deploy-20260907-085648-startup/`. Backend containers
+and wallet data were not changed. The public npm 0.1.0 package was not republished.
+
+A separate local-origin Chrome run on Sepolia completed cold initialization at
+block 14686324 in 194.30 s before enabling wallet creation. The UI was observed
+at cache and state-verification stages. Reload restored the same checkpoint in
+3.00 s, without the download or verification stages. The updated hosted mainnet demo restored
+the existing wallet in 11.36 s and its explicit discovery step took 28.90 s,
+advancing to withdrawal with 0.01 STRK private balance. These are individual UI
+observations while other browser work was active, not isolated speed benchmarks.
+Latency optimization and span-attribution changes were deferred by the user;
+moving initialization does not establish a computational speed improvement.
+
+
+Warm-start follow-up, after the author prioritized a continuous video take:
+two sequential reloads of the existing mainnet wallet at the public demo restored
+without feed-download or checkpoint-verification startup stages. Values below
+come from the expanded Activity UI; the cache and wallet were preserved.
+
+| UI measurement | Reload 1 | Reload 2 |
+|---|---:|---:|
+| Restore wallet and discovery | 3.12 s | 2.86 s |
+| Read local cache | 0.25 s | 0.29 s |
+| Restore verified state | 2.36 s | 2.12 s |
+| Discover notes | 0.14 s | 0.15 s |
+| Navigation to restored discovery result | 5.26 s | 4.75 s |
+| Subsequent public balance check | 0.18 s | 0.43 s |
+
+The earlier 11.36 s restore included 8.96 s in `Restore verified state` and
+1.01 s in `Read local cache`; it was not a repeated cold verification. The new
+observations establish a warm path of seconds in this browser, not a latency
+bound across devices. No additional runtime change was needed for this follow-up.
+Initial cache creation still takes longer and must complete before the planned
+unedited recording. The wallet currently has zero private balance after withdrawal;
+a demonstration of an unspent note requires preparing one before recording.
+
+## Funded mainnet cycle completed, 2026-09-07
+
+The user submitted the pending 0.01 STRK withdrawal from the existing demo
+wallet back to its own public address. The mainnet lifecycle using our local
+provider is now complete, across the September 6 and 7 builds; this was not one
+uninterrupted video take.
+
+| Action | Block | Receipt |
+|---|---:|---|
+| Shield | 14459407 | [SUCCEEDED](https://voyager.online/tx/0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59) |
+| Private transfer | 14459528 | [SUCCEEDED](https://voyager.online/tx/0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3) |
+| Withdrawal | 14498615 | [SUCCEEDED](https://voyager.online/tx/0x69ea91064cb35315d311493cac956439bf3e0bbe798c95248c7cc437802ef1f) |
+
+Shield and transfer receipts were rechecked through PublicNode and reported
+ACCEPTED_ON_L1, with three and two pool events respectively. The withdrawal
+receipt independently agreed through PublicNode and Lava: SUCCEEDED,
+ACCEPTED_ON_L2, block 14498615, two pool events. The shell's Python HTTP client
+received 403 from both endpoints; Node fetch succeeded against both.
+
+The first withdrawal attempt stopped before submission with a fee-preflight
+message requiring up to 11.04842 public STRK; its UI elapsed time was 9.78 s.
+The next attempt had a saved hash and succeeded on chain. Its UI reported 71.60 s,
+including 61.08 s waiting for confirmation, then displayed
+`Status subscription failed: connection timeout exceeded`.
+
+Resume checked the existing hash, recorded the accepted receipt and cleared
+pending state in 0.40 s, with no new signature or broadcast. Explicit local
+discovery then took 4.40 s overall (local comparison row 1.83 s, one attempt,
+block 14498727). It showed private balance 0.00000 STRK, public balance
+9.79821 STRK and `The flow is complete`. Official comparison was disabled.
+These overlapping UI timings are observations, not additive stage measurements.
+
+The confirmation fix adds exactly one receipt catch-up on a terminal subscription
+error, exhausted reconnects or overall timeout. It waits for an in-flight read,
+validates the same hash, accepted block and execution status, and imposes a
+15-second catch-up deadline. A failed catch-up retains the resumable transaction.
+There is no periodic receipt polling or resend. Tests cover the observed timeout,
+an invalid hash, a still-pending receipt, an in-flight initial read and a stalled
+final read. This fix follows the funded run; it has not been timed on a new send.
+
+All 23 demo tests passed, including the five new catch-up regression cases. The
+isolated package-consumer build passed TypeScript and Vite, then its static files
+were deployed with entry `index-CIUMHzjB.js`. All five public asset checksums matched
+the build. Previous files and the source patch are preserved at
+`/root/strk20-deploy-20260907-093532-receipt-recovery/`. No backend restart or wallet
+mutation was part of deployment. Source, pitch and metadata edits remain local;
+they have not been committed or pushed, and npm 0.1.0 has not been republished.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,
 WebSocket comparison, PIR research, custom recoverable accounts and automatic
 recovery authorizations. None is represented by a stub mode in this demo.
+
+## Non-video submission recheck, 2026-09-07
+
+- The published mainnet demo reproduced `TRANSPORT: HTTP 410` on discovery.
+  Lava's response explicitly said the endpoint was discontinued. The demo,
+  SDK defaults, native/compose defaults and maintained mainnet example now use
+  Cartridge for mainnet proofs. Header selection remains on the configured
+  independent RPC; the verifier and its trust checks did not change.
+- Cartridge served proofs at the observed head and head−5, refused head−100,
+  and returned the pool's genesis-block header. Browser CORS preflight and POST
+  with the demo Origin succeeded. This is a recent-proof capability, not an
+  archive-proof guarantee.
+- Fresh Node/WASM initialization verified mainnet block 14502871 in 43.520 s
+  and Sepolia block 14691755 in 10.447 s. Restoring those newly created local
+  caches took 366 ms and 122 ms respectively. No account keys were used in
+  these state-only checks. These Node timings are not browser benchmarks.
+- The updated hosted browser restored its existing mainnet wallet in 3.48 s;
+  explicit discovery completed in 4.14 s and returned to `The flow is complete`
+  with zero private balance. The HTTP 410 error no longer occurred in that check.
+- Both public health endpoints reported OK with decoding OK and no latched root
+  mismatch. HTTPS SSE delivered three successive heads with full payloads on
+  each network. Snapshot and latest epoch URLs returned 200 with immutable cache
+  headers; epochs had strong ETags. All five demo assets matched the local build.
+  One Python TLS connection timed out during asset inspection; the complete
+  subsequent Node fetch/hash pass succeeded, as did the browser navigation.
+- All seven hashes in local `strk20.json` returned SUCCEEDED with pool events.
+  Six were ACCEPTED_ON_L1; withdrawal was ACCEPTED_ON_L2 at this check.
+  Hub still recognized its earlier four hashes, with demo/mainnet true and video false.
+- 12 SDK tests, 23 demo tests, typechecking, isolated archive installation and
+  its two real Node/WASM tests plus Vite production build passed. The two Rust
+  network-profile tests and the previously flaky SSE-disconnect convergence test
+  also passed. GitHub CI is green for 4bb6261, not the current uncommitted edits.
+- The main demo path already uses new-head/status WS and full-payload SSE.
+  Remaining one-second timers in the SDK reconnect an interrupted SSE stream;
+  comparison retries cover reference/transport failures without a readiness API.
+  The native CLI retains polling compatibility. None is a periodic wait on the
+  successful browser transaction path; removing recovery timers would not make
+  block production or proving faster.
+
+Release remains outstanding: commit/push the reviewed changes and metadata,
+check CI on that commit, and publish the prepared 0.1.1 archive. The npm login
+preflight returned E401. Video and its URL remain separate user-owned work.

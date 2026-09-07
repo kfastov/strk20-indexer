@@ -38,12 +38,27 @@ const discovery = new LocalDiscoveryProvider({
 });
 const mine = discovery.forAccount({ address, viewingKey });
 
-// Restore previously verified results immediately, without network access.
+// Startup verifies and saves pool state on the first visit.
+// With a verified cache, startup restores locally without network access.
+await discovery.ready;
 const cached = await mine.restore();
 // Catch up and verify against a newly selected accepted RPC checkpoint.
 const { notes, cursor } = await mine.discoverNotes();
 await discovery.subscribe();
 ```
+
+This startup contract applies from 0.1.1. Version 0.1.0 defers cold verification
+until the first discovery call and defaults to the discontinued Lava mainnet
+proof endpoint. Upgrade to 0.1.1, or explicitly set `proofRpcUrl` to
+`https://api.cartridge.gg/x/starknet/mainnet` when using 0.1.0.
+Proofs remain bound to the accepted header from the configured `rpcUrl`.
+`ready` resolves only after a verified state is available. Cold startup includes
+the initial download, complete state verification and cache save; missing or invalid
+proofs reject it. A valid trusted cache restores without network access. The
+`onEvent` callback receives `startup` events for engine loading, cache restoration,
+feed metadata, checkpoint acquisition, data loading, verification, saving and readiness.
+Data loading reports completed/total files. These are work stages, not elapsed-time
+percentages; verification remains one synchronous WASM operation in the Worker.
 
 `LocalDiscoveryProvider` implements the official `DiscoveryProviderInterface`:
 `discoverNotes`, `discoverChannels` and `discoverRequirement`. Notes contain actual

@@ -78,7 +78,7 @@ export class KeylessClient {
         options.proofRpcUrl ??
         (profile.name === "sepolia"
           ? "https://api.cartridge.gg/x/starknet/sepolia"
-          : "https://rpc.starknet.lava.build"),
+          : "https://api.cartridge.gg/x/starknet/mainnet"),
     };
     this.ready = this.call("init", [config]) as Promise<EngineInfo>;
   }

@@ -92,6 +92,10 @@ test("Node worker verifies real state and restores the account with the server o
       address: owner.owner,
       viewingKey: BigInt(`0x${owner.key}`),
     };
+    assert.equal((await provider.ready).verifiedAt, 99,
+      "cold startup must verify state before the first account operation");
+    assert.equal((await readdir(cacheDirectory)).length, 1,
+      "cold startup must save verified state even without a discovery call");
     const found = await provider
       .forAccount(account)
       .discoverNotes({ blockIdentifier: 99 });

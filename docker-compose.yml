@@ -30,7 +30,7 @@ services:
       STRK20_NETWORK: mainnet
       STRK20_FEEDER_URL: ${MAINNET_FEEDER_URL:-https://feeder.alpha-mainnet.starknet.io/feeder_gateway}
       STRK20_RPC_WS_URL: ${MAINNET_RPC_WS_URL:-wss://starknet-rpc.publicnode.com}
-      STRK20_RPC_URL: ${MAINNET_RPC_URL:-https://rpc.starknet.lava.build}
+      STRK20_RPC_URL: ${MAINNET_RPC_URL:-https://api.cartridge.gg/x/starknet/mainnet}
       STRK20_RPC_FALLBACK: ${MAINNET_RPC_FALLBACK:-https://starknet.publicnode.com}
       RUST_LOG: ${RUST_LOG:-info}
     # `--allow-class` has no env binding in the CLI, so it is interpolated

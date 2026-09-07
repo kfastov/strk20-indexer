@@ -43,7 +43,7 @@ export const CFG = () => ({
   accountClass: env("STRK20_ACCOUNT_CLASS", "0x05b4b537eaa2399e3aa99c4e2e0208ebd6c71bc1467938cd52c798c601e43564"),
   prover: env("STRK20_PROVER", "https://transaction-prover.alpha-mainnet.sw-dev.io"),
   feed: env("STRK20_FEED", "https://strk20.nullref.cc/mainnet/feed"),
-  proofRpc: env("STRK20_PROOF_RPC", "https://rpc.starknet.lava.build"),
+  proofRpc: env("STRK20_PROOF_RPC", "https://api.cartridge.gg/x/starknet/mainnet"),
   feeMarginPercent: Number(env("STRK20_FEE_MARGIN_PERCENT", "0")),
   dryRun: flag("DRY_RUN"),
   force: flag("FORCE"),

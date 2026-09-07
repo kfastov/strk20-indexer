@@ -6,6 +6,27 @@ decision and are deliberately not in this repo.
 
 ## Current production deployment
 
+Latest update, 2026-09-07: demo entry `index-wK6em-u-.js`, built in an
+isolated consumer of the prepared SDK 0.1.1 archive. Mainnet proof RPC is now
+`https://api.cartridge.gg/x/starknet/mainnet`: Lava returned HTTP 410 and
+`This endpoint has been discontinued.`, reproduced as a discovery error in the
+browser. PublicNode remains the independently selected header/live RPC.
+All five deployed files match the isolated build's SHA-256 hashes. The previous
+static files, server environment and source patch are backed up in
+`/root/strk20-deploy-20260907-112423-proof-rpc/`.
+
+The mainnet container was recreated with its existing image and volumes after
+changing only `MAINNET_RPC_FALLBACK` in the deployment environment. Sepolia was
+not restarted. Fresh full Node/WASM verification passed on both networks;
+mainnet browser restore and explicit discovery then passed in 3.48 and 4.14 seconds.
+These source edits remain uncommitted. Public npm is still 0.1.0; `npm whoami`
+returned E401 during the release preflight, so publishing 0.1.1 requires login.
+
+The earlier static deployment `index-CIUMHzjB.js` added a one-shot receipt
+catch-up after terminal WebSocket failure. Mainnet withdrawal and subsequent
+local discovery completed; see [the evidence](../spec/demo-app.md#funded-mainnet-cycle-completed-2026-09-07).
+Earlier deployment records below retain their original dates and versions.
+
 Verified on 2026-09-06: `root@157.173.104.231`, repository
 `/opt/strk20-indexer`, Ubuntu 24.04, Docker Compose and nginx. Mainnet listens
 on `127.0.0.1:8080`, Sepolia on `127.0.0.1:8081`. nginx serves Sepolia's
@@ -59,11 +80,11 @@ The current public `.env` overrides are:
 
 ```dotenv
 MAINNET_RPC_URL=https://starknet-rpc.publicnode.com
-MAINNET_RPC_FALLBACK=https://rpc.starknet.lava.build
+MAINNET_RPC_FALLBACK=https://api.cartridge.gg/x/starknet/mainnet
 ```
 
 Mainnet ordinary live RPC reads use PublicNode. Proof capability selection
-prefers endpoints that have served proofs, allowing Lava to serve proofs
+prefers endpoints that have served proofs, allowing Cartridge to serve proofs
 without becoming the ordinary live RPC. A pruned-history response can also
 route that individual historical read to the archive without changing the
 active live endpoint. Sepolia retains Cartridge with PublicNode fallback.

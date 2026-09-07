@@ -1,4 +1,4 @@
-import { LocalDiscoveryProvider } from "strk20-discovery";
+import type { LocalDiscoveryProvider } from "strk20-discovery";
 import {
   Account,
   CallData,
@@ -20,17 +20,18 @@ import { waitForReceipt } from "./confirmation.ts";
 import { waitForBlock } from "./block-wait.ts";
 
 const PROOF_DEPTH = 9;
+type TransactionDiscovery = DiscoveryProviderInterface & Pick<LocalDiscoveryProvider, "atBlock">;
 export class Transactions {
   readonly rpc: RpcProvider;
   private readonly account: Account;
   private readonly transfers;
-  private readonly discovery: LocalDiscoveryProvider;
+  private readonly discovery: TransactionDiscovery;
   private readonly wallet: Wallet;
   private readonly operations: Operations;
   private submission: Operation | undefined;
   constructor(
     wallet: Wallet,
-    discovery: LocalDiscoveryProvider,
+    discovery: TransactionDiscovery,
     operations: Operations,
   ) {
     this.wallet = wallet;

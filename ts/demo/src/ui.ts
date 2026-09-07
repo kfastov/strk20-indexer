@@ -1,5 +1,6 @@
 import type { Operation } from "./operations.ts";
 import type { Network } from "./network.ts";
+import type { StartupProgress, StartupStage } from "strk20-discovery";
 
 export const element = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -20,6 +21,7 @@ export function mount(network: Network): void {
         </div>
         <div id="amount-row" class="field" hidden><label for="amount">Amount · STRK</label><input id="amount" value="0.01" inputmode="decimal" autocomplete="off" /></div>
         <div id="recipient-row" class="field" hidden><label id="recipient-label" for="recipient">Recipient</label><input id="recipient" placeholder="0x…" autocomplete="off" spellcheck="false" /></div>
+        <div id="startup" class="startup" role="status" hidden><div class="startup-title"><strong id="startup-label"></strong><span id="startup-step"></span></div><progress id="startup-progress" max="8" value="0" aria-label="Initialization stages"></progress><p id="startup-detail"></p></div>
         <p id="error" role="alert" hidden></p><button id="next" class="primary"><span id="button-text">Create demo wallet</span><span class="spinner" aria-hidden="true"></span></button>
         <div class="secondary"><button id="import" class="text-button">Restore wallet backup</button><input id="backup-file" type="file" accept="application/json" hidden /></div>
       </section>
@@ -31,6 +33,29 @@ export function mount(network: Network): void {
       </details>
     </main><footer>Public feed → verified pool state → private discovery in a Worker.</footer>`;
   element<HTMLSelectElement>("network").value = network;
+}
+const startupStages: Record<StartupStage, [number, string, string]> = {
+  engine: [0, "Loading discovery engine", "Preparing local discovery in your browser."],
+  cache: [1, "Checking saved state", "Restoring a previous verified state when available."],
+  feed: [2, "Reading public pool data", "Finding the current snapshot and recent updates."],
+  checkpoint: [3, "Checking the blockchain checkpoint", "Getting the independent block header and state proof."],
+  download: [4, "Loading pool state", "Downloading and unpacking public data. No viewing key is sent."],
+  verify: [5, "Verifying pool state", "Checking the complete state against the blockchain checkpoint. The first visit can take tens of seconds."],
+  save: [6, "Saving verified state", "Preparing the cache for your next visit."],
+  ready: [7, "Preparing your wallet", "Pool state is ready. Restoring your notes and checking the public balance."],
+};
+export function renderStartup(progress: StartupProgress | undefined): void {
+  element("startup").hidden = !progress;
+  element("next").classList.toggle("initializing", !!progress);
+  if (!progress) return;
+  const [stage, label, detail] = startupStages[progress.stage];
+  element("startup-label").textContent = label;
+  element("startup-step").textContent = `Stage ${stage + 1} / 8`;
+  const bar = element<HTMLProgressElement>("startup-progress");
+  bar.value = stage + (progress.total ? (progress.completed ?? 0) / progress.total : 0);
+  bar.setAttribute("aria-valuetext", label);
+  element("startup-detail").textContent = progress.stage === "download" && progress.total
+    ? `${progress.completed ?? 0} / ${progress.total} data files loaded. ${detail}` : detail;
 }
 const escape = (value: string) =>
   value.replace(

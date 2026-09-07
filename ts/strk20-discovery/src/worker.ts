@@ -7,6 +7,7 @@ import type {
   Manifest,
   EpochEntry,
   WorkerEvent,
+  StartupProgress,
 } from "./types.ts";
 import { resolveProfile } from "./profiles.ts";
 import { PublicTransport } from "./net.ts";
@@ -51,6 +52,7 @@ export class WorkerRuntime {
   private requestedBlock: number | undefined;
   private saved = false;
   private stopped = false;
+  private initializing = false;
   private readonly module: EngineModule;
   private readonly checkpoints: CheckpointSource;
   private readonly emit: (event: WorkerEvent) => void;
@@ -96,20 +98,36 @@ export class WorkerRuntime {
   info(): EngineInfo {
     return JSON.parse(this.engine.info()) as EngineInfo;
   }
+  private startup(value: StartupProgress): void {
+    if (this.initializing) this.emit({ event: "startup", value });
+  }
   async init(): Promise<EngineInfo> {
-    const bytes = await this.span("Read local cache", () => this.cache.read());
-    if (bytes) {
-      try {
-        this.engine = await this.span("Restore verified state", () =>
-          this.module.Engine.load(bytes, this.genesis), bytes.length,
-        );
-        this.saved = true;
-      } catch {
-        await this.cache.clear();
+    this.initializing = true;
+    try {
+      this.startup({ stage: "cache" });
+      const bytes = await this.span("Read local cache", () => this.cache.read());
+      if (bytes) {
+        try {
+          this.engine = await this.span("Restore verified state", () =>
+            this.module.Engine.load(bytes, this.genesis), bytes.length,
+          );
+          this.saved = true;
+        } catch {
+          await this.cache.clear();
+        }
       }
+      this.engine ??= new this.module.Engine(this.genesis);
+      if (this.info().verifiedAt === null || this.info().verificationFailed) {
+        await this.sync();
+        this.startup({ stage: "save" });
+        await this.save();
+      }
+      const state = this.info();
+      this.startup({ stage: "ready" });
+      return state;
+    } finally {
+      this.initializing = false;
     }
-    this.engine ??= new this.module.Engine(this.genesis);
-    return this.info();
   }
   async save(): Promise<void> {
     if (this.saved || this.info().verifiedAt === null) return;
@@ -182,6 +200,7 @@ export class WorkerRuntime {
     }
   }
   private async syncOnce(block?: number): Promise<EngineInfo> {
+    this.startup({ stage: "feed" });
     // A bounded read may reuse staged public artifacts. The independently
     // fetched checkpoint still verifies the requested block, including reorgs.
     const reuse = block !== undefined && this.headStaged && !this.needsCatchup
@@ -234,11 +253,17 @@ export class WorkerRuntime {
       (!Number.isSafeInteger(block) || block < 0 || block > m.head.number)
     )
       throw new Error("BOUND_UNAVAILABLE: block not present in feed");
+    this.startup({ stage: "checkpoint" });
     const cp = await this.span("Wait for checkpoint proof", () =>
       this.checkpoints.acquire(block ?? m.head.number),
     );
     this.engine.stage_checkpoint(JSON.stringify(cp.checkpoint), cp.proof);
     const info = this.info();
+    const from = info.last_epoch ?? m.snapshot?.e ?? -1;
+    const epochs = m.epochs.filter((e) => e.e > from);
+    const total = epochs.length + Number(info.last_epoch === null && !!m.snapshot);
+    let completed = 0;
+    this.startup({ stage: "download", completed, total });
     if (info.last_epoch === null && m.snapshot) {
       if (m.snapshot.block > cp.checkpoint.block_number)
         throw new Error(
@@ -249,10 +274,13 @@ export class WorkerRuntime {
         inflateWithin(snapshot.bytes),
       );
       this.engine.stage_snapshot(BigInt(m.snapshot.e), snapshot.bytes, payload);
+      this.startup({ stage: "download", completed: ++completed, total });
     }
-    const from = info.last_epoch ?? m.snapshot?.e ?? -1;
-    for (const entry of m.epochs.filter((e) => e.e > from)) {
-      if (stagedEpochs.has(entry.e)) continue;
+    for (const entry of epochs) {
+      if (stagedEpochs.has(entry.e)) {
+        this.startup({ stage: "download", completed: ++completed, total });
+        continue;
+      }
       const inline = this.queuedEpochs.get(entry.e);
       const payload = inline
         ? encode(inline.payload)
@@ -264,8 +292,10 @@ export class WorkerRuntime {
             ).bytes,
           );
       this.engine.stage_epoch(BigInt(entry.e), payload);
+      this.startup({ stage: "download", completed: ++completed, total });
     }
     this.engine.stage_manifest(JSON.stringify(m));
+    this.startup({ stage: "verify" });
     await this.span("Verify pool state", () => this.engine.apply("auto"));
     this.saved = false;
     const state = this.info();
@@ -437,6 +467,7 @@ export function installWorker(
       try {
         let result: unknown;
         if (method === "init") {
+          emit({ event: "startup", value: { stage: "engine" } });
           runtime = new WorkerRuntime(
             await load(),
             args[0] as RuntimeOptions,

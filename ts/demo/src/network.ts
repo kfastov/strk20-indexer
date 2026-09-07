@@ -11,7 +11,7 @@ export const NETWORKS = {
     pool: "0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a",
     rpc: "https://starknet.publicnode.com",
     ws: "wss://starknet-rpc.publicnode.com",
-    proofRpc: "https://rpc.starknet.lava.build",
+    proofRpc: "https://api.cartridge.gg/x/starknet/mainnet",
     feedUrl: "https://strk20.nullref.cc/mainnet/feed",
     prover: "https://transaction-prover.alpha-mainnet.sw-dev.io",
     reference: "https://discovery-service.alpha-mainnet.sw-dev.io",
