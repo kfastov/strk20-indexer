@@ -13,8 +13,8 @@ WebSocket endpoints automatically on both networks. Build with
 Deployment values live outside the repository. Judges do not enter a URL or
 configure a connection. There is no RPC settings form in the demo.
 
-The action picker is a split-button menu; current activity is separate from the
-scrollable history. Desktop/mobile layouts and keyboard selection were checked
+The action picker is a split-button menu. The right panel contains only the
+scrollable operation log, in chronological order from top to bottom. Desktop/mobile layouts and keyboard selection were checked
 in an isolated browser. Wallets, history and pending transaction hashes survive
 refreshing the page; use Resume for an already sent transaction.
 

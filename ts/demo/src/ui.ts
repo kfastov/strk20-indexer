@@ -40,9 +40,7 @@ export function mount(network: Network): void {
       </section>
       <aside class="activity" aria-label="Activity">
         <div class="section-title"><h2>Activity <span id="activity-count">0</span></h2><button id="metrics" class="text-button">Export timings ↗</button></div>
-        <div id="activity-current" class="activity-current" role="status" aria-live="polite"><span class="activity-label">READY WHEN YOU ARE</span><strong>Your next step starts here</strong><p>Follow each operation as it happens.</p></div>
         <div id="log" tabindex="0" role="region" aria-label="Operation history"><p class="empty">No operations yet.</p></div>
-        <div class="activity-foot">Latest first · select an operation for details</div>
       </aside></div>
       <details class="options"><summary>Compare discovery &amp; verification details</summary>
         <label class="check"><input id="compare" type="checkbox" /> Compare with the official indexer</label>
@@ -139,29 +137,9 @@ export function renderOperations(entries: Operation[]): void {
     return `<details class="operation ${operation.error ? "failed" : ""}" data-id="${id}" ${open.has(id) ? "open" : ""}><summary><span class="dot ${operation.elapsedMs === undefined ? "running" : ""}"></span><span>${escape(operation.label)}</span><time>${duration}</time></summary>
       <div class="operation-body">${detail}${operation.error ? `<p class="failure">${escape(operation.error)}</p>` : ""}${operation.children.map((child, i) => row(child, `${id}.${i}`)).join("")}</div></details>`;
   }
-  const latest = entries.at(-1);
-  const panel = element("activity-current");
-  if (latest) {
-    let current = latest;
-    while (current.elapsedMs === undefined) {
-      const child = [...current.children].reverse().find((entry) => entry.elapsedMs === undefined);
-      if (!child) break;
-      current = child;
-    }
-    const running = latest.elapsedMs === undefined;
-    const status = latest.error ? "NEEDS ATTENTION" : running ? "IN PROGRESS" : "COMPLETED";
-    const detail = running
-      ? (current === latest ? "Working on this step…" : latest.label)
-      : `${(latest.elapsedMs! / 1000).toFixed(2)} s · ${latest.error ? "See the details below" : "Ready for your next operation"}`;
-    panel.classList.toggle("is-running", running);
-    panel.classList.toggle("is-failed", !!latest.error);
-    const summary = `<span class="activity-label">${status}</span><strong>${escape(current.label)}</strong><p>${escape(detail)}</p>`;
-    if (panel.innerHTML !== summary) panel.innerHTML = summary;
-  }
   element("activity-count").textContent = String(entries.length);
   const scroll = root.scrollTop;
-  root.innerHTML = entries.map((operation, i) => ({ operation, id: String(i) })).reverse()
-    .map(({ operation, id }) => row(operation, id)).join("") || '<p class="empty">No operations yet.</p>';
+  root.innerHTML = entries.map((operation, i) => row(operation, String(i))).join("") || '<p class="empty">No operations yet.</p>';
   root.scrollTop = scroll;
 }
 export function downloadJson(value: unknown, name: string): void {

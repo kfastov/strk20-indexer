@@ -308,15 +308,7 @@ label {
 .activity { position: sticky; top: 24px; border: 1px solid #29364b; border-radius: 16px; background: #0f1622; overflow: hidden; }
 .activity .section-title { padding: 12px 20px; border-bottom: 1px solid #263145; }
 #activity-count { margin-left: 6px; color: #8295af; font-variant-numeric: tabular-nums; }
-.activity-current { padding: 20px; border-bottom: 1px solid #263145; background: #141f2e; }
-.activity-label { display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: .14em; color: #a4b5cc; }
-.activity-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #78c8af; }
-.activity-current.is-running .activity-label::before { background: #9bcaff; animation: pulse 1s infinite; }
-.activity-current.is-failed .activity-label::before { background: #ffa4aa; }
-.activity-current strong { display: block; margin-top: 10px; font-size: 18px; font-weight: 550; overflow-wrap: anywhere; }
-.activity-current p { margin: 6px 0 0; font-size: 12px; }
 #log { max-height: clamp(180px, calc(100dvh - 310px), 460px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #354760 transparent; padding: 0 20px; }
-.activity-foot { padding: 12px 20px; border-top: 1px solid #263145; color: #91a2ba; font-size: 10px; }
 
 .section-title {
   display: flex;
@@ -472,8 +464,7 @@ footer {
 }
 @media (prefers-reduced-motion: reduce) {
   .spinner,
-  .dot.running,
-  .activity-current.is-running .activity-label::before {
+  .dot.running {
     animation: none;
   }
 }
