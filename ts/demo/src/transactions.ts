@@ -17,9 +17,9 @@ import { saveWallet, type Wallet, type Action } from "./wallet.ts";
 import { Operations, type Operation } from "./operations.ts";
 import { SubmissionSigner } from "./submission-signer.ts";
 import { waitForReceipt } from "./confirmation.ts";
+import { waitForBlock } from "./block-wait.ts";
 
 const PROOF_DEPTH = 9;
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class Transactions {
   readonly rpc: RpcProvider;
   private readonly account: Account;
@@ -241,7 +241,8 @@ export class Transactions {
           async () => {
             if (action === "shield")
               return (await this.rpc.getBlockNumber()) - PROOF_DEPTH;
-            for (let attempt = 0; attempt < 150; attempt++) {
+            return waitForBlock(NETWORKS[this.wallet.network].ws,
+              () => this.rpc.getBlockNumber(), async (head) => {
               const found = await this.transfers.discoverNotes();
               const notes = found.notes.get(BigInt(STRK)) ?? [];
               const required = notes.reduce(
@@ -252,13 +253,10 @@ export class Transactions {
                   ),
                 0,
               );
-              const block = (await this.rpc.getBlockNumber()) - PROOF_DEPTH;
+              const block = head - PROOF_DEPTH;
               if (notes.length && block >= required) return block;
-              await pause(2000);
-            }
-            throw new Error(
-              "Notes have not become spendable yet. Retry after more blocks.",
-            );
+              return undefined;
+            });
           },
           operation,
         );

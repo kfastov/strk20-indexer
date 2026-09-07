@@ -112,6 +112,10 @@ required; the repository at the deadline is the entry.
   resume without a new send are retained. The next user-submitted mainnet action
   still needs to measure this path on a newly accepted transaction; do not present
   already-confirmed receipt checks as inclusion-latency measurements.
+- Note maturity now uses new-head WebSocket events instead of the remaining
+  two-second block/discovery polling loop. Headers carry the block number;
+  one catch-up RPC on subscription/reconnection covers a missed head. The
+  protocol's maturity depth remains unchanged; transport cannot remove it.
 
 ### Ordered remaining work
 

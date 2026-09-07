@@ -533,6 +533,23 @@ errors. The lookup starts alongside WS connection, so recovery does not wait for
 the handshake. These are read-only checks of already-confirmed hashes, not fresh
 transaction inclusion measurements or proof of an end-to-end speed advantage.
 
+## Event-driven note maturity, 2026-09-07
+
+The remaining two-second polling loop in `Transactions.execute` is replaced by
+`starknet_subscribeNewHeads`. Headers supply block numbers directly. One catch-up
+read after subscription acknowledgement covers a head missed while connecting;
+an earlier notification takes precedence over that read. Slow discovery checks
+coalesce arriving heads instead of running concurrently. Reconnection is bounded;
+errors and a five-minute deadline close the socket. The existing note maturity
+requirement and pinned proving block are unchanged.
+
+All 18 demo tests pass, including early heads, a late catch-up during slow
+discovery, reconnection, timeout without polling and subscription rejection.
+A read-only live check on each configured network observed the initial block
+and the next head with one HTTP block-number read and two checks: mainnet
+14493815 → 14493816, Sepolia 14682532 → 14682533. These checks prove transport
+operation, not funded transaction latency or a discovery speed advantage.
+
 ## Deferred
 
 AEAD after the main implementation, Ethereum-finalized checkpoint selection,
