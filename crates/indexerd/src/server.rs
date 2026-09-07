@@ -112,6 +112,7 @@ pub fn build_router(
         .route("/feed/head.ndjson", public_get(feed_head))
         .route("/feed/anchors.ndjson", public_get(feed_anchors))
         .route("/feed/live", public_get(feed_live))
+        .route("/feed/proofs/{block}", public_get(feed_proof))
         .route("/feed/epochs/{name}", public_get(feed_epoch_file))
         .route("/feed/snapshots/{name}", public_get(feed_snapshot_file))
         .route("/health", public_get(health))
@@ -250,6 +251,29 @@ async fn feed_anchors(State(s): State<AppState>, headers: HeaderMap) -> Response
     revalidated_ndjson(s.feed_dir.join("anchors.ndjson"), headers).await
 }
 
+async fn feed_proof(State(s): State<AppState>, AxPath(block): AxPath<u64>, RawQuery(query): RawQuery) -> Response {
+    if query.is_some() { return (StatusCode::BAD_REQUEST, "INVALID_QUERY").into_response(); }
+    let Some(proofs) = s.live.proofs() else { return StatusCode::NOT_FOUND.into_response(); };
+    let head = match with_db(&s, |db| Ok(db.meta_get("head_number")?.and_then(|n| n.parse::<u64>().ok()).unwrap_or(0))) {
+        Ok(head) => head, Err(error) => return error,
+    };
+    if block > head || head.saturating_sub(block) > 128 {
+        return (StatusCode::GONE, "proof outside recent feed window").into_response();
+    }
+    let Some(mut pending) = proofs.request(block) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "proof acquisition busy").into_response();
+    };
+    loop {
+        if let Some(result) = pending.borrow_and_update().clone() {
+            return match result {
+                Ok(text) => ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], text).into_response(),
+                Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "proof temporarily unavailable").into_response(),
+            };
+        }
+        if pending.changed().await.is_err() { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+    }
+}
+
 async fn feed_head(State(s): State<AppState>, headers: HeaderMap) -> Response {
     s.live.request_catchup();
     revalidated_ndjson(s.feed_dir.join("head.ndjson"), headers).await
@@ -375,6 +399,7 @@ async fn feed_live(State(s): State<AppState>, RawQuery(query): RawQuery) -> Resp
         "v": strk20_feed::codec::FORMAT_VERSION,
         "chain_id": s.cfg.chain_id,
         "pool": strk20_feed::felt_hex(&s.cfg.pool),
+        "proofs": s.live.proofs().is_some(),
         "module": concat!("strk20/", env!("CARGO_PKG_VERSION")),
     })
     .to_string();

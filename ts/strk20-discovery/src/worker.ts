@@ -50,7 +50,11 @@ export class WorkerRuntime {
   private needsCatchup = true;
   private headStaged = false;
   private requestedBlock: number | undefined;
-  private saved = false;
+  private savedRevision = -1;
+  private writing: Promise<void> | undefined;
+  private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private clearing = false;
+  private genesisChecked = false;
   private stopped = false;
   private initializing = false;
   private readonly module: EngineModule;
@@ -111,7 +115,7 @@ export class WorkerRuntime {
           this.engine = await this.span("Restore verified state", () =>
             this.module.Engine.load(bytes, this.genesis), bytes.length,
           );
-          this.saved = true;
+          this.savedRevision = this.engine.cache_revision();
         } catch {
           await this.cache.clear();
         }
@@ -130,23 +134,63 @@ export class WorkerRuntime {
     }
   }
   async save(): Promise<void> {
-    if (this.saved || this.info().verifiedAt === null) return;
-    await this.span("Save verified state", async () =>
-      this.cache.write(this.engine.export_state()),
-    );
-    this.saved = true;
+    while (this.writing) await this.writing;
+    if (this.savedRevision === this.engine.cache_revision() || this.info().verifiedAt === null) return;
+    const revision = this.engine.cache_revision();
+    const work = this.span("Save verified state", async () => {
+      const bytes = await this.span("Serialize verified state", () => this.engine.export_state());
+      await this.cache.write(bytes);
+      this.savedRevision = revision;
+    });
+    this.writing = work;
+    try { await work; }
+    finally { if (this.writing === work) this.writing = undefined; }
+  }
+  private scheduleSave(): void {
+    if (this.stopped || this.clearing || this.saveTimer !== undefined
+      || this.savedRevision === this.engine.cache_revision()) return;
+    // Yield to incoming Worker messages. Disk I/O is independent of the command
+    // queue; one writer and a revision keep an old completion from marking new
+    // state as saved. No timer is armed for unchanged state.
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.save().then(() => this.scheduleSave(), (error) =>
+        this.emit({ event: "error", value: String(error) }));
+    }, 0);
+  }
+  canReadNow(method: string, args: unknown[]): boolean {
+    if (!this.engine || this.stopped || this.clearing) return false;
+    const info = this.info();
+    if (info.verificationFailed || info.verifiedAt === null) return false;
+    if (method === "discover" && args[3] === true) return true;
+    const block = args[method === "discover" ? 2 : method === "channels" ? 3 : 4];
+    return ["discover", "channels", "requirement"].includes(method) && block === info.verifiedAt;
+  }
+  readNow(method: string, args: unknown[]): unknown {
+    // Keep the eligibility check and the read in one synchronous turn: an
+    // awaiting sync must not apply a different block between the two.
+    if (!this.canReadNow(method, args)) throw new Error("Verified state changed before read");
+    const owner = args[0] as string, key = args[1] as Uint8Array;
+    if (method === "requirement")
+      return this.requirement(owner, key, args[2] as string, args[3] as string);
+    const start = performance.now();
+    let notes: unknown;
+    try { notes = JSON.parse(this.engine.discover(owner, method === "channels" ? key.slice() : key)); }
+    finally { this.emit({ event: "span", value: { name: "Discover notes", ms: performance.now() - start } }); }
+    this.scheduleSave();
+    return method === "channels" ? this.channels(owner, key, args[2] as string[] | null) : notes;
   }
   private async manifestGet(): Promise<void> {
     const [g, m] = await Promise.all([
-      this.net.get("genesis.json"),
+      this.genesisChecked ? undefined : this.net.get("genesis.json"),
       this.net.get("manifest.json"),
     ]);
-    const genesis = JSON.parse(decode(g.bytes)) as {
+    const genesis = g ? JSON.parse(decode(g.bytes)) as {
       chain_id: string;
       pool: string;
       genesis_block: number;
       epoch_size: number;
-    };
+    } : JSON.parse(this.genesis);
     if (
       genesis.chain_id !== this.profile.chainId ||
       hex(genesis.pool) !== hex(this.profile.pool) ||
@@ -154,6 +198,7 @@ export class WorkerRuntime {
       genesis.epoch_size !== this.profile.epochSize
     )
       throw new Error("CHAIN_MISMATCH: feed genesis");
+    this.genesisChecked = true;
     this.manifest = JSON.parse(decode(m.bytes)) as Manifest;
     this.needsCatchup = false;
   }
@@ -297,7 +342,7 @@ export class WorkerRuntime {
     this.engine.stage_manifest(JSON.stringify(m));
     this.startup({ stage: "verify" });
     await this.span("Verify pool state", () => this.engine.apply("auto"));
-    this.saved = false;
+    this.scheduleSave();
     const state = this.info();
     this.emit({ event: "state", value: state });
     return state;
@@ -314,9 +359,7 @@ export class WorkerRuntime {
       const result = await this.span("Discover notes", () =>
         JSON.parse(this.engine.discover(owner, key)),
       );
-      this.saved = false;
-      // Do not charge a full cache write to the user's restart/read result.
-      this.enqueue(() => this.save());
+      this.scheduleSave();
       return result;
     } finally {
       key.fill(0);
@@ -362,6 +405,11 @@ export class WorkerRuntime {
                 hex(data.pool) !== hex(this.profile.pool))
             )
               throw new Error("CHAIN_MISMATCH: stream");
+            if (name === "hello") this.checkpoints.stream(data.proofs === true);
+            if (name === "proof") {
+              if (data.reset) this.checkpoints.reset();
+              else this.checkpoints.receive(data);
+            }
             if (name === "status" && data.verify_root_failed)
               throw new Error(
                 "CHECKPOINT_FAILED: publisher stopped verification",
@@ -374,6 +422,7 @@ export class WorkerRuntime {
               }
             }
             if (name === "head") {
+              this.checkpoints.head(data.head);
               this.queuedHead = data;
               this.emit({ event: "head", value: data.head });
               if (!data.payload || data.resync || this.queuedEpochs.size > 4)
@@ -384,13 +433,13 @@ export class WorkerRuntime {
                   this.liveQueued = false;
                   if (this.stopped) return;
                   await this.sync();
-                  // Let reads already waiting behind this update run before disk I/O.
-                  this.enqueue(() => this.save());
+                  this.scheduleSave();
                 });
               }
             }
           }, control.signal);
         } catch (e) {
+          this.checkpoints.stream(false);
           if (control.signal.aborted) return;
           this.emit({ event: "error", value: String(e) });
           if (/CHAIN_MISMATCH|CHECKPOINT_FAILED/.test(String(e))) {
@@ -398,12 +447,17 @@ export class WorkerRuntime {
             return;
           }
         }
+        this.checkpoints.stream(false);
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     })();
   }
   async clear(): Promise<void> {
-    this.checkpoints.cancel();
+    this.clearing = true;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
+    await this.writing?.catch(() => {});
+    this.checkpoints.reset();
     await this.cache.clear();
     this.engine.free();
     this.engine = new this.module.Engine(this.genesis);
@@ -411,11 +465,14 @@ export class WorkerRuntime {
     this.headStaged = false;
     this.requestedBlock = undefined;
     this.needsCatchup = true;
-    this.saved = false;
+    this.savedRevision = -1;
+    this.clearing = false;
   }
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
     this.checkpoints.cancel();
     this.liveAbort?.abort();
     if (!this.engine) return; // initialization can fail while opening storage
@@ -463,7 +520,7 @@ export function installWorker(
       method: string;
       args: unknown[];
     };
-    enqueue(async () => {
+    const run = async () => {
       try {
         let result: unknown;
         if (method === "init") {
@@ -533,6 +590,14 @@ export function installWorker(
       } finally {
         if (args[1] instanceof Uint8Array) args[1].fill(0);
       }
-    }, method !== "close");
+    };
+    // Staged feed/checkpoint bytes do not replace the verified store until
+    // synchronous Engine.apply succeeds. Reads of that store can run while a
+    // queued sync is waiting for network or a cache write is pending.
+    if (runtime?.canReadNow(method, args)) {
+      try { scope.postMessage({ id, result: runtime.readNow(method, args) }); }
+      catch (error) { scope.postMessage({ id, error: error instanceof Error ? error.message : String(error) }); }
+      finally { if (args[1] instanceof Uint8Array) args[1].fill(0); }
+    } else enqueue(run, method !== "close");
   };
 }

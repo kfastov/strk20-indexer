@@ -22,12 +22,13 @@
 //!   names a public epoch index and nothing user-derived.
 
 /// Human-readable form of the closed set, for assertion messages.
-pub const PATTERNS: [&str; 9] = [
+pub const PATTERNS: [&str; 10] = [
     "/feed/genesis.json",
     "/feed/manifest.json",
     "/feed/head.ndjson",
     "/feed/anchors.ndjson",
     "/feed/live",
+    "/feed/proofs/{block}",
     "/feed/epochs/{idx:08}.strk20e.zst",
     "/feed/epochs/{idx:08}.anchor.json",
     "/feed/snapshots/{e:08}.strk20s.zst",
@@ -44,7 +45,8 @@ pub fn is_allowed(uri: &str) -> bool {
         | "/feed/anchors.ndjson"
         | "/feed/live" => true,
         _ => {
-            indexed(uri, "/feed/epochs/", ".strk20e.zst")
+            uri.strip_prefix("/feed/proofs/").is_some_and(|b| !b.is_empty() && b.len() <= 20 && b.bytes().all(|c| c.is_ascii_digit()))
+                || indexed(uri, "/feed/epochs/", ".strk20e.zst")
                 || indexed(uri, "/feed/epochs/", ".anchor.json")
                 || indexed(uri, "/feed/snapshots/", ".strk20s.zst")
                 || indexed(uri, "/feed/snapshots/", ".anchor.json")

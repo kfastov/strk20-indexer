@@ -113,6 +113,7 @@ export interface RuntimeOptions {
   feedUrl: string;
   rpcUrl: string;
   proofRpcUrl: string;
+  proofSource?: "feed" | "rpc";
 }
 /** Actual startup boundaries, not an estimate of elapsed/remaining time. */
 export type StartupStage = "engine" | "cache" | "feed" | "checkpoint" | "download" | "verify" | "save" | "ready";

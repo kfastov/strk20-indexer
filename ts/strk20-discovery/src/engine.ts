@@ -12,6 +12,7 @@ export interface Engine {
   apply(mode: string): string;
   info(): string;
   export_state(): Uint8Array;
+  cache_revision(): number;
   discover(owner: string, key: Uint8Array): string;
   channels(owner: string, key: Uint8Array, recipients: string): string;
   requirement(

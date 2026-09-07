@@ -308,7 +308,7 @@ async fn run(
     feeder_url: Option<String>,
 ) -> Result<()> {
     let cfg = common.chain_config();
-    let rpc = common.rpc().with_feeder(feeder_url);
+    let rpc = Arc::new(common.rpc().with_feeder(feeder_url));
     let mut db = Db::open(&common.db)?;
     init_checks(&db, &rpc, &cfg).await?;
 
@@ -326,6 +326,7 @@ async fn run(
         common.feed_dir.clone(),
         server_db.clone(),
     ));
+    live.start_proofs(rpc.clone(), cfg.pool);
     let state = strk20_indexerd::server::AppState {
         feed_dir: common.feed_dir.clone(),
         db: server_db.clone(),
@@ -390,6 +391,7 @@ async fn run(
                         cutter.regen_head()?;
                     }
                     if o.reorged {
+                        live.invalidate_proofs();
                         // The rollback dropped anchors above the ancestor;
                         // republish so the feed stops serving them.
                         cutter.write_anchors()?;

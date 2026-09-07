@@ -45,6 +45,7 @@ const options: RuntimeOptions = {
   feedUrl: "https://feed.test",
   rpcUrl: "https://header.test",
   proofRpcUrl: "https://proof.test",
+  proofSource: "rpc",
 };
 const key = (owner: (typeof owners)[number]) =>
   new Uint8Array(Buffer.from(owner.key, "hex"));
@@ -114,6 +115,12 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
           { headers: { "content-type": "text/event-stream" } },
         );
       if (path === "genesis.json") return Response.json(genesis);
+      if (path.startsWith("proofs/")) {
+        const block = Number(path.slice(7));
+        const proof = doc("proof.json");
+        proof.global_roots.block_hash = badProof ? "0x123" : `0x${(0xb10c0000 + block).toString(16)}`;
+        return Response.json({ block, block_hash: proof.global_roots.block_hash, proof });
+      }
       if (path === "manifest.json") return Response.json(manifest);
       if (path === "head.ndjson")
         return new Response(head, {
@@ -149,6 +156,21 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   const downloaded = startupEvents.filter((p) => p.stage === "download").at(-1)!;
   assert.equal(downloaded.completed, downloaded.total);
   await startupRuntime.close();
+  // A proof served by the feed remains untrusted: the real WASM verifier binds
+  // it to the independent header, including a self-consistent wrong envelope.
+  const fromFeed = new WorkerRuntime({ Engine }, { ...options, proofSource: "feed" },
+    () => {}, () => {}, () => ({ read: async () => undefined,
+      write: async () => {}, clear: async () => {} }));
+  try {
+    requests.length = 0;
+    await fromFeed.init();
+    assert.equal(fromFeed.info().verifiedAt, 99);
+    assert(requests.some((r) => r.url.endsWith("/proofs/99")));
+    assert(!requests.some((r) => r.body.includes("starknet_getStorageProof")));
+    badProof = true;
+    await assert.rejects(() => fromFeed.sync(98), /block hash|block_hash|proof/i);
+    assert(fromFeed.info().verificationFailed);
+  } finally { badProof = false; await fromFeed.close(); }
   for (const mode of ["snapshot", "epochs"]) {
     const tasks: (() => Promise<void>)[] = [];
     const runtime = new WorkerRuntime(
@@ -369,6 +391,17 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
     requests.length = 0;
     const first = mine.discoverNotes({ blockIdentifier: 98 });
     await entered;
+    // A network-stalled sync must not lock the already verified account state.
+    const readStart = performance.now();
+    const cachedDuringSync = await Promise.race([
+      mine.restore(),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error("cached read blocked by network sync")), 500);
+        timer.unref();
+      }),
+    ]);
+    assert(cachedDuringSync);
+    t.diagnostic(`Verified cached read while header RPC is held pending: ${(performance.now() - readStart).toFixed(2)} ms`);
     const observed = new Promise<void>((resolve) => { headObserved = resolve; });
     stream!.enqueue(new TextEncoder().encode(
       `event: head\ndata: ${JSON.stringify({ head: 99, payload: null, resync: true })}\n\n`,
@@ -487,12 +520,19 @@ test("real WASM Worker: snapshot/epochs, SDK Witness, cache-only restore and che
   while (liveTasks.length) await liveTasks.shift()!();
   assert.equal(live.info().verifiedAt, 198, "SSE first serves the waiting foreground bound");
   assert.equal(live.info().last_epoch, 1);
+  await live.save();
   assert(liveSpans.indexOf("Discover notes") < liveSpans.indexOf("Save verified state"),
     "a read queued behind a live update finishes before persisting the cache");
   const proofRequests = () => requests.filter((r) => r.body.includes("starknet_getStorageProof")).length;
   assert.equal(proofRequests(), 0, "the proof was prefetched while waiting for the feed");
   await live.sync(198);
   assert.equal(proofRequests(), 0, "the foreground retry must not acquire a second proof");
+  await live.save();
+  liveSpans.length = 0;
+  await live.discover(owners[0]!.owner, key(owners[0]!), 198);
+  await live.discover(owners[0]!.owner, key(owners[0]!), 198);
+  await live.save();
+  assert(!liveSpans.includes("Save verified state"), "unchanged cached reads must not serialize or write state");
   assert.equal(
     requests.filter((r) => !r.body).length,
     0,

@@ -12,6 +12,7 @@ pub mod head_events;
 pub mod feeder;
 pub mod ingest;
 pub mod live;
+pub mod proofs;
 pub mod recovery;
 pub mod rpc;
 pub mod server;

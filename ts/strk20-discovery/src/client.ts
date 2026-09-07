@@ -19,6 +19,7 @@ export interface ClientOptions {
   feedUrl: string;
   rpcUrl?: string;
   proofRpcUrl?: string;
+  proofSource?: "feed" | "rpc";
   workerFactory?: () => WorkerPort;
   onEvent?: (event: WorkerEvent) => void;
 }
@@ -69,6 +70,7 @@ export class KeylessClient {
     const config: RuntimeOptions = {
       network,
       feedUrl: options.feedUrl,
+      proofSource: options.proofSource ?? "feed",
       rpcUrl:
         options.rpcUrl ??
         (profile.name === "sepolia"

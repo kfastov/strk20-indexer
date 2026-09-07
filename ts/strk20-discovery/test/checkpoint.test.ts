@@ -4,6 +4,38 @@ import { CheckpointSource } from "../src/checkpoint.ts";
 import { PublicTransport } from "../src/net.ts";
 import { resolveProfile } from "../src/profiles.ts";
 
+test("a live proof completes an acquisition without proof HTTP or RPC; disconnect catches up once", async (t) => {
+  const profile = resolveProfile("sepolia");
+  const net = new PublicTransport("https://feed.test", () => {});
+  const gets: string[] = [];
+  t.mock.method(net, "rpc", async (url: string, method: string, params: any[]) => {
+    assert.equal(url, "https://header.test");
+    if (method === "starknet_chainId") return `0x${Buffer.from(profile.chainId).toString("hex")}`;
+    assert.equal(method, "starknet_getBlockWithTxHashes");
+    return { block_number: params[0].block_number, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
+  });
+  const envelope = (block: number) => ({ block, block_hash: "0x123", proof: { global_roots: { block_hash: "0x123" } } });
+  t.mock.method(net, "get", async (path: string) => {
+    gets.push(path);
+    return { bytes: new TextEncoder().encode(JSON.stringify(envelope(Number(path.split("/")[1])))), etag: "" };
+  });
+  const source = new CheckpointSource(net, { network: "sepolia", feedUrl: "https://feed.test",
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" }, profile);
+  source.stream(true); source.head(123);
+  const pending = source.acquire(123);
+  await Promise.resolve();
+  assert.deepEqual(gets, []);
+  source.receive(envelope(123));
+  assert.equal((await pending).checkpoint.block_number, 123);
+  assert.deepEqual(gets, []);
+  source.head(124);
+  const missed = source.acquire(124);
+  source.stream(false);
+  assert.equal((await missed).checkpoint.block_number, 124);
+  assert.deepEqual(gets, ["proofs/124"]);
+  assert.throws(() => source.receive({ ...envelope(125), block_hash: "0x999" }), /malformed feed proof/);
+});
+
 test("checkpoint requests run concurrently and retain the trusted header boundary", async (t) => {
   const profile = resolveProfile("sepolia");
   const net = new PublicTransport("https://feed.test", () => {});
@@ -20,7 +52,7 @@ test("checkpoint requests run concurrently and retain the trusted header boundar
     return { block_number: 123, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
   });
   const opts = { network: "sepolia" as const, feedUrl: "https://feed.test",
-    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" };
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test", proofSource: "rpc" as const };
   const pending = new CheckpointSource(net, opts, profile).acquire(123);
   // Holding the header response must not hold up the proof or chain request.
   try {
@@ -48,7 +80,7 @@ test("a prepared checkpoint is shared and a superseded request is cancelled", as
     return { block_number: block, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
   });
   const source = new CheckpointSource(net, { network: "sepolia", feedUrl: "https://feed.test",
-    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" }, profile);
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test", proofSource: "rpc" as const }, profile);
   source.prepare(123);
   const old = source.acquire(123);
   source.prepare(124);
@@ -69,7 +101,7 @@ test("new-head refusal retries are immediate, bounded and stay on the trusted en
     return { block_number: 123, block_hash: "0x123", new_root: "0x456", status: "ACCEPTED_ON_L2" };
   });
   const opts = { network: "sepolia" as const, feedUrl: "https://feed.test",
-    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test" };
+    rpcUrl: "https://header.test", proofRpcUrl: "https://proof.test", proofSource: "rpc" as const };
   assert.equal((await new CheckpointSource(net, opts, profile).acquire(123)).checkpoint.block_number, 123);
   assert.equal(headers, 3);
   headers = 0; failures = 10;

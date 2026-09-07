@@ -1,3 +1,4 @@
+import { subscribeRpc } from "./rpc-subscription.ts";
 import type { RpcProvider } from "starknet";
 
 type ReceiptResponse = Awaited<ReturnType<RpcProvider["getTransactionReceipt"]>>;
@@ -9,13 +10,11 @@ export function waitForReceipt(
   hash: string, nodeUrl: string, getReceipt: () => Promise<ReceiptResponse>,
 ): Promise<AcceptedReceipt> {
   return new Promise((resolve, reject) => {
-    let socket: WebSocket;
+    let stop: (() => void) | undefined;
     let finished = false;
     let reading: Promise<void> | undefined;
     let checkingFailure = false;
     let acceptedWhileReading = false;
-    let retries = 0;
-    let reconnect: ReturnType<typeof setTimeout> | undefined;
     let catchupDeadline: ReturnType<typeof setTimeout> | undefined;
     const deadline = setTimeout(() => void failAfterCatchup(new Error(
       "Confirmation timed out. Resume the saved transaction; do not send again.",
@@ -24,9 +23,8 @@ export function waitForReceipt(
       if (finished) return;
       finished = true;
       clearTimeout(deadline);
-      clearTimeout(reconnect);
       clearTimeout(catchupDeadline);
-      socket?.close();
+      stop?.();
       if (error) reject(error);
       else resolve(receipt!);
     }
@@ -34,9 +32,8 @@ export function waitForReceipt(
       if (finished || checkingFailure) return;
       checkingFailure = true;
       clearTimeout(deadline);
-      clearTimeout(reconnect);
       catchupDeadline = setTimeout(() => finish(error), 15_000);
-      socket?.close();
+      stop?.();
       // A subscription can time out after the transaction was accepted. Check
       // its saved hash once before reporting a transport failure, never resend.
       await reading;
@@ -74,48 +71,22 @@ export function waitForReceipt(
         }
       }
     }
-    function connect() {
-      if (finished || checkingFailure) return;
-      try { socket = new WebSocket(nodeUrl); }
-      catch (error) { void failAfterCatchup(error); return; }
-      const connection = socket;
-      let lost = false;
-      socket.onopen = () => {
-        if (finished || lost || checkingFailure) { connection.close(); return; }
-        connection.send(JSON.stringify({ jsonrpc: "2.0", id: 1,
-          method: "starknet_subscribeTransactionStatus", params: { transaction_hash: hash } }));
-        // Catch up confirmations missed during a disconnected interval.
-        if (retries > 0) void readReceipt();
-      };
-      // Installed before open: the initial status can precede the subscription ack.
-      socket.onmessage = (message) => {
-        if (finished || checkingFailure) return;
-        try {
-          const notification = JSON.parse(String(message.data));
-          if (notification.error) {
-            void failAfterCatchup(new Error(`Status subscription failed: ${notification.error.message}. Resume the saved transaction.`));
-            return;
-          }
-          if (notification.method !== "starknet_subscriptionTransactionStatus") return;
-          const event = notification.params.result;
-          if (BigInt(event.transaction_hash) !== BigInt(hash)) return;
-          if (accepted(event.status.finality_status)) void readReceipt(true);
-          else if (event.status.finality_status === "REJECTED") {
-            finish(new Error("Transaction rejected. Inspect the saved transaction before retrying."));
-          }
-        } catch (error) { finish(error); }
-      };
-      const disconnected = () => {
-        if (finished || lost || checkingFailure) return;
-        lost = true;
-        connection.close();
-        if (retries === 3) void failAfterCatchup(new Error("Confirmation connection lost. Resume the saved transaction."));
-        else reconnect = setTimeout(connect, 250 * 2 ** retries++);
-      };
-      socket.onclose = disconnected;
-      socket.onerror = disconnected;
-    }
-    connect();
+    stop = subscribeRpc({
+      url: nodeUrl, method: "starknet_subscribeTransactionStatus",
+      params: { transaction_hash: hash },
+      onReady: (reconnected) => { if (reconnected) void readReceipt(); },
+      onEvent: (notification) => {
+        if (finished || checkingFailure || notification.method !== "starknet_subscriptionTransactionStatus") return;
+        const event = notification.params.result;
+        if (BigInt(event.transaction_hash) !== BigInt(hash)) return;
+        if (accepted(event.status.finality_status)) void readReceipt(true);
+        else if (event.status.finality_status === "REJECTED")
+          finish(new Error("Transaction rejected. Inspect the saved transaction before retrying."));
+      },
+      onError: (error) => void failAfterCatchup(new Error(
+        `Status subscription failed: ${error.message} Resume the saved transaction.`,
+      )),
+    });
     // Restoring an accepted transaction must not wait for the WS handshake.
     void readReceipt();
   });

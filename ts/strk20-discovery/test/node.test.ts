@@ -77,6 +77,7 @@ test("Node worker verifies real state and restores the account with the server o
     feedUrl: endpoint,
     rpcUrl: endpoint,
     proofRpcUrl: endpoint,
+    proofSource: "rpc" as const,
     network: {
       name: "fixture",
       chainId: genesis.chain_id,

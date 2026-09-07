@@ -6,6 +6,67 @@ type Acquired = { checkpoint: Checkpoint; proof: string };
 /** Independent RPC header selection and proof acquisition; Rust verifies the proof. */
 export class CheckpointSource {
   private chainChecked = false;
+  private proofs = new Map<number, unknown>();
+  private live = false;
+  private liveHead = -1;
+  private proofHead = -1;
+  private readonly wake = new Set<() => void>();
+  private feedAvailable: boolean | undefined;
+
+  reset(): void {
+    this.proofs.clear(); this.proofHead = -1; this.cancel();
+  }
+  stream(active: boolean): void {
+    this.live = active && this.opts.proofSource !== "rpc";
+    for (const notify of this.wake) notify();
+  }
+  head(block: number): void { this.liveHead = block; }
+  receive(data: { block: number; block_hash: string; proof: any }): void {
+    if (!Number.isSafeInteger(data.block) || data.block < 0 || !data.proof
+      || hex(data.block_hash) !== hex(data.proof.global_roots?.block_hash))
+      throw new Error("CHECKPOINT_FAILED: malformed feed proof envelope");
+    this.proofs.set(data.block, data.proof);
+    this.proofHead = Math.max(this.proofHead, data.block);
+    while (this.proofs.size > 128) this.proofs.delete(this.proofs.keys().next().value!);
+    for (const notify of this.wake) notify();
+  }
+  private async proof(block: number, signal: AbortSignal): Promise<unknown> {
+    if (this.opts.proofSource !== "rpc" && this.feedAvailable !== false) {
+      // Healthy streams deliver proofs themselves. HTTP is bootstrap or gap
+      // recovery, including a publisher that coalesced past this exact block.
+      if (!this.proofs.has(block) && this.live && block >= this.liveHead && this.proofHead <= block) {
+        await new Promise<void>((resolve, reject) => {
+          const finish = (error?: unknown) => {
+            clearTimeout(timer); this.wake.delete(notify);
+            signal.removeEventListener("abort", abort);
+            if (error) reject(error); else resolve();
+          };
+          const notify = () => { if (this.proofs.has(block) || !this.live || this.proofHead > block) finish(); };
+          const abort = () => finish(signal.reason ?? new Error("Checkpoint cancelled"));
+          const timer = setTimeout(() => finish(), 5_000);
+          this.wake.add(notify);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort(); else notify();
+        });
+      }
+      if (this.proofs.has(block)) return this.proofs.get(block);
+      try {
+        const response = await this.net.get(`proofs/${block}`, signal);
+        const data = JSON.parse(new TextDecoder().decode(response.bytes));
+        if (data.block !== block) throw new Error("CHECKPOINT_FAILED: wrong feed proof block");
+        this.receive(data);
+        this.feedAvailable = true;
+        return data.proof;
+      } catch (error) {
+        // Older servers have no proof route; historical bounds outside the
+        // public retention window still use the configured independent RPC.
+        if (!/TRANSPORT: HTTP (404|410)\b/.test(String(error))) throw error;
+        if (String(error).includes("404")) this.feedAvailable = false;
+      }
+    }
+    return this.available(this.opts.proofRpcUrl, "starknet_getStorageProof",
+      [{ block_number: block }, [], [hex(this.profile.pool)], []], signal);
+  }
   private pending: { block: number; work: Promise<Acquired>; abort: AbortController } | undefined;
   private readonly net: PublicTransport;
   private readonly opts: RuntimeOptions;
@@ -50,8 +111,7 @@ export class CheckpointSource {
       this.available(this.opts.rpcUrl, "starknet_getBlockWithTxHashes", [
         { block_number: block },
       ], signal),
-      this.available(this.opts.proofRpcUrl, "starknet_getStorageProof",
-        [{ block_number: block }, [], [hex(this.profile.pool)], []], signal),
+      this.proof(block, signal),
       this.checkChain(signal),
     ]) as [{ block_number: number; block_hash: string; new_root: string;
       status: string }, unknown, void];

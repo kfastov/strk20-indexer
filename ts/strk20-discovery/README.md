@@ -116,9 +116,19 @@ folded storage, cached tree nodes, discovery cursors and witnesses. A failed can
 cannot replace the last verified state. Clearing discovery cache must not delete
 wallet signing or viewing keys. AEAD is deferred until after the main implementation.
 
-SSE carries complete head and epoch payloads. The same decoder handles HTTP catch-up
-following a gap or oversized event. Routine stream updates need no GET for their
-data; independent checkpoint RPC requests are still necessary. Queues are bounded.
+SSE carries complete head and epoch payloads and, on supporting servers, public
+storage proofs. The server shares proof acquisition across subscribers. The SDK
+defaults to `proofSource: 'feed'`: it receives live proofs as events and uses
+`/feed/proofs/{block}` for bootstrap or a missed event. A missing event has a
+five-second recovery deadline; disconnect wakes recovery immediately. Older servers
+(HTTP 404) and blocks outside the recent proof window (HTTP 410) use `proofRpcUrl`.
+Set `proofSource: 'rpc'` to acquire every proof directly from that RPC.
+The accepted header still comes from independent `rpcUrl`, and WASM verifies every
+proof against it. Delivery from the feed adds no trust in the feed.
+
+The same decoder handles HTTP catch-up following a gap or oversized event.
+Routine stream updates need no GET for their data; independent header RPC requests
+are still necessary. Queues are bounded.
 Explicit HTTP catch-up revalidates the mutable manifest instead of waiting for
 the browser's cached copy to expire. Bounded reads reuse already staged artifacts
 but still verify their independent checkpoint. `await discovery.waitForBlock(B)`
@@ -127,6 +137,12 @@ close); it is an availability hint, not a verification result. Use a subsequent
 `discoverNotes(..., { blockIdentifier: B })` to obtain verified notes. A foreground
 read waiting for B takes priority over background checkpoint selection, so the
 same update does not trigger proofs for two different blocks.
+
+Reads of already verified state can run while synchronization awaits network I/O.
+Changed state is saved outside the command queue with one writer; unchanged reads
+do not serialize or save it again. `close()` flushes pending changes. Serialization
+and WASM verification remain synchronous within the single Worker, so a read can
+still wait for an in-progress serialization or verification step.
 
 ## Checks
 

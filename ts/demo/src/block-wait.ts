@@ -1,3 +1,5 @@
+import { subscribeRpc } from "./rpc-subscription.ts";
+
 /** Check on new heads, coalescing arrivals during a slow check. No block polling. */
 export function waitForBlock<T>(
   nodeUrl: string,
@@ -5,12 +7,10 @@ export function waitForBlock<T>(
   check: (block: number) => Promise<T | undefined>,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    let socket: WebSocket;
+    let stop: (() => void) | undefined;
     let finished = false;
     let checking = false;
     let next: number | undefined;
-    let retries = 0;
-    let reconnect: ReturnType<typeof setTimeout> | undefined;
     const deadline = setTimeout(() => finish(new Error(
       "Notes have not become spendable yet. Retry after more blocks.",
     )), 300_000);
@@ -18,8 +18,7 @@ export function waitForBlock<T>(
       if (finished) return;
       finished = true;
       clearTimeout(deadline);
-      clearTimeout(reconnect);
-      socket?.close();
+      stop?.();
       if (error) reject(error);
       else resolve(result!);
     }
@@ -44,46 +43,27 @@ export function waitForBlock<T>(
       next = block;
       void drain();
     }
-    function connect() {
-      if (finished) return;
-      try { socket = new WebSocket(nodeUrl); }
-      catch (error) { finish(error); return; }
-      const connection = socket;
-      let lost = false;
-      let receivedHead = false;
-      connection.onopen = () => {
-        if (finished || lost) { connection.close(); return; }
-        connection.send(JSON.stringify({ jsonrpc: "2.0", id: 1,
-          method: "starknet_subscribeNewHeads", params: {} }));
-      };
-      connection.onmessage = (message) => {
-        if (finished || lost) return;
-        try {
-          const event = JSON.parse(String(message.data));
-          if (event.error) throw new Error(`Block subscription failed: ${event.error.message}`);
-          if (event.method === "starknet_subscriptionNewHeads") {
-            receivedHead = true;
-            head(event.params.result.block_number);
-          } else if (event.id === 1) {
-            // Subscribe first, then catch up once. An early/live head wins over HTTP.
-            if (!receivedHead) void getBlockNumber().then((block) => {
-              if (!finished && !lost && !receivedHead) head(block);
-            }, (error) => { if (!finished && !lost && !receivedHead) finish(error); });
-          } else if (event.method === "starknet_subscriptionReorg") {
-            finish(new Error("Chain reorganized while waiting for notes. Retry discovery."));
-          }
-        } catch (error) { finish(error); }
-      };
-      const disconnected = () => {
-        if (finished || lost) return;
-        lost = true;
-        connection.close();
-        if (retries === 3) finish(new Error("Block subscription lost. Retry the action."));
-        else reconnect = setTimeout(connect, 250 * 2 ** retries++);
-      };
-      connection.onclose = disconnected;
-      connection.onerror = disconnected;
-    }
-    connect();
+    let receivedHead = false;
+    let headGeneration = 0;
+    stop = subscribeRpc({
+      url: nodeUrl, method: "starknet_subscribeNewHeads", params: {}, idleMs: 30_000,
+      onEvent: (event) => {
+        if (event.method === "starknet_subscriptionNewHeads") {
+          receivedHead = true;
+          headGeneration++;
+          head(event.params.result.block_number);
+        } else if (event.method === "starknet_subscriptionReorg") {
+          finish(new Error("Chain reorganized while waiting for notes. Retry discovery."));
+        }
+      },
+      onReady: (reconnected, current) => {
+        const before = headGeneration;
+        if (!receivedHead || reconnected) void getBlockNumber().then((block) => {
+          if (current() && !finished && headGeneration === before) head(block);
+        }, (error) => { if (current() && !finished && headGeneration === before) finish(error); });
+        receivedHead = false;
+      },
+      onError: finish,
+    });
   });
 }

@@ -34,6 +34,7 @@ mod engine {
         genesis: Genesis,
         pending: Option<(TrustedCheckpoint, Felt)>,
         failed: bool,
+        revision: std::cell::Cell<u32>,
     }
 
     fn number(store: &MemStore, name: &str) -> u64 {
@@ -77,6 +78,7 @@ mod engine {
                 store: MemStore::new(),
                 pending: None,
                 failed: false,
+                revision: std::cell::Cell::new(0),
             })
         }
         pub fn version() -> String {
@@ -151,6 +153,7 @@ mod engine {
                 strk20_consumer::anchors::verify_state(&candidate, cp, *root)?;
                 candidate.meta_set("applied_manifest", &serde_json::to_string(&manifest)?)?;
                 self.store = candidate;
+                self.revision.set(self.revision.get().wrapping_add(1));
                 self.failed = false;
                 self.feed.clear_applied();
                 Ok(json!({"head":outcome.head,"verifiedAt":cp.block_number,"tail_rewound":outcome.tail_rewound,
@@ -198,11 +201,21 @@ mod engine {
                 Ok(engine)
             })())
         }
+        pub fn cache_revision(&self) -> u32 {
+            self.revision.get()
+        }
         pub fn discover(&self, owner: &str, key: &mut [u8]) -> Result<String, JsError> {
             let key = secret(key);
             to_js((|| {
                 ensure!(!self.failed, "CHECKPOINT_FAILED: sync must succeed first");
-                drive(sdk::discover(&self.store, felt(owner)?, &key?))
+                let owner = felt(owner)?;
+                let stamp = format!("sdk_{}_stamp", strk20_feed::felt_hex(&owner));
+                let before = self.store.meta_get(&stamp)?;
+                let result = drive(sdk::discover(&self.store, owner, &key?))?;
+                if self.store.meta_get(&stamp)? != before {
+                    self.revision.set(self.revision.get().wrapping_add(1));
+                }
+                Ok(result)
             })())
         }
         pub fn channels(
@@ -241,6 +254,7 @@ mod engine {
             })())
         }
         pub fn forget_owner(&self, owner: &str) -> Result<(), JsError> {
+            self.revision.set(self.revision.get().wrapping_add(1));
             to_js(strk20_consumer::sync::full_resync(
                 &self.store,
                 &to_js(felt(owner))?,

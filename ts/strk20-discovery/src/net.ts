@@ -1,7 +1,7 @@
 import type { RequestRecord } from "./types.ts";
 
 export function feedPath(path: string): boolean {
-  return /^(genesis\.json|manifest\.json|head\.ndjson|live|epochs\/\d{8}\.strk20e\.zst|snapshots\/\d{8}\.strk20s\.zst)$/.test(
+  return /^(genesis\.json|manifest\.json|head\.ndjson|live|proofs\/\d+|epochs\/\d{8}\.strk20e\.zst|snapshots\/\d{8}\.strk20s\.zst)$/.test(
     path,
   );
 }
@@ -17,13 +17,14 @@ export class PublicTransport {
         "CONFIG_INVALID: feed URL must not contain credentials or query parameters",
       );
   }
-  async get(path: string): Promise<{ bytes: Uint8Array; etag: string }> {
+  async get(path: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; etag: string }> {
     if (!feedPath(path) || path === "live")
       throw new Error("SCOPE_VIOLATION: non-public feed path");
     return this.request(
       `${this.base.replace(/\/$/, "")}/${path}`,
       undefined,
-      path === "manifest.json" ? "no-cache" : "default",
+      path === "manifest.json" || path.startsWith("proofs/") ? "no-cache" : "default",
+      signal,
     );
   }
   async rpc(

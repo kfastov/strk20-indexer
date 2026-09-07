@@ -31,6 +31,7 @@ pub struct FeedState {
     pub epoch: Option<String>,
     pub snapshot: Option<String>,
     pub status: Option<String>,
+    pub proof: Option<String>,
 }
 
 pub struct LiveHub {
@@ -38,6 +39,7 @@ pub struct LiveHub {
     connections: AtomicUsize,
     catchup: watch::Sender<()>,
     source: Mutex<Source>,
+    proofs: Mutex<Option<Arc<crate::proofs::Proofs>>>,
 }
 
 struct Source {
@@ -52,6 +54,7 @@ impl LiveHub {
         let (catchup, _) = watch::channel(());
         Self {
             tx,
+            proofs: Mutex::new(None),
             catchup,
             connections: AtomicUsize::new(0),
             source: Mutex::new(Source {
@@ -70,9 +73,34 @@ impl LiveHub {
     pub fn refresh(&self) {
         let mut src = self.source.lock().expect("live source");
         let Source { feed_dir, db, cache } = &mut *src;
-        let state = read_state(feed_dir, db, cache);
+        let mut state = read_state(feed_dir, db, cache);
+        state.proof = self.tx.borrow().proof.clone();
+        if let Some(head) = state.head.as_ref().and_then(|h| serde_json::from_str::<Value>(h).ok()) {
+            if let Some(block) = head["head"].as_u64() {
+                if let Some(proofs) = self.proofs() { proofs.request(block); }
+            }
+        }
         // Keep ordering across concurrent connects and writer notifications.
         self.publish(state);
+    }
+
+    pub fn start_proofs(self: &Arc<Self>, rpc: Arc<crate::rpc::RpcClient>, pool: starknet_types_core::felt::Felt) {
+        *self.proofs.lock().expect("proof broker") = Some(crate::proofs::Proofs::new(rpc, pool, Arc::downgrade(self)));
+    }
+
+    pub fn proofs(&self) -> Option<Arc<crate::proofs::Proofs>> {
+        self.proofs.lock().expect("proof broker").clone()
+    }
+
+    pub fn invalidate_proofs(&self) {
+        if let Some(proofs) = self.proofs() { proofs.invalidate(); }
+        self.publish_proof(json!({"reset": true}).to_string());
+    }
+
+    pub fn publish_proof(&self, text: String) {
+        // Use the same lock as refresh to preserve proof updates across reads.
+        let _source = self.source.lock().expect("live source");
+        self.tx.send_modify(|state| Arc::make_mut(state).proof = Some(text));
     }
 
     pub fn catchup_requests(&self) -> watch::Receiver<()> {
@@ -164,6 +192,7 @@ fn read_state(feed_dir: &Path, db: &Arc<Mutex<Db>>, cache: &mut HeadCache) -> Fe
         .map(|v| v == "1")
         .unwrap_or(false);
     FeedState {
+        proof: None,
         head,
         epoch,
         snapshot,
@@ -265,6 +294,7 @@ pub async fn stream_to(
         for (name, next, prev) in [
             ("epoch", &current.epoch, &sent.epoch),
             ("head", &current.head, &sent.head),
+            ("proof", &current.proof, &sent.proof),
             ("snapshot", &current.snapshot, &sent.snapshot),
             ("status", &current.status, &sent.status),
         ] {

@@ -1,6 +1,6 @@
 {
   "name": "strk20-discovery",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Locally verified STRK20 note discovery for Starknet. Keep viewing keys in your wallet.",
   "license": "Apache-2.0",
