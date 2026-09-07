@@ -8,7 +8,7 @@
 ## Карточки
 
 Готовые карточки: [pitch/slides/index.html](pitch/slides/index.html), переключение
-стрелками ←/→.
+стрелками ←/→. По умолчанию тёмная тема; клавиша T переключает на светлую.
 
 ### 1. Проблема: “Private notes. A shared viewing key.”
 
