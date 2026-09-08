@@ -6,6 +6,19 @@ decision and are deliberately not in this repo.
 
 ## Current production deployment
 
+Update, 2026-09-08 (~09:00 UTC): static-only deployment of demo source
+`0753e5e` (restyled UI on CSS tokens, header status pill, live operation
+timer, narrow-width overflow fix). Entry `index-DRoNOazS.js`, stylesheet
+`index-oig9JyoA.css`; the worker `worker-entry-vezKQu9i.js` and WASM
+`strk20_engine_bg-DlMEppJz.wasm` are byte-identical to the previous
+deployment, so SDK behaviour is unchanged. Built locally with the four
+`VITE_*` endpoint values taken from the previously served bundle. All five
+hosted files match the local build's SHA-256; the hosted page verified Sepolia
+block 14736140 in 9.52 s with no console errors, and `rsync --delete` removed
+the stale assets and macOS `._*` files left by earlier `scp` uploads. Rollback:
+`/root/strk20-deploy-20260908-restyle/demo.before.tar.gz` (previous entry
+`index-B1kVoRJB.js`). Backend containers and nginx untouched.
+
 Update, 2026-09-07: the demo uses operator-configured QuickNode HTTP and
 WebSocket endpoints automatically on both networks. Build with
 `VITE_MAINNET_RPC_URL`, `VITE_MAINNET_RPC_WS_URL`, `VITE_SEPOLIA_RPC_URL` and
