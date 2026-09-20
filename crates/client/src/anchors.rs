@@ -1,4 +1,4 @@
-//! The native host's window onto the chain for §1.5 ring 6.
+//! The native host's window onto the chain for independent RPC verification.
 //!
 //! The *decision* — which blocks to try, what a mismatch means, why a
 //! capability gap is not corruption (LIVE-6) — is Block B's and lives in

@@ -1,4 +1,4 @@
-//! Driving Block B's `async` with no executor (§3.2).
+//! Driving Block B's `async` with no executor.
 //!
 //! `discovery-core`'s entry points and `strk20-consumer`'s `sync_once` are
 //! `async`, but over a `MemStore` view and a `StagedFeed` transport **no future

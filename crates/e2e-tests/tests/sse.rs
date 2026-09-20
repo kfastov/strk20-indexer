@@ -1,4 +1,4 @@
-//! SSE legs (consumer-path.md §A2).
+//! SSE legs (see docs/spec/architecture.md).
 //!
 //! `/feed/live` is a NOTIFICATION plane, never a data plane (R-C): every
 //! event is state-carrying and idempotent, and on any event the client
@@ -33,7 +33,7 @@ use strk20_feed::felt_hex;
 const CHAIN_ID: &str = "SN_TEST";
 const GENESIS_BLOCK: u64 = 10;
 const EPOCH_SIZE: u64 = 16;
-/// §2.2: the connect-time padding comment that defeats buffering middleboxes.
+/// the connect-time padding comment that defeats buffering middleboxes.
 const PADDING_BYTES: usize = 2048;
 
 struct Fx {
@@ -84,10 +84,10 @@ impl Fx {
     }
     /// The connect burst is about PUBLISHED FILES, and `wait_head` only proves
     /// the indexer ingested a block. A fresh indexer legitimately publishes a
-    /// head tail before it has cut anything — §2.2 announces the current epoch
+    /// head tail before it has cut anything — SSE framing announces the current epoch
     /// and snapshot "if any" — so a test that asserts they are announced must
     /// first wait for the feed itself to settle: the epoch cut, the snapshot
-    /// published (the §11.3 gate is met as soon as the head-side anchor lands),
+    /// published (the snapshot reachability gate is met as soon as the head-side anchor lands),
     /// and head.ndjson regenerated above the new epoch floor.
     async fn wait_feed_settled(&self) {
         for _ in 0..300 {
@@ -266,7 +266,7 @@ async fn setup() -> Fx {
     fx
 }
 
-/// `status` closes the connect burst (§2.2), so its arrival means the whole
+/// `status` closes the connect burst, so its arrival means the whole
 /// burst is in.
 async fn burst_complete(s: &SseStream) -> bool {
     s.wait_for(Duration::from_secs(20), |t| {
@@ -308,7 +308,7 @@ async fn wait_until(timeout: Duration, pred: impl Fn() -> bool) -> bool {
 
 // ------------------------------------------------------------------- E1
 
-/// E1 — the exact §2.2 framing, and a client driven by the stream reaching
+/// E1 — the exact SSE framing, and a client driven by the stream reaching
 /// the state a polling client reaches.
 ///
 /// The convergence half is made non-vacuous by the poll interval: the watcher
@@ -320,18 +320,18 @@ async fn e1_sse_framing_and_poked_client_converges() {
 
     let stream = SseStream::connect(&fx.live_url())
         .await
-        .expect("GET /feed/live must be served (always on, no flag — §2.1)");
+        .expect("GET /feed/live must be served (always on, no flag)");
     assert_eq!(stream.status, 200, "/feed/live must answer 200");
     assert_eq!(
         stream.header("content-type").map(|c| c.split(';').next().unwrap_or("").trim().to_owned()),
         Some("text/event-stream".to_owned()),
-        "§2.4 response headers"
+        "SSE response headers"
     );
     assert_eq!(stream.header("cache-control"), Some("no-cache"));
     assert_eq!(
         stream.header("x-accel-buffering"),
         Some("no"),
-        "§2.4: proxies must not buffer the stream"
+        "proxies must not buffer the stream"
     );
 
     // `status` closes the connect burst, so waiting for it means the whole
@@ -342,7 +342,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
                 .iter()
                 .any(|e| e.name.as_deref() == Some("status")))
             .await,
-        "§2.2: on connect the server sends, in order: hello, the current head, the \
+        "on connect the server sends, in order: hello, the current head, the \
          current epoch and snapshot, and status. Got:\n{}",
         stream.text()
     );
@@ -352,7 +352,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     let first_line = raw.lines().next().unwrap_or_default();
     assert!(
         first_line.starts_with(':') && first_line.len() > PADDING_BYTES,
-        "§2.2: the stream opens with a {PADDING_BYTES}-byte `:` padding comment that \
+        "the stream opens with a {PADDING_BYTES}-byte `:` padding comment that \
          defeats buffering middleboxes; first line was {} bytes",
         first_line.len()
     );
@@ -360,9 +360,9 @@ async fn e1_sse_framing_and_poked_client_converges() {
     let retry_at = line_of(&|l: &str| {
         l.strip_prefix("retry:").map(str::trim) == Some("15000")
     })
-    .expect("§2.2: a `retry: 15000` field is required so EventSource reconnects on its own");
+    .expect("a `retry: 15000` field is required so EventSource reconnects on its own");
     let hello_at = line_of(&|l: &str| l.strip_prefix("event:").map(str::trim) == Some("hello"))
-        .expect("§2.2: a `hello` event is required");
+        .expect("a `hello` event is required");
     assert!(retry_at < hello_at, "`retry:` must precede the first event");
 
     // ---- the connect burst
@@ -376,7 +376,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     for e in &events {
         assert!(
             e.id.is_some(),
-            "§2.2: every event carries an `id:` (client-side dedup and debuggability): {e:?}"
+            "every event carries an `id:` (client-side dedup and debuggability): {e:?}"
         );
     }
 
@@ -386,7 +386,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     assert_eq!(
         hello["chain_id"].as_str(),
         Some(CHAIN_ID),
-        "§2.2: hello carries chain identity so a proxy pointed at the wrong network \
+        "hello carries chain identity so a proxy pointed at the wrong network \
          dies before any refetch or state mutation: {hello}"
     );
     assert_eq!(hello["pool"].as_str(), Some(fx.pool_hex.as_str()), "{hello}");
@@ -396,7 +396,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     );
 
     let head = named(&events, "head")
-        .unwrap_or_else(|| panic!("§2.2: a current `head` event is required: {:?}", names(&events)))
+        .unwrap_or_else(|| panic!("a current `head` event is required: {:?}", names(&events)))
         .json();
     assert_eq!(head["head"].as_u64(), Some(46), "{head}");
     assert_eq!(head["l1_accepted"].as_u64(), Some(40), "{head}");
@@ -405,12 +405,12 @@ async fn e1_sse_framing_and_poked_client_converges() {
     assert_eq!(
         head["etag"].as_str().map(str::to_owned),
         Some(fx.head_etag().await),
-        "§2.2: the head event's etag lets a client skip a conditional GET it has \
+        "the head event's etag lets a client skip a conditional GET it has \
          already applied, so it must be the ETag the file is served with: {head}"
     );
 
     let epoch = named(&events, "epoch")
-        .unwrap_or_else(|| panic!("§2.2: a current `epoch` event is required: {:?}", names(&events)))
+        .unwrap_or_else(|| panic!("a current `epoch` event is required: {:?}", names(&events)))
         .json();
     assert!(
         epoch.get("epoch").is_none(),
@@ -430,7 +430,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     }
 
     let status = named(&events, "status")
-        .unwrap_or_else(|| panic!("§2.2: a `status` event is required: {:?}", names(&events)))
+        .unwrap_or_else(|| panic!("a `status` event is required: {:?}", names(&events)))
         .json();
     assert_eq!(status["decode_state"].as_str(), Some("ok"), "{status}");
     assert_eq!(status["verify_root_failed"], Value::Bool(false), "{status}");
@@ -439,7 +439,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     if !manifest["snapshot"].is_null() {
         let snapshot = snapshot.unwrap_or_else(|| {
             panic!(
-                "§2.2: the manifest carries a snapshot, so connect must announce it: {:?}",
+                "the manifest carries a snapshot, so connect must announce it: {:?}",
                 names(&events)
             )
         });
@@ -448,7 +448,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
         assert_eq!(snapshot["hash"], manifest["snapshot"]["hash"], "{snapshot}");
     } else {
         panic!(
-            "this fixture publishes a snapshot (§A1 + §11.3 gate), so the connect burst \
+            "this fixture publishes a snapshot, so the connect burst \
              must include a `snapshot` event; manifest.snapshot was null"
         );
     }
@@ -463,7 +463,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
                     .any(|e| e.name.as_deref() == Some("head") && e.json()["head"] == 47)
             })
             .await,
-        "§2.2: `head` fires on any change of head.ndjson's bytes. Stream:\n{}",
+        "`head` fires on any change of head.ndjson's bytes. Stream:\n{}",
         stream.text()
     );
     let poked = stream
@@ -475,7 +475,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     assert_eq!(
         poked["etag"].as_str().map(str::to_owned),
         Some(fx.head_etag().await),
-        "§2.4: the emitter watches the PUBLISHED files, so it can only announce what \
+        "the emitter watches the PUBLISHED files, so it can only announce what \
          is already renamed into place and fetchable: {poked}"
     );
 
@@ -486,7 +486,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
                 .lines()
                 .any(|l| l.starts_with(':') && l.trim_start_matches(':').trim() == "ka"))
             .await,
-        "§2.2: a `: ka` keepalive comment every 15 s of silence. Stream:\n{}",
+        "a `: ka` keepalive comment every 15 s of silence. Stream:\n{}",
         stream.text()
     );
 
@@ -538,7 +538,7 @@ async fn e1_sse_framing_and_poked_client_converges() {
     }
     assert!(
         seen,
-        "§2.5: a client subscribed to /feed/live must learn of a note minted AFTER its \
+        "a client subscribed to /feed/live must learn of a note minted AFTER its \
          initial sync without waiting for its poll cadence — the interval here is \
          3600 s, so only the stream can have delivered it. Watcher stdout:\n{}\n\
          stderr:\n{}",
@@ -583,14 +583,14 @@ async fn e1_sse_framing_and_poked_client_converges() {
 async fn e2_stream_is_identical_for_every_subscriber() {
     let mut fx = setup().await;
 
-    // ---- any query string is refused, not ignored (§2.1)
+    // ---- any query string is refused, not ignored
     for q in ["?", "?x=1", "?address=0xb0b", "?last_event_id=3"] {
         let url = format!("{}{q}", fx.live_url());
         let resp = fx.http.get(&url).send().await.expect("request");
         assert_eq!(
             resp.status().as_u16(),
             400,
-            "§2.1: any query string on /feed/live is 400 INVALID_QUERY — stronger than \
+            "any query string on /feed/live is 400 INVALID_QUERY — stronger than \
              ignoring it, because the address-blindness leg then has a SERVER-enforced \
              guarantee. {url} answered {}",
             resp.status()
@@ -622,16 +622,16 @@ async fn e2_stream_is_identical_for_every_subscriber() {
     }
     assert_same_stream(&a, &b, "after a poke");
 
-    // ---- §2.3 resume is the empty program: `Last-Event-ID` is ignored
+    // ---- current-state reconnect: `Last-Event-ID` is ignored
     //
     // Note this is a different mechanism from the query-string refusal above:
-    // §2.1 rejects a `?last_event_id=` PARAMETER outright, while §2.3 is about
+    // A `?last_event_id=` query parameter is rejected outright; this tests
     // the HEADER an EventSource sends on its own, which the server must accept
     // and then take no notice of. There is no replay buffer to resume from —
-    // every event carries full current state — and "no per-client cursor" is
+    // reconnect sends current state — and "no per-client cursor" is
     // itself the privacy property: at the protocol layer the server cannot be
     // made to remember a client because the protocol gives it nothing to
-    // remember. A server that grew a journal would pass §2.1 and fail here.
+    // remember. A server that grew a journal would pass query rejection and fail here.
     let resumed = SseStream::connect_with(
         &fx.live_url(),
         &[("last-event-id", "3"), ("Last-Event-ID", "9999")],
@@ -694,7 +694,7 @@ async fn e2_stream_is_identical_for_every_subscriber() {
     }
     assert!(
         proxy.live_opens() >= 2,
-        "both --watch clients must subscribe to /feed/live (§2.5 client behaviour); \
+        "both --watch clients must subscribe to /feed/live; \
          opens = {}\nbob:\n{}\nalice:\n{}",
         proxy.live_opens(),
         tail_of_log(&w1.stderr_path),
@@ -729,7 +729,7 @@ async fn e2_stream_is_identical_for_every_subscriber() {
         assert_eq!(
             String::from_utf8_lossy(bytes),
             String::from_utf8_lossy(&live[0]),
-            "§2.6: the subscription request is parameterless and carries nothing derived \
+            "the subscription request is parameterless and carries nothing derived \
              from a user, so two clients with different keys and addresses must emit \
              BYTE-IDENTICAL request heads. Head {i} of {} differs.",
             live.len()
@@ -737,7 +737,7 @@ async fn e2_stream_is_identical_for_every_subscriber() {
     }
 }
 
-/// §2.6: the emitted bytes are identical for every subscriber, modulo connect
+/// the emitted bytes are identical for every subscriber, modulo connect
 /// ordering and `id` numbering. Two live subscribers can legitimately be a
 /// few bytes apart in flight, so the requirement is that the shorter run is
 /// EXACTLY a prefix of the longer: any per-client difference at all — a
@@ -771,7 +771,7 @@ fn assert_same_stream(a: &SseStream, b: &SseStream, phase: &str) {
 
 // ------------------------------------------------------------------- E3
 
-/// E3 — degrade and restore (§2.5). The stream is killed mid-flight and then
+/// E3 — degrade and restore. The stream is killed mid-flight and then
 /// the route disappears entirely, which is what a plain static-file mirror
 /// looks like. The client must degrade to polling with no error surfaced and
 /// still converge on the same bytes.
@@ -791,7 +791,7 @@ async fn e3_sse_disconnect_falls_back_to_polling_and_converges() {
     }
     assert!(
         proxy.live_opens() >= 1,
-        "§2.5 client behaviour: `strk20-sync sync --watch` subscribes to /feed/live and \
+        "Client behavior: `strk20-sync sync --watch` subscribes to /feed/live and \
          falls back to polling when it cannot. Nothing ever opened the stream, so the \
          fallback below would be vacuous.\nstdout:\n{}\nstderr:\n{}",
         tail_of_log(&watcher.stdout_path),
@@ -807,7 +807,7 @@ async fn e3_sse_disconnect_falls_back_to_polling_and_converges() {
     .await;
     assert!(
         reconnected,
-        "§2.5: a dropped connection is a transient failure — the client must reconnect \
+        "a dropped connection is a transient failure — the client must reconnect \
          with backoff rather than give up. Opens stayed at {before_kill}.\nstderr:\n{}",
         tail_of_log(&watcher.stderr_path)
     );
@@ -843,7 +843,7 @@ async fn e3_sse_disconnect_falls_back_to_polling_and_converges() {
     .await;
     assert!(
         degraded,
-        "§2.5: 404/405 permanently degrades the session to polling, and the degrade is \
+        "404/405 permanently degrades the session to polling, and the degrade is \
          SIGNALLED rather than inferred from silence.\nstderr:\n{}",
         tail_of_log(&watcher.stderr_path)
     );
@@ -876,7 +876,7 @@ async fn e3_sse_disconnect_falls_back_to_polling_and_converges() {
     }
     assert!(
         seen,
-        "§2.5: 404/405 on /feed/live permanently degrades the session to polling with \
+        "404/405 on /feed/live permanently degrades the session to polling with \
          no error surfaced — a plain static-file mirror has no stream and is a fully \
          supported deployment. The watcher must still converge on the new note.\n\
          stdout:\n{}\nstderr:\n{}",

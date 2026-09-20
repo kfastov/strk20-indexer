@@ -1,4 +1,4 @@
-//! Native `FeedTransport` implementations (spec §7.2).
+//! Native `FeedTransport` implementations.
 //!
 //! The trait itself lives in `strk20-consumer` — Block B is written against
 //! it, and an HTTP transport, a directory transport and a browser `fetch`
@@ -144,7 +144,7 @@ impl FeedTransport for HttpTransport {
         Ok(Some((bytes, etag)))
     }
 
-    /// Native hosts have zstd; Block B deliberately does not (§3.4), so the
+    /// Native hosts have zstd; Block B deliberately does not, so the
     /// cap and the artifact name travel with the call.
     fn decompress(&self, bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>> {
         Ok(strk20_feed::decompress_capped(bytes, cap, artifact)?)
@@ -222,7 +222,7 @@ impl FeedTransport for DirTransport {
         Ok(Some((bytes, tag)))
     }
 
-    /// Native hosts have zstd; Block B deliberately does not (§3.4), so the
+    /// Native hosts have zstd; Block B deliberately does not, so the
     /// cap and the artifact name travel with the call.
     fn decompress(&self, bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>> {
         Ok(strk20_feed::decompress_capped(bytes, cap, artifact)?)

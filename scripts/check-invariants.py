@@ -296,7 +296,7 @@ def check_secrets():
 # patch text. Asserting it in both places only meant two places to update when
 # the pin moved.
 #
-# The cost, stated because docs/ops/invariants.md §5 and docs/ops/fork.md now
+# The cost, stated because docs/ops/invariants.md#5-fork-pin and docs/ops/fork.md now
 # state it too: patches/discovery-core-providers-gate.patch is checked for its
 # commit COUNT and nothing else. Its sha is no longer compared to the [patch]
 # rev, and no job replays it. Cargo.lock pins what compiles, so the patch file

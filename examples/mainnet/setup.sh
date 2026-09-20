@@ -6,11 +6,9 @@
 # repository is public (Apache-2.0) and the `sdk/` workspace builds standalone,
 # so we clone the pinned tag and build from source. No token, no registry auth.
 #
-# Why THIS tag: the mainnet pool class
-# 0x67dddd89d80fedadc06b6f160798f94800a4a70164e5a24301cd0d6076b554d has an ABI
-# that matches tags RC.3, RC.4 and RC.5 exactly (117/117 entries) and does NOT
-# match RC.2 (5 differences, incl. a missing ClientAction/ServerAction variant)
-# or RC.6 (8 differences). RC.5 is the newest exact match. See README.
+# The default tag is the SDK version this workspace integrates. Before
+# overriding it, check pool ABI compatibility and run the SDK integration tests.
+# See README.md for setup and the transaction scripts' trust boundaries.
 set -euo pipefail
 
 SDK_TAG="${STRK20_SDK_TAG:-PRIVACY-0.14.3-RC.5}"

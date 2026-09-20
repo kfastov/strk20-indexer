@@ -1,4 +1,4 @@
-//! `FeedTransport` (spec §7.2) — the type-system privacy boundary.
+//! `FeedTransport` — the type-system privacy boundary.
 //!
 //! NO method accepts an address, key, slot, or any user-derived value: a
 //! feed-mode client physically cannot ask the server anything about itself.
@@ -22,8 +22,8 @@ pub trait FeedTransport: Send + Sync {
     /// feed progress, never anything derived from a user.
     async fn fetch_snapshot(&self, e: u64) -> Result<Vec<u8>>;
     async fn fetch_anchor(&self, idx: u64) -> Result<Option<Vec<u8>>>;
-    /// The stored `getStorageProof` response for snapshot `e`'s basis block
-    /// (§1.3, reinstated by §12 point 1); `None` when the feed publishes none.
+    /// The stored `getStorageProof` response for snapshot `e`'s basis block;
+    /// `None` when the feed publishes none.
     /// `e` is a manifest-supplied epoch index — feed progress, never anything
     /// derived from a user.
     async fn fetch_snapshot_anchor(&self, e: u64) -> Result<Option<Vec<u8>>>;
@@ -42,6 +42,6 @@ pub trait FeedTransport: Send + Sync {
     /// sha256 is checked by Block B BEFORE this is called and the payload
     /// sha256 immediately after, so a transport that inflates the wrong bytes
     /// is caught by the same two hashes as before. The browser transport hands
-    /// back what TypeScript already inflated (§3.4).
+    /// back what TypeScript already inflated.
     fn decompress(&self, bytes: &[u8], cap: u64, artifact: &str) -> Result<Vec<u8>>;
 }

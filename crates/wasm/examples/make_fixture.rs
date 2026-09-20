@@ -230,7 +230,7 @@ async fn generate_inner() -> Result<()> {
     let snap_payload = strk20_feed::snapshot::encode(&snapshot);
     let snap_zst = strk20_feed::compress(&snap_payload);
 
-    // The §11.3 grounding: an anchor at the basis whose root the client must
+    // The snapshot reachability grounding: an anchor at the basis whose root the client must
     // reproduce by folding the snapshot itself.
     let anchors = strk20_feed::anchors::encode_anchors(&[AnchorRecord {
         block: EPOCH_END,

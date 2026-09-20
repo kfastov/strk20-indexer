@@ -70,7 +70,7 @@ pub struct ApplyOutcome {
     pub last_epoch_to: u64,
     /// basis block of the snapshot this mirror was cold-started from
     pub snapshot_basis: Option<u64>,
-    /// lowest block for which this mirror holds EVENTS (§1.1)
+    /// lowest block for which this mirror holds EVENTS
     pub history_floor: u64,
 }
 

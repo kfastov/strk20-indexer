@@ -28,7 +28,7 @@ const discovery = new LocalDiscoveryProvider({
 const mine = discovery.forAccount({ address, viewingKey });
 
 await discovery.ready;                    // verified startup or local cache restore
-const cached = await mine.restore();       // saved private discovery result
+const cached = await mine.restore();       // local discovery at the saved checkpoint
 const { notes } = await mine.discoverNotes(); // catch up and verify current state
 await discovery.subscribe();              // receive subsequent updates over SSE
 
@@ -81,31 +81,73 @@ try {
 Node uses the same runtime in `worker_threads` and writes cache files with mode
 0600. The cache directory contains private discovery results.
 
-## Sync and verification
+## Configuration and subscriptions
 
-- **First startup:** download the snapshot and subsequent changes, verify pool
-  state, then save it. `ready` rejects if verification fails. `onEvent` reports
-  startup stages and completed/total downloads.
-- **Warm startup:** restore a trusted local cache without network access.
-  Discovery then catches up from that state.
-- **Live updates:** SSE sends a starting tail, then a new header and only appended
-  records. Proofs also arrive as events. Reconnects, epoch rollovers and changed
-  record prefixes replace the tail; a missing delta base triggers reconnect.
-- **Trust:** WASM verifies the reconstructed storage root and contract proof
-  against an accepted header from independent `rpcUrl`. Feed proofs add no trust
-  in the indexer. Bootstrap and missed proofs use the feed's proof endpoint;
-  historical blocks outside its retention window use `proofRpcUrl`.
-- **Persistence:** changed state saves in the background; unchanged reads do not
-  save again. `close()` flushes pending changes. Verification and serialization
-  still execute in the single Worker.
+`feedUrl` is required. `network` defaults to `mainnet` and also accepts `sepolia`
+or a custom `ChainProfile`. Optional `rpcUrl` selects the trusted header RPC;
+`proofRpcUrl` supplies direct proofs. The default `proofSource: "feed"` uses
+SSE/HTTP proof delivery and falls back to `proofRpcUrl` on HTTP 410 for historical
+blocks outside the feed window. Set `proofSource: "rpc"` to acquire proofs directly.
+A current feed proof error is surfaced, not silently bypassed.
 
-Verification establishes state at a checkpoint, not the authenticity of earlier
-write timestamps or Ethereum finality. Cold-discovered notes may need additional
-maturity blocks before spending. The cache is trusted local storage: its checksum
-detects corruption, not malicious replacement.
+Provide `onEvent` when constructing either provider to receive startup progress,
+advertised heads, verified engine state, timing spans, public request metadata and
+background errors:
 
+```ts
+const discovery = new LocalDiscoveryProvider({
+  network: 'sepolia',
+  feedUrl: 'https://strk20.nullref.cc/feed',
+  onEvent(event) {
+    if (event.event === 'state') console.log('Verified at', event.value.verifiedAt);
+    if (event.event === 'error') console.error(event.value);
+  },
+});
+await discovery.ready;
+await discovery.subscribe();
+// Later, before using a transaction's resulting notes:
+await discovery.waitForBlock(transactionBlock);
+const current = await discovery.forAccount({ address, viewingKey }).discoverNotes();
+// On teardown, including errors:
+await discovery.close();
+```
+
+The application supplies `transactionBlock`, wallet `address` and SDK `viewingKey`.
+`waitForBlock` waits for advertised feed coverage, not state verification; the
+subsequent discovery performs that check. `subscribe()` starts background updates
+and returns without waiting for a first verified live event. Use `onEvent` for
+background errors and call account discovery to refresh private results.
+Transport failures reconnect; a chain mismatch or publisher verification-failure
+status stops the stream. `close()` stops it, flushes pending cache writes and
+terminates the Worker. There is no separate provider unsubscribe method.
+
+`atBlock(B)` and the SDK `blockIdentifier` parameter accept block numbers (also
+`{ block_number: B }` for `blockIdentifier`); an omitted identifier or `latest`
+selects current feed state. Hash/tag bounds other than `latest` are unsupported.
+A bound below a snapshot's basis requires a different bootstrap/history source.
+
+## Initialization and persistence
+
+`ready` downloads, verifies and saves state on a cold start, and rejects on
+failure. A valid trusted cache restores without network requests. `restore()` runs
+local discovery at that cached checkpoint without catching up; `discoverNotes()`
+catches up and verifies. Keep keys in the application's wallet storage, separate
+from disposable discovery state.
+
+The advanced `discovery.client` API exposes `sync(block?)`, `clearCache()` and
+`ready` engine information. Clearing it discards discovery state, not application
+wallet keys. `workerFactory` supports a custom browser host; Node uses its own
+worker-thread factory and requires `cacheDirectory`. The source contracts are
+[`ClientOptions`](https://github.com/kfastov/strk20-indexer/blob/main/ts/strk20-discovery/src/client.ts)
+and [`WorkerEvent`](https://github.com/kfastov/strk20-indexer/blob/main/ts/strk20-discovery/src/types.ts).
+
+Changed state saves in the background; unchanged reads do not save again.
 Snapshot/epoch downloads permit 30 seconds without progress and five minutes in
-total; RPC/metadata requests have a 30-second deadline. For API details,
-verification limits and source-build instructions, see the
-[consumer specification](https://github.com/kfastov/strk20-indexer/blob/main/docs/spec/consumer-path.md)
-and [repository](https://github.com/kfastov/strk20-indexer).
+total; RPC/metadata requests have a 30-second deadline.
+
+State verification covers a selected checkpoint, not every historical transition
+or Ethereum finality. The configured header RPC and local cache are trust roots;
+cache checksums detect corruption, not malicious replacement. Conservative note
+maturity can delay spending. The complete guarantees and failure behavior are in
+[Consumer path](https://github.com/kfastov/strk20-indexer/blob/main/docs/spec/consumer-path.md).
+For source builds, see the [repository instructions](https://github.com/kfastov/strk20-indexer#build-from-source).

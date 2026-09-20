@@ -1,4 +1,4 @@
-//! Snapshot wire format v1 (consumer-path.md §1.2, frozen).
+//! Snapshot wire format v1 (see docs/spec/architecture.md).
 //!
 //! A snapshot is the folded SLOT STATE of the pool at one epoch boundary: every
 //! slot with a nonzero value as of that block, carrying its value and its last
@@ -7,12 +7,12 @@
 //! metadata, and no transaction history below the basis.
 //!
 //! Content identity is sha256 over the UNCOMPRESSED payload, exactly as for
-//! epochs (§4.3); the `.zst` hash is a transport checksum only. Encoding is
+//! epochs; the `.zst` hash is a transport checksum only. Encoding is
 //! hand-built string emission so byte identity holds by construction: fixed
 //! field order, no whitespace, minimal lowercase hex, slot lines ascending by
 //! the 32-byte BE key, `\n` after every line including the last.
 //!
-//! `parse` is strict where a client's verification ladder (§1.5 ring 3) needs
+//! `parse` is strict where a client's verification ladder needs
 //! it to be — ordering, the footer count, `w <= header.block` — but is
 //! order-insensitive about JSON fields, because identity is always the raw
 //! bytes and never the parse.
@@ -36,14 +36,9 @@ pub struct SnapshotHeader {
     /// snapshot-started client on the ONE hash chain.
     pub epoch_hash: String,
     pub storage_root: Felt,
-    /// Pool class as of `block`. INFORMATIONAL under §11: ring 5 used to pin it
-    /// to the anchor sidecar's `contract_leaves_data[0].class_hash`, and §11.1
-    /// deleted the sidecar. No value a snapshot-started client can obtain is
-    /// comparable to it — the basis epoch (whose footer carries the class) is
-    /// exactly what such a client never fetches, and the anchors log records
-    /// the class at a HEAD block, which may legitimately differ after an
-    /// upgrade. The field is inside the content hash and useful to an auditor;
-    /// spec leg m(vi) is not implementable without the sidecar.
+    /// Publisher-declared pool class at the basis block, included in the
+    /// content hash. A basis proof can check it; later anchors can carry a
+    /// different class after an upgrade. This field alone is not chain proof.
     pub class: Felt,
 }
 
@@ -215,7 +210,7 @@ pub fn slot_pairs(s: &Snapshot) -> Vec<(Felt, Felt)> {
     s.slots.iter().map(|x| (x.k, x.v)).collect()
 }
 
-/// Recompute the storage root over the slot lines (§1.5 ring 5).
+/// Recompute the storage root over the slot lines.
 #[cfg(feature = "mpt")]
 pub fn storage_root_of(s: &Snapshot) -> Felt {
     crate::mpt::storage_root(&slot_pairs(s))
@@ -228,7 +223,7 @@ pub struct FeedIdentity {
     pub pool: Felt,
 }
 
-/// Ring 1 of the §1.5 ladder on its own: the transport checksum, expressed
+/// Transport checksum, expressed
 /// over an already-computed digest so it can be run at the one moment that
 /// makes it worth anything — BEFORE the bytes reach a decompressor (R-I). A
 /// checksum that only runs after a decompressor has eaten the bytes protects
@@ -251,9 +246,9 @@ pub fn check_zst_hash(
     Ok(())
 }
 
-/// Rings 1–5 of the §1.5 ladder over an ALREADY-DECOMPRESSED payload, minus
-/// ring 6 (which needs an RPC) and minus reachability (§11.3, which needs the
-/// folded mirror).
+/// Decode an already-decompressed snapshot and check hashes, identity and
+/// its basis-epoch link. Complete-state verification at an independent
+/// checkpoint requires the folded mirror and is performed by the consumer.
 ///
 /// This is the single implementation of the snapshot ladder. It is split out
 /// from [`verify_snapshot`] on the decompression boundary and nowhere else,
@@ -346,7 +341,7 @@ pub fn verify_snapshot_payload(
     // ring 5 — self-consistency of the slot set against the declared root.
     // Every value compared here is produced by the same server, so this buys
     // integrity of the file and nothing at all against the publisher; the
-    // canonicity claim comes from §11.3 reachability and §1.5 ring 6.
+    // chain-state claim requires independent checkpoint verification.
     let computed = storage_root_of(&snap);
     let declared = felt_from_hex(&entry.storage_root)?;
     if computed != snap.header.storage_root || computed != declared {

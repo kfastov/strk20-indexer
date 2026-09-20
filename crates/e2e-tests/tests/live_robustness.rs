@@ -1,4 +1,4 @@
-//! Live-network robustness legs (docs/research/live/live-run-findings.md).
+//! Fixture-based regressions for ingestion, provider failures and recovery.
 //!
 //! Every leg here reproduces a defect MEASURED against real networks and pins
 //! the property the fix must establish — never the shape of the fix. The
@@ -20,9 +20,9 @@
 //!             cannot silently drop the events in between
 //! T15 LIVE-8  the union over subdivided windows is the true active-block set
 //! T16 LIVE-8  an irreducible window is a loud error, never a truncation
-//! T17 §12 B1  a storage proof survives transient error 42s (retry, not fail)
-//! T18 §12 B1  an exhausted retry budget is UNAVAILABLE, not MISMATCH
-//! T19 §12 B2  a proof whose global_roots.block_hash is not the block's is
+//! T17 the proof retry policy  a storage proof survives transient error 42s (retry, not fail)
+//! T18 the proof retry policy  an exhausted retry budget is UNAVAILABLE, not MISMATCH
+//! T19 proof-to-header binding  a proof whose global_roots.block_hash is not the block's is
 //!             rejected as a hard error and never becomes a root
 //! T25 #21     a refused l1_accepted answer leaves NOTHING behind: not meta,
 //!             not blocks.status, not one byte of head.ndjson
@@ -53,7 +53,7 @@ const CHAIN_ID: &str = "SN_TEST";
 const GENESIS_BLOCK: u64 = 10;
 const EPOCH_SIZE: u64 = 16;
 
-// Verified on-chain, docs/research/live/sepolia-abi-compat.md.
+// Supported Sepolia class used to exercise decoder compatibility.
 const SEPOLIA_POOL: &str =
     "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
 const SEPOLIA_CHAIN_ID: &str = "SN_SEPOLIA";
@@ -872,25 +872,9 @@ fn progress_lines(stderr: &str) -> Vec<&str> {
 
 // ------------------------------------------------------------------ T11
 
-/// A pool write that rides a block with NO pool event, above l1_accepted.
-///
-/// The scenario is unchanged; what recovers it is not. This test used to
-/// require that the write produce a `VERIFY-ROOT MISMATCH` first, because the
-/// §5.6 recovery rescan was the only code that ever asked the chain about a
-/// block `getEvents` cannot name — and the point being guarded was that the
-/// rescan's range moved with LIVE-4's verification block (`min(frontier,
-/// rpc_head)`, not `min(l1_accepted, frontier)`), since a rescan still capped
-/// at l1_accepted could not reach this block and the mismatch would reproduce
-/// on every retry, latching DEGRADED forever.
-///
-/// `run_cycle` now sweeps state diffs across the blocks a cycle moves past
-/// (`TAIL_STATE_DIFF_SPAN`), so on a chain this short the write is ingested
-/// before verify-root ever runs and the mismatch does not happen. Requiring
-/// one would now assert the bug rather than the fix. The consequences are what
-/// this test pins, and all three still hold whichever layer got there first:
-/// the block is in the mirror, both ready epochs are cut, and health is not
-/// latched. The §5.6 rescan remains the backstop for a divergence older than
-/// the sweep's span, where it is still the only path.
+/// An eventless pool write above the accepted-on-L1 height is still ingested
+/// by the short-gap state-update sweep. The mirror must contain the block,
+/// ready epochs must be cut, and verification must not remain latched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t11_a_divergence_above_l1_accepted_is_recovered_not_latched() {
     ensure_built();
@@ -925,7 +909,7 @@ async fn t11_a_divergence_above_l1_accepted_is_recovered_not_latched() {
         "block {silent} must reach the mirror: it writes pool storage, emits no pool \
          event, and sits above l1_accepted but at or below the frontier — which is \
          where verify-root checks. Either the tail state-diff sweep ingests it or the \
-         §5.6 rescan recovers it; neither doing so is a permanent root divergence.\
+         recovery rescan recovers it; neither doing so is a permanent root divergence.\
          \nstderr:\n{stderr}"
     );
     assert_eq!(
@@ -1390,16 +1374,8 @@ async fn t16_an_irreducible_window_is_a_loud_error_not_a_truncation() {
 
 // ------------------------------------------------------------------ T17
 
-/// §12 B1: `getStorageProof` error 42 says "the backend that answered this
-/// call has no archive trie", not "this block has no proof". Measured against
-/// mainnet, proofs come back for ANY block on retry — 2 successes in 10
-/// attempts at 2.89M blocks behind head, 2 in 4 at 5.15M behind — and the
-/// ~1024-block window this project once recorded was a bisection over a
-/// nondeterministic predicate (proof-window.md §3).
-///
-/// So a bounded retry against the SAME endpoint must recover, and verify-root
-/// must report MATCH. Failing over instead is forbidden by LIVE-6: publicnode
-/// implements no proofs at any height, so a failover guarantees a false alarm.
+/// Bounded retries must recover from transient proof refusals on the same
+/// endpoint and obtain a matching root without changing the live endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t17_a_storage_proof_survives_transient_error_42s() {
     ensure_built();
@@ -1431,7 +1407,7 @@ async fn t17_a_storage_proof_survives_transient_error_42s() {
 
     assert!(
         ok && stdout.contains("verify-root OK"),
-        "§12 B1: this endpoint refuses the first {FLAKY} proof attempts at a block and \
+        "this endpoint refuses the first {FLAKY} proof attempts at a block and \
          serves the proof afterwards — exactly what lava does. A bounded retry on error \
          42 must reach it.\n{out}"
     );
@@ -1458,13 +1434,8 @@ async fn t17_a_storage_proof_survives_transient_error_42s() {
 
 // ------------------------------------------------------------------ T18
 
-/// §12 B1's other end, and the half §11.4 contributed that survives the
-/// retraction: when the retry budget IS exhausted, the answer is UNAVAILABLE —
-/// a statement about the provider — and never MISMATCH. Conflating the two is
-/// what made a capability-poor endpoint look like mirror corruption (LIVE-6).
-///
-/// The retry must also be bounded: an endpoint that refuses forever must not
-/// spin.
+/// Exhausting a bounded proof retry budget reports UNAVAILABLE rather than
+/// MISMATCH. A permanently refusing endpoint must not spin or accuse the mirror.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t18_an_exhausted_proof_retry_budget_is_unavailable_not_mismatch() {
     ensure_built();
@@ -1498,7 +1469,7 @@ async fn t18_an_exhausted_proof_retry_budget_is_unavailable_not_mismatch() {
 
     assert!(
         out.contains("UNAVAILABLE"),
-        "§12 B1 + §11.4: after the retry budget is spent the answer is UNAVAILABLE, not \
+        "after the retry budget is spent the answer is UNAVAILABLE, not \
          an error and not a verdict about the mirror.\n{out}"
     );
     assert!(
@@ -1514,7 +1485,7 @@ async fn t18_an_exhausted_proof_retry_budget_is_unavailable_not_mismatch() {
     assert!(
         denied >= 3,
         "vacuity guard: only {denied} proof attempt(s) were made. Asking each configured \
-         endpoint once is not a retry — §12 B1 requires a bounded retry against the SAME \
+         endpoint once is not a retry — the proof retry policy requires a bounded retry against the SAME \
          endpoint, because error 42 names the backend and not the block."
     );
     assert!(
@@ -1526,7 +1497,7 @@ async fn t18_an_exhausted_proof_retry_budget_is_unavailable_not_mismatch() {
 
 // ------------------------------------------------------------------ T19
 
-/// §12 B2, the check that makes retry-until-success safe rather than
+/// proof-to-header binding, the check that makes retry-until-success safe rather than
 /// wishful: the proof pool is anonymous and load-balanced, so an accepted
 /// proof must be BOUND to the chain — `global_roots.block_hash` compared with
 /// `getBlockWithTxHashes(block).block_hash` — before its `storage_root` is
@@ -1567,7 +1538,7 @@ async fn t19_a_proof_that_is_not_bound_to_the_block_is_rejected() {
 
     assert!(
         !ok,
-        "§12 B2: the proof's global_roots.block_hash is not the block's hash, so it is \
+        "the proof's global_roots.block_hash is not the block's hash, so it is \
          not a proof about this block at all. Accepting its storage_root is how a \
          load-balanced pool gets to choose our answer. This must be a hard error.\n{out}"
     );
@@ -1588,7 +1559,7 @@ async fn t19_a_proof_that_is_not_bound_to_the_block_is_rejected() {
     assert_eq!(
         std::fs::read(&anchors_path).unwrap_or_default(),
         anchors_before,
-        "§12 B2: a root from an unbound proof must never be published as an anchor"
+        "a root from an unbound proof must never be published as an anchor"
     );
 }
 
@@ -2454,15 +2425,8 @@ async fn r5_after_repair_verify_root_matches_where_it_previously_mismatched() {
 
 // ------------------------------------------------------------- T22 / T23
 //
-// The starvation defect, observed on the hosted Sepolia instance
-// (sound-ingest.md §2.3 and §8.1). Each `run` cycle ended in an epoch cut, a
-// cut began with verify-root, and a MISMATCH sent the cut into a §5.6 rescan
-// of a window derived from the PROBE block — which is at the frontier, while
-// the divergence can sit arbitrarily far below it. So the rescan could not
-// converge (measured: 4 rounds, 2.46 hours, 0 blocks repaired), and nothing
-// remembered that it had been tried: the next cycle's head move re-entered it.
-// What an operator saw was a frozen head, a silent log, and `/health` DEGRADED
-// with no statement of what to do about it.
+// Repeated recovery for an unresolved root mismatch must not starve ingestion.
+// The automatic attempt is persisted and bounded; a later MATCH re-arms it.
 //
 // T22 the closure loop repairs an eventless divergence in ONE attempt, and the
 //     latch clears itself
@@ -2547,9 +2511,8 @@ async fn poll_health(
 }
 
 /// A pool write on a block with NO pool event, injected BELOW the frontier of
-/// an already-verified mirror — the eventless class of sound-ingest.md §1, in
-/// the one position where every heuristic index is blind to it and the tail
-/// state-diff sweep has already gone past.
+/// an already-verified mirror, where an event-only index cannot see it and
+/// the tail state-diff sweep has already gone past.
 ///
 /// One closure-loop attempt has to be enough: the storage-trie walk names the
 /// slot the chain holds and the mirror does not, the bisection attributes it
@@ -2603,7 +2566,7 @@ async fn t22_one_closure_loop_attempt_repairs_an_eventless_divergence() {
     let log = log_of(&indexer);
     let last = last.unwrap_or_else(|| panic!("/health never answered\n{log}"));
     assert_eq!(
-        count_lines(&log, "entering the §4.2 closure loop"),
+        count_lines(&log, "entering the storage-trie recovery loop"),
         1,
         "recovery runs at most once per divergence — and once was enough here.\n\
          heads seen: {heads:?}\n{log}"
@@ -2710,7 +2673,7 @@ async fn t23_an_unrepairable_divergence_is_attempted_once_while_ingest_keeps_run
          started\n{log}"
     );
     assert_eq!(
-        count_lines(&log, "entering the §4.2 closure loop"),
+        count_lines(&log, "entering the storage-trie recovery loop"),
         1,
         "recovery must be attempted ONCE per divergence, not once per cycle\n{log}"
     );

@@ -1,6 +1,6 @@
 //! Starknet contract-storage Merkle-Patricia trie (pedersen, height 251).
 //!
-//! Two consumers share this single implementation (spec §5.6, §7.7):
+//! Two consumers share this single implementation:
 //! the server's verify-root completeness check (recompute the full root from
 //! the mirrored slot set, compare against `starknet_getStorageProof`), and the
 //! client's proof verifier (walk a served proof for the user's own slots,
@@ -276,8 +276,8 @@ pub fn verify_storage_proof(
 // ------------------------------------------------- structural enumeration
 //
 // `verify_storage_proof` above answers "is THIS key in the chain's trie",
-// which presupposes you can name the key. The hole class in sound-ingest.md §1
-// is precisely the one where you cannot: a block with pool storage writes and
+// which presupposes you can name the key. An eventless write can create a key
+// the mirror cannot name: a block with pool storage writes and
 // zero pool events is invisible to `getEvents` and to `audit-coverage` alike,
 // so the mirror has never heard of the slots it wrote and has no key to ask
 // about.

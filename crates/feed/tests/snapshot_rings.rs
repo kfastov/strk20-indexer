@@ -1,16 +1,6 @@
-//! The §1.5 verification ladder, ring by ring, each with a negative that only
-//! that ring can catch.
-//!
-//! Why this file exists: before it, `verify_snapshot` was reachable from no
-//! test in this crate — the e2e legs exercised ring 1 (a byte flip) and the
-//! §11.3 reachability check, and rings 3, 4 and 5 were exercised by nothing at
-//! all. Ring 5 in particular could be DELETED outright with the whole suite
-//! still green, because the only adversarial fixture recomputed the root
-//! consistently and so passed ring 5 on its way to being caught by
-//! reachability. A ladder whose rungs are unfalsifiable is prose.
-//!
-//! Each test alters exactly one thing and asserts the error names the ring
-//! that owns it, so a short-circuited or reordered ladder fails here.
+//! Snapshot consistency checks, each with a negative fixture that isolates
+//! the check it exercises. Altering one input at a time keeps rejection
+//! reasons observable without relying on the independent checkpoint verifier.
 
 use strk20_feed::manifest::ManifestSnapshot;
 use strk20_feed::snapshot::{
@@ -82,7 +72,7 @@ fn entry_for(snap: &Snapshot) -> (Vec<u8>, ManifestSnapshot) {
         slots: snap.slots.len() as u64,
         storage_root: felt_hex(&snap.header.storage_root),
         // Offline rings 1-5 are about the file itself; the basis-block anchor
-        // (§12 point 1) is checked by the client against the published sidecar,
+        // is checked by the client against the published sidecar,
         // which no offline ring can see.
         anchor: None,
         grounding: strk20_feed::manifest::GROUNDING_REACHABILITY.to_owned(),
@@ -136,7 +126,7 @@ fn ring3_chain_mismatch_is_named() {
     let err = verify_snapshot(&zst, &entry, EPOCH_HASH, &identity()).unwrap_err().to_string();
     assert!(
         err.contains("CHAIN_MISMATCH") && err.contains("SN_MAIN") && err.contains(CHAIN),
-        "the refusal must name BOTH chains (§8 leg t(i)): {err}"
+        "the refusal must name BOTH chains: {err}"
     );
 }
 
@@ -192,11 +182,8 @@ fn ring4_epoch_hash_pin_is_enforced_against_the_manifest_epoch() {
 
 /// Ring 5 — self-consistency of the slot set against the declared root.
 ///
-/// This is the rung that could be deleted with the whole suite still green:
-/// the adversarial e2e fixture recomputes `header.storage_root` consistently
-/// and is caught by §11.3 reachability instead. Here the slot set and the
-/// declared root genuinely disagree, so ONLY ring 5 stands between the client
-/// and a slot set that is not the one the publisher declared.
+/// The slot set and declared root disagree. This checks file consistency;
+/// authenticity against an independently selected chain checkpoint is separate.
 #[test]
 fn ring5_slot_set_must_reproduce_the_declared_root() {
     let mut snap = honest();
@@ -212,7 +199,7 @@ fn ring5_slot_set_must_reproduce_the_declared_root() {
     let err = verify_snapshot(&zst, &entry, EPOCH_HASH, &identity()).unwrap_err().to_string();
     assert!(
         err.contains("SNAPSHOT_ROOT_MISMATCH"),
-        "§1.5 ring 5: recomputing mpt::storage_root over the slot lines and comparing \
+        "recomputing mpt::storage_root over the slot lines and comparing \
          with header.storage_root and manifest.snapshot.storage_root is the ONLY check \
          that catches a slot set which does not match its own declared root: {err}"
     );
@@ -232,7 +219,7 @@ fn ring5_manifest_root_must_agree_with_the_header() {
 
 // ------------------------------------------------------------ ring 1's cap
 
-/// §1.5 ring 1's output cap (R-I). A passing transport hash proves nothing
+/// Decompression's output cap (R-I). A passing transport hash proves nothing
 /// about how far the frame expands — the same server authors both the file and
 /// the manifest that names its sha256 — so a ~100 KB `.zst` that expands to
 /// tens of GB passes ring 1 and then allocates until the process dies. On the

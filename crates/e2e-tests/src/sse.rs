@@ -1,9 +1,9 @@
-//! Raw SSE subscriber for the acceptance harness (consumer-path.md §A2).
+//! Raw SSE subscriber for the acceptance harness (see docs/spec/architecture.md).
 //!
 //! The stream is drained into a shared buffer by a background task so several
 //! subscribers can be compared against each other while the fixture chain
 //! moves underneath them. The buffer holds the DE-CHUNKED body — i.e. exactly
-//! the bytes §2.2 specifies — so framing assertions (`retry:`, the 2 KB
+//! the bytes SSE framing specifies — so framing assertions (`retry:`, the 2 KB
 //! padding comment, `: ka` keepalives) are made against the real wire form
 //! rather than against a parsed abstraction.
 
@@ -47,7 +47,7 @@ impl SseStream {
     }
 
     /// Connect carrying extra request headers — used to prove that
-    /// `Last-Event-ID` is DELIBERATELY IGNORED (§2.3).
+    /// `Last-Event-ID` is DELIBERATELY IGNORED.
     pub async fn connect_with(url: &str, headers: &[(&str, &str)]) -> Result<Self> {
         let mut req = reqwest::Client::new()
             .get(url)

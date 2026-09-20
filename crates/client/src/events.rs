@@ -1,4 +1,4 @@
-//! `FeedEvents` — SSE consumption (consumer-path.md §A2, §2.5).
+//! `FeedEvents` — SSE consumption (see docs/spec/architecture.md).
 //!
 //! Deliberately a SEPARATE trait from `FeedTransport`. The privacy seam is
 //! compile-locked: no `FeedTransport` method may ever accept a user-derived
@@ -40,8 +40,7 @@ impl FeedNotice {
 }
 
 /// The feed publishes no stream at all — a plain static-file mirror. Not an
-/// error condition: §2.5 makes it a fully supported deployment that degrades
-/// the session to polling with nothing surfaced.
+/// error condition: the client falls back to polling for this session.
 #[derive(Debug)]
 pub struct LiveUnsupported;
 
@@ -60,7 +59,7 @@ pub trait FeedEvents: Send + Sync {
 
 /// SSE over the same `/feed` base URL. The subscription is parameterless, so
 /// two clients with different keys and addresses emit byte-identical request
-/// heads (§2.6).
+/// heads.
 pub struct HttpEvents {
     url: String,
     http: reqwest::Client,

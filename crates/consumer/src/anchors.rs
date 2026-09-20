@@ -117,8 +117,7 @@ pub async fn verify_anchors<S: ConsumerStore>(
     }))
 }
 
-/// Outcome of ring 6. Three-valued for the same reason `verify-root` is
-/// (§11.4/§11.5): a provider that does not implement `starknet_getStorageProof`,
+/// Independent RPC verification outcome. A provider without storage proofs,
 /// or whose window has moved past every block we can ask about, has told us
 /// nothing about the data. Reporting that as a verification failure is LIVE-6 —
 /// a capability gap presented as mirror corruption.
@@ -199,7 +198,7 @@ pub async fn ground_mirror_against_rpc<S: ConsumerStore>(
     Ok(Grounding::Anchored(checkpoint.block_number))
 }
 
-/// Client-side twin of the indexer's `rpc::is_proof_unavailable` (§11.5): the
+/// Client-side twin of the indexer's `rpc::is_proof_unavailable`: the
 /// answer is about the ENDPOINT, never about the data.
 pub fn is_proof_unavailable(e: &anyhow::Error) -> bool {
     let msg = format!("{e:#}");

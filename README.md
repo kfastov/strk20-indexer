@@ -10,7 +10,7 @@ Node worker thread. A self-hostable Rust indexer publishes the shared feed.
 [Try the live demo](https://strk20.nullref.cc/demo/) ·
 [Watch the demo video](https://youtu.be/ngoYvunrOsI) ·
 [SDK reference](ts/strk20-discovery/README.md) ·
-[Verification and measurements](docs/spec/demo-app.md) ·
+[Demo workflow](docs/spec/demo-app.md) ·
 [Self-hosting](docs/ops/hosting.md)
 
 ## Use the SDK
@@ -72,27 +72,13 @@ discovery cache does not delete the wallet. Use small amounts and keep the backu
 The hosted proving service receives proving inputs: private local discovery does
 not make every part of transaction creation private from that service.
 
-The full shield → local discovery → spend → withdraw flow has succeeded on
-Sepolia and mainnet using this provider. The mainnet withdrawal needed receipt
-recovery after a status-subscription timeout; it was not sent twice. Both networks
-have passed complete pool-state verification. Receipts, recovery evidence and
-measurement conditions are in [the evidence](docs/spec/demo-app.md).
+The [demo workflow](docs/spec/demo-app.md) explains each action and receipt
+recovery, and retains six historical transaction examples from Mainnet and
+Sepolia. Those examples do not validate the current build.
 
 ## How it works
 
-[Dataflow and trust boundaries](docs/diagrams/dataflow.md).
-
-```text
-Starknet head notification → block, receipts and storage changes → Rust indexer
-                                                                    │
-                                                  public snapshot + diffs
-                                                                    │
-                          browser / Node Worker ← HTTP bootstrap + SSE diffs
-                                     │
-                          independently checked pool state
-                                     │
-                          local discovery with your viewing key
-```
+See the [architecture and dataflow diagram](docs/spec/architecture.md#data-path-and-trust-boundaries).
 
 Every wallet consumes public pool artifacts rather than requesting its own
 slots. The indexer needs no viewing key. Live ingestion includes state writes
@@ -103,8 +89,8 @@ from its configured RPC. Snapshot and incremental updates use the same verifier.
 A folded cache preserves verified state, trie hashes and discovery progress.
 Restart restores that state instead of replaying the full history. Fresh updates
 still require verification; cold initialization, cache restoration and discovering
-a new transaction are different workloads. Current measurements do **not**
-establish that fresh local verification always beats the official service.
+a new transaction are different workloads. A general speed advantage over the
+official service is not established.
 
 ## Trust and current limits
 
@@ -115,18 +101,18 @@ establish that fresh local verification always beats the official service.
 - **The configured RPC is a trust root.** The default mode checks an accepted
   Starknet header; it does not establish Ethereum-finalized state independently.
 - **The local cache is trusted.** Its checksum detects corruption, not malicious
-  replacement. AEAD and its key-management model are deferred.
+  replacement. Cache encryption and authentication are not implemented.
 - **Cold verification is still substantial.** WASM runs off the UI thread, but
   the first visit must download and verify state. Warm-start and fresh-discovery
-  results are reported separately in the evidence.
+  results must be evaluated separately.
 - **Proof availability can delay updates.** The server distinguishes MATCH,
-  MISMATCH and UNAVAILABLE. A mismatch stops publication; an unavailable proof
-  permits unverified publication. The SDK must independently verify new state
-  before using it for discovery.
+  MISMATCH and UNAVAILABLE. A mismatch aborts the current epoch cut; live-tail
+  publication can continue. An unavailable proof permits unverified epoch cuts.
+  The SDK must verify new state before using it for discovery.
 - **Privacy has boundaries.** Feed hosts see IP addresses and request timing.
   Optional official comparison discloses its viewing key; hosted proving receives
   proving inputs. Raw/compat server modes have different privacy properties and
-  are disabled by default in the public deployment.
+  are disabled by default in Compose.
 
 ## Run the indexer or contribute
 
@@ -139,7 +125,9 @@ health checks and public endpoint allowlists, see [hosting](docs/ops/hosting.md)
 Public feeds are available at `/mainnet/feed` and `/feed` on
 [the hosted instance](https://strk20.nullref.cc/demo/).
 
-To build the SDK and demo from source, use Node 24+, Rust and wasm-pack:
+## Build from source
+
+Use Node 24+, the Rust toolchain in `rust-toolchain.toml`, wasm-pack and Brotli:
 
 ```sh
 ./examples/mainnet/setup.sh       # builds the pinned upstream SDK
@@ -148,20 +136,23 @@ npm --prefix ts ci
 npm --prefix ts run dev          # Vite demo; no browser auto-open
 ```
 
-The setup helper is retained for building upstream dependencies. The SDK and
-browser demo are the maintained user-facing integration path; old standalone
-Sepolia scripts have been removed and remain in Git history.
+For a production demo build, run `npm --prefix ts run build`. Rust workspace
+checks, real-WASM/TypeScript tests and package validation are listed in
+[CI](.github/workflows/ci.yml). The setup helper builds dependencies without
+creating a wallet or submitting transactions.
 
 - [Consumer architecture and proof contract](docs/spec/consumer-path.md)
-- [Why event-only indexing is insufficient](docs/spec/sound-ingest.md)
-- [Full architecture](docs/spec/architecture.md)
+- [Server architecture and feed interfaces](docs/spec/architecture.md)
+- [Direct WASM API and build checks](crates/wasm/README.md)
+- [Invariant checks](docs/ops/invariants.md)
+- [Mainnet command-line examples](examples/mainnet/README.md)
 - [Packaging-only upstream fork](docs/ops/fork.md)
-- [Current release and limits](docs/roadmap.md)
+- [Future work and known issues](https://github.com/kfastov/strk20-indexer/issues)
 
 Rust, real-WASM/TypeScript, SDK compatibility and packaging checks validate the
 implementation. The upstream discovery engine uses a feature-gated dependency
-fork; CI checks that its source matches upstream. The
-[upstream PR](https://github.com/starkware-libs/starknet-privacy/pull/984) is open.
+fork; CI checks that its source matches upstream. Its status and conditions for
+returning to upstream are in the fork guide.
 
 Apache-2.0. Upstream provenance and notices ship with the applicable packages and
 [fixtures](fixtures/upstream/PROVENANCE.md).

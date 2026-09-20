@@ -1,4 +1,4 @@
-//! Ingest pipeline (spec §5). One sequential loop; BACKFILL is FOLLOW with a
+//! Ingest pipeline. One sequential loop; BACKFILL is FOLLOW with a
 //! target. Events-first: `getEvents(pool)` finds active blocks, then one
 //! `getStateUpdate` + `getBlockWithTxHashes` per active block, one SQLite
 //! transaction per block. Crash-safe: rescanning from the frontier is
@@ -348,7 +348,7 @@ impl<'a> Ingestor<'a> {
     }
 
     /// Live ingestion covers EVERY state diff, including silent pool writes
-    /// (sound-ingest.md). Fetch events and updates together, then commit each
+    /// without pool events. Fetch events and updates together, then commit each
     /// active block once. Small batches bound both concurrency and memory.
     async fn ingest_tail(&mut self, from: u64, latest: &BlockHeader, supplied: &mut Option<crate::feeder::BlockData>) -> Result<u64> {
         let mut count = 0;
@@ -628,7 +628,7 @@ impl<'a> Ingestor<'a> {
     }
 
     /// Fetch and store one pool-active block. `events` is the block's pool
-    /// events as the scan already saw them; `None` (the §5.6 rescan path) asks
+    /// events as the scan already saw them; `None` (the recovery rescan path) asks
     /// the endpoint for them in ONE page.
     async fn ingest_block(
         &mut self,
@@ -995,7 +995,7 @@ impl<'a> Ingestor<'a> {
         Ok(repaired)
     }
 
-    /// Verify-root recovery slow path (spec §5.6): re-ingest EVERY block in
+    /// Verify-root recovery slow path: re-ingest EVERY block in
     /// [from, to] straight from per-block state updates — not events-first —
     /// so a pool write that rode a block with no pool event is recovered.
     pub async fn rescan_range(&mut self, from: u64, to: u64) -> Result<u64> {
@@ -1026,7 +1026,7 @@ pub fn normalize_hex(s: &str) -> Result<String> {
     Ok(strk20_feed::felt_hex(&f))
 }
 
-/// Verify chain identity at startup (spec §5.1 INIT).
+/// Verify chain identity at startup.
 pub async fn init_checks(db: &Db, rpc: &RpcClient, cfg: &ChainConfig) -> Result<()> {
     let chain_id = rpc.chain_id().await?;
     if chain_id != cfg.chain_id {
@@ -1056,7 +1056,7 @@ pub async fn init_checks(db: &Db, rpc: &RpcClient, cfg: &ChainConfig) -> Result<
     }
     // Recompute decode_state from class_history against the CURRENT decoder
     // map: this is the recovery path after an operator adds a class via
-    // --allow-class (spec §5.7).
+    // --allow-class.
     {
         let mut stmt = db
             .conn

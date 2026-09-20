@@ -1,714 +1,107 @@
-# Real-chain demo
-
-Current implementation: `ts/demo`. Mainnet and Sepolia use public feeds and
-RPCs; the default build contains no synthetic replay or mock discovery engine.
-
-## User flow
-
-One primary button advances through wallet creation, funding detection,
-deployment, shield, local discovery, private transfer, discovery and withdrawal.
-The activity log shows user operations and their durations. Expand an operation
-to inspect explicit transaction stages such as proof generation and confirmation.
-Background Worker synchronization and cache timings are not added to this log. WASM runs only
-in a Worker, so proof verification cannot freeze the action button or spinner.
-
-The wallet is generated locally. Signing and viewing keys persist in a separate
-IndexedDB database from disposable feed state. Each network retains its own
-wallet. Export/import preserves both public and shielded funds' recovery material.
-The page warns that keys live in this browser and recommends small amounts.
-Clearing discovery cache must never erase wallet material.
-
-Funding is detected with public `balance_of` RPC; it does not exercise private
-note discovery. The shield → spend transition uses our `LocalDiscoveryProvider`,
-including real witnesses, channels and requirement checks. All builder discovery
-reads are pinned to the proving block. The proving service remains an external
-confidentiality dependency and receives the proving inputs.
-
-## Measurement
-
-The same operation spans populate the screen and exported timing JSON.
-Cached initialization, network catch-up, cold verification, note discovery,
-proof generation and transaction confirmation are distinct measurements.
-
-Optional comparison submits a transaction only once. Our provider and the
-official discovery service then observe the same block concurrently. Enabling
-comparison explicitly permits sending this demo wallet's viewing key to that
-service. Errors and attempts are recorded. Results must agree on unspent notes,
-amounts and spend witnesses before treating a run as a speed comparison.
-Conservative local `created` bounds differ from upstream write timestamps and
-are not presented as equivalent historical proofs. Cache conditions are also
-reported: our provider may restore saved state; the official provider starts
-without a supplied cursor. This is a comparison of these configured paths,
-not a claim of identical cold-start workloads.
-
-## Current verification evidence
-
-On 2026-09-06, the built page was checked in isolated headless Chrome. Creation
-of an unfunded Sepolia wallet and balance lookup succeeded without console errors.
-On full public mainnet state at block 14,420,590, cold verification plus discovery
-for an empty test identity took 37.85 s; three fresh Worker restores took
-298.6, 295.9 and 292.0 ms. The complete state was verified in each cold run; this
-is not a tiny fixture measurement. A funded wallet may add note-discovery work.
-The maximum observed interval of a 50 ms main-thread heartbeat was 82.2 ms.
-These are local-machine measurements, not guarantees for all devices or networks.
-
-### Funded Sepolia acceptance run, 2026-09-06
-
-The deployed browser demo completed registration/shield, private self-transfer
-and withdrawal with our provider supplying the builder's discovery data. The
-account was generated in the page, received 105 test STRK (5 through the agent
-faucet and 100 from the user's faucet claim), and was deployed in 7.50 s.
-
-| Action | Accepted block | Browser operation | Receipt |
-|---|---:|---:|---|
-| Shield 0.01 STRK | 14630720 | 16.87 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x760b6fc6e6cefa318a53071823466163b4ba48a2aac513ccbc3a7fc5cf0e88d) |
-| Spend by self-transfer | 14630873 | 17.41 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x48557def3325c9fc153b0e53e22fc624a51a65148d0f904b10a0d0099ed5386) |
-| Withdraw 0.01 STRK | 14631004 | 15.93 s | [SUCCEEDED](https://sepolia.voyager.online/tx/0x28d8c41ea12d5ce715e557c69945f87a0e0260f4a0210bb0d6d20e2fd845ce4) |
-
-Both discovery providers agreed on notes and spend witnesses after transfer
-(block 14630981) and withdrawal (14631073). Final displayed balances were
-91.84274 public test STRK and zero private STRK. The wallet survived reloads
-between actions. This is a live Sepolia result, not a mainnet transaction run.
-
-The run exposed and fixed three defects: zero-public-key channel placeholders
-broke registration; background SSE skipped the explicit observation step; and
-hex-string versus bigint note IDs caused a false benchmark mismatch. The first
-shield attempt stopped before proof submission. The false comparison is not
-counted as a valid measurement.
-
-Performance remains unfinished. At block 14630981, official discovery took
-0.46 s (one attempt), local discovery 7.03 s (six attempts). After withdrawal:
-0.43 s versus 4.37 s (two local attempts). The local path was waiting/retrying
-for the requested state; equal results do not imply a speed advantage. Repeated
-funded-wallet restores measured 1.98, 2.27 and 2.68 s; the last reload used the
-same deployed assets. In the 2.27 s run, restoring WASM state took 1.94 s.
-The <=2 s repeat-start target is therefore not yet reliably met by the hosted
-demo. The earlier empty-account numbers below do not establish that target.
-
-### Event-driven performance follow-up, 2026-09-06
-
-Backend `4bbef8a` removes production head polling, the one-second SSE file poll,
-repeated live-block ingestion and unchanged-branch rehashing. The entire slot
-set is still checked; silent state writes and rollback remain covered. The SDK
-waits on feed events for a requested bound, reuses staged public artifacts,
-prioritizes that checkpoint, fetches header/proof concurrently, and queues the
-post-SSE cache save behind already waiting reads (`66847ea`). No proof is skipped.
-
-A separate probe connected to PublicNode new-head WebSocket and the public SSE
-endpoint concurrently and matched first arrival of the same block number:
-
-| Deployment / network | Matched samples | Median | Min–max |
-|---|---:|---:|---:|
-| Before / Sepolia | 4 | 2,493 ms | 2,117–2,860 ms |
-| Event wake only / Sepolia | 15 | 621 ms | 438–2,248 ms |
-| Final backend / Sepolia | 17 | 243 ms | 221–806 ms |
-| Final backend / mainnet | 17 | 664 ms | 128–2,864 ms |
-
-These are short samples of matching block numbers, not transaction-to-discovery
-latency or an all-block percentile. Coalesced heads without an exact match are
-excluded. RPC sometimes returns `Block not found` for a just-announced block;
-the indexer catches up on a subsequent notification. HTTP `latest` also lagged
-WebSocket by one or two blocks, so the indexer now requests the announced height.
-After warming, server root calculation fell from the first mainnet calculation's
-12,559 ms to 337–393 ms; Sepolia roots took 45–74 ms. Full consumer checkpoint
-verification succeeded on both deployed feeds, including parallel proof retrieval
-at Sepolia 14634430 and mainnet 14446387.
-
-Browser measurements below use the same funded wallet after its withdrawal:
-current note/witness sets are empty and match, so this is read-path performance,
-not a new nonempty spend acceptance run. Both observers request the same block;
-the local cache and reference's fresh cursor differ as described above.
-
-| Backend / demo | Block | Local | Official | Local attempts |
-|---|---:|---:|---:|---:|
-| Before | 14632459 | 5.71 s | 0.83 s | 5 |
-| Event wake only | 14632698 | 0.54 s | 0.81 s | 1 |
-| Event wait client | 14632909 | 0.89 s | 0.42 s | 2 |
-| Event wait client | 14633155 | 4.58 s | 0.41 s | 2 |
-| Final backend / 639d856 | 14634289 | 1.90 s | 0.91 s | 1 |
-| Final backend / 639d856 | 14634312 | 2.06 s | 0.49 s | 1 |
-| Final backend / 639d856 | 14634325 | 1.24 s | 0.43 s | 1 |
-| Final backend / cb631d2 | 14634520 | 2.28 s | 0.41 s | 2 |
-| Final backend / 66847ea | 14634611 | 0.55 s | 0.44 s | 1 |
-| Final backend / 66847ea | 14634625 | 1.75 s | 0.42 s | 2 |
-| Final backend / 66847ea | 14634653 | 2.40 s | 0.40 s | 2 |
-| Final backend / 66847ea | 14634664 | 0.36 s | 0.40 s | 1 |
-
-Earlier labels saying “Page to restored result” measured initialization only,
-not navigation. The corrected metric includes document/scripts/Worker loading.
-After restarting browser control, three `639d856` loads measured 5.39, 2.37 and
-4.79 s navigation-to-restored-data (initialization 3.28, 1.19 and 3.14 s).
-The cache was 4,522,005 bytes; WASM restore took 1.42, 0.56 and 1.63 s. First loads
-of the next demo builds measured 2.20 s (`cb631d2`) and 4.55 s (`66847ea`), including
-changed script assets. Reloading the same `66847ea` assets then took 2.49 s
-(initialization 1.11 s, cache read 0.05 s, WASM restore 0.57 s, discovery 0.16 s).
-Initialization alone had also measured 0.09–0.17 s before
-these client changes: those values cannot be attributed to this optimization.
-The <=2 s navigation target and a stable advantage over the official path remain
-unproven. A single faster run does not establish either claim.
-
-### Discovery tail-latency diagnosis (2026-09-06)
-
-A 14-observation Node Worker trace used the deployed Sepolia feed, the actual
-SDK/WASM, public RPC, and an independent empty identity. It did not spend or
-reuse the funded browser wallet. Each observation fixed a block number before
-reading. Seven already-verified reads took 0–6 ms; these reused the exact
-checkpoint and are **not** fresh-verification benchmarks. Two fresh ready-feed
-reads took 240 and 429 ms. Five observations waited for the feed and took
-1,148–4,651 ms, including 538–3,837 ms inside the event-driven `waitForBlock`.
-No fixed retry backoff was used in those five cases. Across all 11 checkpoint
-acquisitions in the trace, network retrieval took 190–759 ms and local pool
-verification 28–49 ms. Across 14 reads, empty-note discovery took 0.05–4.41 ms.
-
-The 4,271 ms observation at block 14637928 decomposed as follows:
-
-| Critical-path part | Time |
-|---|---:|
-| Initial requests discover that the feed is behind | 279 ms |
-| Wait for a covering SSE publication | 3,329 ms |
-| Fetch the requested checkpoint header and proof concurrently | 622 ms |
-| Verify pool state | 30 ms |
-| Discover notes | <1 ms |
-
-The remaining roughly 10 ms covers scheduling and folding. A subsequent
-40.5 ms cache save was outside the observation. The foreground retry queued
-behind background verification of the **same requested block** and reused its
-result; there was no second proof acquisition on that retry.
-
-During the feed wait, server logs show `getBlockWithTxHashes` error 24 twice,
-then ingestion through block 14637930. The old event loop discarded the failed
-target and requested the newest notification each time. HTTP availability
-lagging WebSocket announcements could therefore prevent progress across
-several notifications even though earlier blocks were already available.
-A separate event-triggered 16-head probe confirmed this: Cartridge served
-13/16 newly announced blocks and PublicNode 12/16; both served the preceding
-announced block in all 15 applicable checks. Two new heads were absent from
-both providers. Merely switching providers cannot remove that availability gap.
-The preceding server-log sample also contained two `getStateUpdate` error-24
-failures, versus 157 header failures across both networks. The header fallback
-does not remove state-update/proof availability failures or ordinary RPC RTT.
-
-This also explains the earlier 243 ms matched-block SSE median: coalesced
-publications such as 14637930 covering a wait for 14637928 were excluded from
-that sample. It is not a percentile of all consumer waits.
-
-The ingestion correction tries the exact announced height first. Only when
-that header returns `Block not found` does it request HTTP `latest` once and
-process the available range in the same event cycle. No timer or repeated
-availability polling is added. A stale answer cannot move the stored frontier
-backward without a detected reorg; wrong numbered responses are still rejected.
-The regression test failed on the old implementation and checks progress
-across three consecutive unavailable announcements plus stale-head rejection.
-
-Backend `e553c2c` was activated after CI passed at `429f07d` (a test-only
-follow-up fixes a health/log snapshot race in the recovery acceptance test).
-The next 14-observation run used the same Worker harness and cache: six
-already-verified reads took 0–7 ms, three ready-feed reads 200–492 ms, and five
-feed-waiting reads 1,347–2,840 ms (713–2,410 ms waiting). These short, sequential
-samples do not establish a production percentile or isolate changing RPC RTT.
-
-The remaining 2,840 ms case at 14638767 is also traced. The producer received
-error 24, processed available 14638766 and finished that cycle at 10:55:29.472
-UTC. The client requested 14638767 at 10:55:29.997. Publication covering it
-arrived at 10:55:32.599, followed by a 199 ms checkpoint fetch and 30 ms local
-verification. The fallback prevents starvation of available earlier blocks,
-but a prematurely announced target still waits for another wakeup: the configured
-new-head subscription gives no separate signal when HTTP data becomes ready. This
-remaining delay must not be described as solved by the fallback.
-
-A further passive-WebSocket trace confirms the wakeup gap independently.
-PublicNode announced 14638815 at 10:56:48.890 UTC; the producer's HTTP request
-failed and its fallback cycle finished at 10:56:49.110 with head 14638814.
-The next WS announcements arrived at 10:56:52.598 and 10:56:52.629 (14638816
-and 14638817): a 3,708 ms gap followed by a 31 ms burst. SSE covering the
-requested 14638815 arrived at 10:56:52.849, 251 ms after the next notification.
-The waiting read took 2,859 ms: 305 ms before the bound error, 2,309 ms waiting,
-205 ms fetching the checkpoint and 35 ms verifying it. The producer was idle
-between events; neither a one-second SSE poll nor WASM computation caused this
-tail. Faster future recovery needs a data-ready event source or a bounded
-alternate RPC attempt on failure; adding another WebSocket transport alone
-does not supply that missing readiness signal.
-
-Demo `8d24318` exports observation start timestamps and per-retry reasons,
-failed-attempt durations and feed/backoff wait durations. These are also
-expandable inside the comparison result. Before the ingestion correction, the
-funded browser wallet's empty-note read at 14638198 took 1.33 s locally versus
-0.93 s officially: the failed attempt took 0.32 s and feed waiting 0.46 s.
-A separate 7.04 s one-attempt browser result overlapped local Rust compilation
-and browser-control timeouts. Its expanded activity includes 2.01 s local
-verification, 2.64 s discovery and 2.09 s persistence spans, as well as 2.51 s
-checkpoint retrieval. Activity includes background work, so these spans cannot
-be summed into the observation's duration. Local scheduling/load is a confounder;
-its precise contribution is not established and this result is not used to
-estimate deployment latency. Native Chrome UI access subsequently recovered
-control. Post-deployment reads at 14638945 and 14638969 rounded to 0.00 s local
-versus 1.15 and 0.44 s official, with matching notes and witnesses: the requested
-state was already verified by the subscription. These are cache-hit examples,
-not evidence of faster fresh checkpoint verification.
-
-### Source latency and coherent block ingestion (2026-09-06)
-
-Paired observations on the production VPS remove the home network from the
-comparison. Both the actual Node/WASM provider and official SDK queried the
-same fixed block and independent empty identity. Before feeder ingestion,
-20 observations included local delays of 1,061 and 1,676 ms while the warmed
-official endpoint took 116–125 ms. Checkpoint prefetch alone still left waits
-of 1,165, 1,595 and 2,602 ms.
-
-Backend `778849f` acquires the sequencer feeder's complete accepted block,
-receipts and state diff in one request, bound to the subscription header.
-It includes silent storage writes; events alone are insufficient. Samples
-returned 20/20 valid bundles on each network (Sepolia median 138 ms, mainnet
-126 ms). Comparison against eight real pool-active Sepolia blocks matched all
-27 storage writes and 25 events, including transaction hashes and event indices.
-This input transport does not replace the client's independent checkpoint proof.
-
-In the subsequent 20 paired observations, local results ranged from 2 to
-1,910 ms; the official warmed results were 124–130 ms. The 1,910 ms observation
-at 14640800 waited for a late source notification: the official result finished
-at 11:51:56.453 UTC, the feed arrived around 11:51:58.038. Its prepared proof
-had already completed. Local verification took 85 ms and an intervening cache
-save 97 ms. Separately, 24 observed notification-to-SSE times were mostly
-126–160 ms, with a 575 ms maximum. This latter metric excludes time before
-the notification and cannot stand in for transaction discovery latency.
-Two parallel PublicNode subscriptions delivered the same 28 heads within
-9 ms of each other; duplicating that connection would not remove source lag.
-
-A public `head.ndjson` read now also requests an ingestion cycle against the
-latest complete feeder block. Requests coalesce once per published version;
-there is no timer, wallet-specific parameter or extra client request. This
-provides a second wakeup when a subscriber's target precedes a delayed source
-notification. It is not a guarantee that upstream has published the target yet.
-
-Chrome extension verification after `778849f` restored the funded browser
-wallet and discovery in 0.26 s. A read at 14640897 showed local 0.00 s versus
-official 0.39 s, with matching notes and witnesses; this was another cached
-checkpoint, not a fresh-path speed claim. Browser tests use tab-scoped extension
-control and screenshots without activating the user's browser window.
-
-### Demand wakeup and remaining proof availability (2026-09-06)
-
-After `7e444be`, 20 further same-block VPS pairs produced local times of
-2–1,767 ms. The three feed-unavailable observations completed in 330, 335 and
-462 ms. The two slowest results (1,767 and 1,552 ms) instead exhausted fresh
-`getStorageProof` error-24 retries and incurred the benchmark's 1,000 ms
-transport backoff. The official API also returned HTTP 503 in those two cases,
-completing in 1,253 and 1,254 ms on its second attempt. Its other observations
-were 123–155 ms. These results do not establish that local fresh verification
-is always faster. Two of 26 separate subscription observations found the block
-already published before the PublicNode notification arrived.
-
-A 20-head proof probe queried Cartridge concurrently by both block number and
-hash: both forms succeeded on the same 14 heads and both refused the same six
-with error 24. Changing identifier form does not solve this observed lag.
-Other public Sepolia proof endpoints were unusable in this check: Lava v0.8/v0.9
-returned no available providers, dRPC did not expose the method, OnFinality's
-Sepolia host was unreachable, and Blast returned 403 announcing retirement.
-The public OnFinality mainnet WebSocket demanded an API key even for the first
-subscription. None is configured as a speculative fallback.
-
-`9e42967` acquires server proof and binding header concurrently. Observed
-Sepolia proof/binding time fell from about 195 ms to 97–99 ms while reorg and
-persistent-mismatch tests retained their distinct outcomes. Mainnet verification
-through the actual Node/WASM consumer succeeded at 14453734. That VPS restored
-24,114,460 bytes of saved state in 1,232 ms and caught up in a further roughly
-1.3 s; the saved state became available before catch-up. The preceding cold
-mainnet verification at 14453291 took 114.2 s. These CPU/hardware-dependent
-measurements are distinct from the browser's 0.26 s Sepolia restoration.
-
-Server root reuse is invalidated by transactional SQLite storage-write triggers,
-including direct updates, deletes, cascaded rollback and writes from another
-connection. A read snapshot also checks for stored writes between requested
-heights: historical traversal must not reuse a newer root merely because the
-DB revision did not change. Empty blocks can reuse the root; each block's proof
-is still acquired and bound separately. No feed format or client trust boundary
-changes.
-
-### Subscription recovery and foreground scheduling (2026-09-06)
-
-A live startup reproduced an open WebSocket that never acknowledged its
-subscription: ingestion was only awakened again by a reader. The former
-60-second inactivity wait allowed the published head to fall behind. An
-absolute two-second ACK deadline and ten-second head deadline now bound these
-states, independent of ping traffic. On deployment the ACK failure recurred
-and recovered through reconnect within seconds. This does not remove delays
-before the upstream source publishes its notification.
-
-A failed requested checkpoint no longer pins future SSE verification to an
-unavailable old block. This matters with limited-history proof services: in
-one concurrent Cartridge probe, distances 0–16 behind its own head returned
-proofs while distances 32–512 returned error 42. This is one observed window,
-not a universal retention guarantee. No working alternative public Sepolia
-proof service was established by the probes above.
-
-After backend `1dbd6be`, two 20-pair VPS series completed without a local
-one-second transport backoff. Local ranges were 1–396 and 2–643 ms; these
-include cached reads. The second series exposed queued background work ahead
-of foreground reads: its 593 ms case included three verification spans and a
-114 ms save; another 643 ms case included a 345 ms proof wait and two
-verification spans. Its 628 ms case combined waiting for feed publication,
-an initial proof refusal and recovery. The official API returned HTTP 503 in
-that last case and completed in 1,252 ms after the harness's one-second retry.
-
-The worker now keeps foreground and background queues. State mutations remain
-serialized; waiting client requests precede the next coalesced SSE update or
-cache write. An active operation still completes before another starts. A
-real-WASM regression pauses the current verification, queues an SSE head and
-then a foreground read: the old order requested proofs for 98,99,97, whereas
-the corrected order serves 98,97 first. The test owns its Worker host rather
-than replacing global handlers.
-
-A subsequent 20-pair VPS series with this scheduling change produced local
-1–422 ms (fresh work 203–422 ms, cached 1–3 ms), versus official 122–153 ms.
-Two local cases waited for an SSE update and completed in 365 and 385 ms.
-These short public-network samples do not establish a latency ceiling or
-that fresh independent verification beats the official API. Benchmarks use
-the same requested block and actual SDK/WASM on the VPS with an empty test
-identity; cached local state and uncached official responses are reported
-separately. They are not funded-transaction discovery measurements.
-
-Mainnet restored 24,116,066 bytes in 1,255 ms, then independently verified
-14455072 with 213 ms checkpoint wait and 1,066 ms apply time. Sepolia restored
-4,536,620 bytes in 172 ms and independently verified 14643219. Startup restore,
-fresh catch-up and cold full verification remain different measurements.
-
-An experiment sharing immutable trie structures was discarded: measured
-steady verification medians of roughly 97 versus 92 ms did not establish a
-worthwhile end-to-end improvement. The deployed WASM uses the original
-representation, rebuilt from committed Rust source.
-
-### What the RPC-role measurements establish
-
-There is no isolated full-discovery A/B test changing only the mainnet RPC role
-configuration. Earlier consumer timings also changed ingestion, trie reuse,
-checkpoint concurrency and scheduling, and cannot attribute the entire gain to
-provider separation.
-
-A prior 20-request mainnet `l1_accepted` header probe had Lava 19 successes,
-median 86 ms, maximum 1,609 ms and one three-second timeout; PublicNode had 20,
-median 100 ms and maximum 317 ms. This favored the observed tail, not median
-latency, and did not measure availability of newly announced blocks.
-
-A follow-up probe on 2026-09-06 observed 20 PublicNode WS head notifications on
-the VPS. For each exact announced height, both endpoints received one header
-and one state-update request concurrently, with no retry and a three-second
-request timeout. Success required the returned block hash to match the notification.
-
-| Method | Provider | Matching answers / 20 | Median successful response | Maximum successful response |
-|---|---|---:|---:|---:|
-| Block header | Lava | 18 | 149.9 ms | 1,483.9 ms |
-| Block header | PublicNode | 14 | 116.1 ms | 337.2 ms |
-| State update | Lava | 17 | 159.4 ms | 999.5 ms |
-| State update | PublicNode | 15 | 120.7 ms | 312.9 ms |
-
-All unsuccessful answers were RPC error 24. These successful-response medians
-exclude different sets of blocks. On the 13 common successful header pairs,
-PublicNode won only six and its paired median was 29.2 ms slower. On the 13
-common successful state-update pairs, it won eight with a 68.6 ms paired median
-advantage. This is not evidence that PublicNode is universally the fastest live
-source. Sampling is triggered by PublicNode itself, not by an independent chain
-arrival clock; no retry-to-ready time or complete-discovery time was measured.
-
-Provider roles remain useful for capability separation: archive/proof requests
-need not move the ordinary live endpoint. Current primary block data comes from
-the coherent feeder, so the table does not directly measure that ingest path.
-There is no automatic fastest-provider router. A full-data stream could remove
-the feeder request after a header notification, but it has not been integrated.
-Routine indexer-to-client SSE already carries the data itself; independent
-checkpoint header/proof requests still remain.
-
-### Earlier state-only measurements
-
-The 2026-09-06 follow-up measurement verified block 14,440,930 and restored it
-in 341.5, 312.4 and 308.4 ms. Catch-up to 14,440,963 took 1,624.7 ms, including
-245.1 ms for the queued cache save, 961.5 ms for checkpoint acquisition and
-176.1 ms for verification. The HTTP response bodies totalled 204,417 bytes;
-this is decoded body size, not compressed wire traffic. Two subsequent polls
-returned the same checkpoint and are not counted as further chain advances.
-Cold discovery took 40.31 s; the maximum 50 ms main-thread interval was 51.7 ms.
-With manifest revalidation enabled, another full-state run took 40.54 s cold,
-306–313 ms on restore, and 1.331 s to advance from 14,441,166 to 14,441,197
-(177.1 ms verification). The following two polls again returned that same block.
-Separate direct HTTP samples also observed an unchanged published head across
-an 11-second interval; this observation does not establish the cause of the delay.
-
-Transaction intent and the SDK-computed transaction hash are saved before the
-signer can enable broadcast. If the RPC response is lost, the normal resume
-button looks up that saved hash. A test retains the actual SDK transaction
-construction, replaces cryptographic signing and RPC submission, simulates a
-lost response, reloads the wallet and confirms that resume does not send again.
-Legacy pending records without a hash remain a manual recovery case.
-
-## Standalone release acceptance, 2026-09-06
-
-Demo source `486d448` now consumes the unchanged official builder through
-`strk20-discovery/privacy-sdk`. The release tarball includes the compiled
-upstream SDK and WASM; it needs no local vendor checkout or GitHub Packages
-credentials. Version 0.1.0 is published on npm; its registry SHA-1 is
-`9d01df7e04b9fe5d06dcca001b9e320a10ea165b`, matching the tested tarball.
-A separate consumer installed version 0.1.0 from the public registry with
-`--userconfig=/dev/null`, started the Node/WASM Worker, and passed TypeScript
-and Vite builds. The tested tarball also ran the actual Node/WASM provider
-against Sepolia checkpoint
-14645569. This cold run spent 6.97 s verifying state; it is not a warm-start
-measurement or evidence that cold startup meets two seconds.
-
-That isolated demo build is deployed. Public files matched SHA-256 checks of
-all local assets. A headless browser tested both networks on the hosted page:
-create an unfunded wallet, export the correctly named backup, reload with the
-same address, and check funding. Both reported the expected empty STRK balance.
-No page errors or horizontal overflow at 390 px were observed. Test wallet
-contexts were disposable; this check did not submit funded transactions.
-
-Separately, the existing funded Sepolia wallet in the user's Chrome tab took
-2.42 s to restore on the preceding deployment, plus 0.21 s to read its public
-balance. The two-second funded restart target is not reliably met. The new
-release's unfunded reload result does not establish funded-cache performance.
-The previous funded lifecycle evidence remains above; a new funded mainnet
-lifecycle using this package remains pending.
-
-## Funded mainnet acceptance in progress, 2026-09-06
-
-Historical intermediate result; the withdrawal completed on September 7 below.
-
-On deployed demo `486d448`, the user funded the browser wallet with 25 STRK
-and submitted deploy, shield and private transfer. The local provider discovered
-0.01 STRK after shield and supplied the next spend. Withdrawal is still pending.
-
-| Action | Transaction | UI elapsed |
-|---|---|---|
-| Deploy | `0xc998dac4c5e2260186672c330d47cd32531774fb6693ea73d6efbd3b74074f` | 7.29 s |
-| Shield | `0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59` | 53.77 s |
-| Transfer | `0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3` | 15.53 s |
-
-Shield's builder triggered the first snapshot verification: 35.33 s inside
-37.80 s of action construction. Proof generation took 3.99 s and receipt waiting
-8.80 s. Subsequent explicit discovery took 1.33 s, including 0.21 s verification.
-Initialization had loaded no verified cache and returned without a cold sync;
-the provider must complete that work during initialization before submission.
-
-Transfer foreground stages: notes readiness 1.11 s, action construction 0.55 s,
-prover call 3.58 s, fee estimation 1.50 s, receipt waiting 6.32 s. The remaining
-2.47 s is not separately timed (preflight RPC, submission and persistence paths
-are candidates, not measured attribution). Receipt waiting on that build polled every
-2 s; its full duration is not a measurement of network inclusion latency.
-
-Background SSE proof/verification/cache spans appear under whichever foreground
-operation is active. This is an attribution defect in `Operations.active`, not
-proof that all those spans block that operation. Do not add nested background
-spans to the foreground totals. Fix span attribution before recording the video.
-
-After transfer, explicit discovery found the replacement note and advanced to
-withdrawal, but took 7.02 s. Recorded spans include state verification 1.74 and
-1.89 s, cache saves 1.48 and 2.18 s, checkpoint proof wait 0.22 s and note
-scanning 0.20 s. These are overlapping foreground/background observations;
-without corrected attribution they do not establish a sequential breakdown.
-This is a warm latency regression/fluctuation requiring investigation, not a
-second cold-start explanation. The transfer receipt independently reports
-`SUCCEEDED` / `ACCEPTED_ON_L2`.
-
-## Event-driven confirmation, 2026-09-06
-
-`confirmation.ts` replaces `waitForTransaction(... retryInterval: 2000)` with
-`starknet_subscribeTransactionStatus`. It issues one immediate HTTP receipt
-lookup to cover already-confirmed transactions, then reads receipts on accepted
-status events. A bounded reconnect resubscribes and checks for confirmation
-missed during the disconnected interval. There is no periodic receipt lookup.
-Only an accepted receipt with the requested hash, valid block number and known
-execution status completes the step. Reverts, timeouts and uncertain responses
-preserve the existing recovery behavior; failed confirmation never resends.
-
-The handler uses the native browser WebSocket API and is installed before the
-subscribe request, covering an initial notification before the acknowledgement.
-The attempted SDK channel dropped that early notification and could leave a
-reconnect callback active after closing; the final implementation does not patch
-SDK internals. CSP now allows exactly the two configured PublicNode WSS hosts.
-The `ws` dependency is only a local test server, not a browser dependency.
-
-Local protocol tests cover early and duplicate status notifications, reconnect,
-revert, wrong hash, invalid/missing accepted block, timeout without polling and
-failed handshakes. The actual signer-construction recovery test still confirms
-one broadcast and one signature across a failed receipt lookup and resume.
-
-A headless Chrome check of the final handler read existing accepted receipts on
-mainnet in 1.037 s and Sepolia in 0.508 s, one HTTP receipt request each and no page
-errors. The lookup starts alongside WS connection, so recovery does not wait for
-the handshake. These are read-only checks of already-confirmed hashes, not fresh
-transaction inclusion measurements or proof of an end-to-end speed advantage.
-
-## Event-driven note maturity, 2026-09-07
-
-The remaining two-second polling loop in `Transactions.execute` is replaced by
-`starknet_subscribeNewHeads`. Headers supply block numbers directly. One catch-up
-read after subscription acknowledgement covers a head missed while connecting;
-an earlier notification takes precedence over that read. Slow discovery checks
-coalesce arriving heads instead of running concurrently. Reconnection is bounded;
-errors and a five-minute deadline close the socket. The existing note maturity
-requirement and pinned proving block are unchanged.
-
-All 18 demo tests pass, including early heads, a late catch-up during slow
-discovery, reconnection, timeout without polling and subscription rejection.
-A read-only live check on each configured network observed the initial block
-and the next head with one HTTP block-number read and two checks: mainnet
-14493815 → 14493816, Sepolia 14682532 → 14682533. These checks prove transport
-operation, not funded transaction latency or a discovery speed advantage.
-
-Demo commit `279fb65` passed the complete CI and fork-delta check and is deployed
-using the isolated npm-package consumer build. All five public build files match
-local SHA-256 digests; the entry bundle is `index-Dj_80CHH.js` (122.20 kB gzip).
-Headless Chrome under the deployed CSP also received subsequent heads on both
-networks with one catch-up read each and no page errors. The prior demo is backed
-up at `/root/strk20-deploy-20260907-heads/demo-before.tar.gz`. Backend services and
-wallet data were not changed. A newly submitted funded transaction is still
-needed to quantify the end-to-end improvement.
-
-## Startup verification and visible progress, 2026-09-07
-
-Cold initialization now downloads, verifies and saves state before `ready`
-resolves. A valid trusted cache restores locally without checkpoint RPCs.
-The UI shows actual startup stages and completed/total public data files.
-The synchronous WASM verification stage has no invented elapsed-time percentage.
-A failed initialization leaves the initialization action available for retry.
-
-Validation: 12 SDK/WASM tests and 18 demo tests passed. Cold-start tests require
-a verified checkpoint and saved cache before the first account operation; an
-invalid proof rejects startup without saving state or emitting readiness.
-The SDK archive was installed outside the repository, where real Node/WASM
-verification, offline restore, TypeScript and the production demo build passed.
-The previous HEAD's failed CI run 34094681835 passed on rerun; that rerun covers
-`4bb6261`, not these uncommitted startup changes.
-
-The static demo was deployed from the isolated archive consumer build; entry
-`index-DvnG8D2v.js`, worker `worker-entry-Di5hbhB4.js`. All five public files
-matched local SHA-256 checksums. Previous static files and the source patch are
-backed up in `/root/strk20-deploy-20260907-085648-startup/`. Backend containers
-and wallet data were not changed. The public npm 0.1.0 package was not republished.
-
-A separate local-origin Chrome run on Sepolia completed cold initialization at
-block 14686324 in 194.30 s before enabling wallet creation. The UI was observed
-at cache and state-verification stages. Reload restored the same checkpoint in
-3.00 s, without the download or verification stages. The updated hosted mainnet demo restored
-the existing wallet in 11.36 s and its explicit discovery step took 28.90 s,
-advancing to withdrawal with 0.01 STRK private balance. These are individual UI
-observations while other browser work was active, not isolated speed benchmarks.
-Latency optimization and span-attribution changes were deferred by the user;
-moving initialization does not establish a computational speed improvement.
-
-
-Warm-start follow-up, after the author prioritized a continuous video take:
-two sequential reloads of the existing mainnet wallet at the public demo restored
-without feed-download or checkpoint-verification startup stages. Values below
-come from the expanded Activity UI; the cache and wallet were preserved.
-
-| UI measurement | Reload 1 | Reload 2 |
-|---|---:|---:|
-| Restore wallet and discovery | 3.12 s | 2.86 s |
-| Read local cache | 0.25 s | 0.29 s |
-| Restore verified state | 2.36 s | 2.12 s |
-| Discover notes | 0.14 s | 0.15 s |
-| Navigation to restored discovery result | 5.26 s | 4.75 s |
-| Subsequent public balance check | 0.18 s | 0.43 s |
-
-The earlier 11.36 s restore included 8.96 s in `Restore verified state` and
-1.01 s in `Read local cache`; it was not a repeated cold verification. The new
-observations establish a warm path of seconds in this browser, not a latency
-bound across devices. No additional runtime change was needed for this follow-up.
-Initial cache creation still takes longer and must complete before the planned
-unedited recording. The wallet currently has zero private balance after withdrawal;
-a demonstration of an unspent note requires preparing one before recording.
-
-## Funded mainnet cycle completed, 2026-09-07
-
-The user submitted the pending 0.01 STRK withdrawal from the existing demo
-wallet back to its own public address. The mainnet lifecycle using our local
-provider is now complete, across the September 6 and 7 builds; this was not one
-uninterrupted video take.
-
-| Action | Block | Receipt |
-|---|---:|---|
-| Shield | 14459407 | [SUCCEEDED](https://voyager.online/tx/0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59) |
-| Private transfer | 14459528 | [SUCCEEDED](https://voyager.online/tx/0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3) |
-| Withdrawal | 14498615 | [SUCCEEDED](https://voyager.online/tx/0x69ea91064cb35315d311493cac956439bf3e0bbe798c95248c7cc437802ef1f) |
-
-Shield and transfer receipts were rechecked through PublicNode and reported
-ACCEPTED_ON_L1, with three and two pool events respectively. The withdrawal
-receipt independently agreed through PublicNode and Lava: SUCCEEDED,
-ACCEPTED_ON_L2, block 14498615, two pool events. The shell's Python HTTP client
-received 403 from both endpoints; Node fetch succeeded against both.
-
-The first withdrawal attempt stopped before submission with a fee-preflight
-message requiring up to 11.04842 public STRK; its UI elapsed time was 9.78 s.
-The next attempt had a saved hash and succeeded on chain. Its UI reported 71.60 s,
-including 61.08 s waiting for confirmation, then displayed
-`Status subscription failed: connection timeout exceeded`.
-
-Resume checked the existing hash, recorded the accepted receipt and cleared
-pending state in 0.40 s, with no new signature or broadcast. Explicit local
-discovery then took 4.40 s overall (local comparison row 1.83 s, one attempt,
-block 14498727). It showed private balance 0.00000 STRK, public balance
-9.79821 STRK and `The flow is complete`. Official comparison was disabled.
-These overlapping UI timings are observations, not additive stage measurements.
-
-The confirmation fix adds exactly one receipt catch-up on a terminal subscription
-error, exhausted reconnects or overall timeout. It waits for an in-flight read,
-validates the same hash, accepted block and execution status, and imposes a
-15-second catch-up deadline. A failed catch-up retains the resumable transaction.
-There is no periodic receipt polling or resend. Tests cover the observed timeout,
-an invalid hash, a still-pending receipt, an in-flight initial read and a stalled
-final read. This fix follows the funded run; it has not been timed on a new send.
-
-All 23 demo tests passed, including the five new catch-up regression cases. The
-isolated package-consumer build passed TypeScript and Vite, then its static files
-were deployed with entry `index-CIUMHzjB.js`. All five public asset checksums matched
-the build. Previous files and the source patch are preserved at
-`/root/strk20-deploy-20260907-093532-receipt-recovery/`. No backend restart or wallet
-mutation was part of deployment. Source, pitch and metadata edits remain local;
-they have not been committed or pushed, and npm 0.1.0 has not been republished.
-
-## Deferred
-
-AEAD after the main implementation, Ethereum-finalized checkpoint selection,
-WebSocket comparison, PIR research, custom recoverable accounts and automatic
-recovery authorizations. None is represented by a stub mode in this demo.
-
-## Non-video submission recheck, 2026-09-07
-
-- The published mainnet demo reproduced `TRANSPORT: HTTP 410` on discovery.
-  Lava's response explicitly said the endpoint was discontinued. The demo,
-  SDK defaults, native/compose defaults and maintained mainnet example now use
-  Cartridge for mainnet proofs. Header selection remains on the configured
-  independent RPC; the verifier and its trust checks did not change.
-- Cartridge served proofs at the observed head and head−5, refused head−100,
-  and returned the pool's genesis-block header. Browser CORS preflight and POST
-  with the demo Origin succeeded. This is a recent-proof capability, not an
-  archive-proof guarantee.
-- Fresh Node/WASM initialization verified mainnet block 14502871 in 43.520 s
-  and Sepolia block 14691755 in 10.447 s. Restoring those newly created local
-  caches took 366 ms and 122 ms respectively. No account keys were used in
-  these state-only checks. These Node timings are not browser benchmarks.
-- The updated hosted browser restored its existing mainnet wallet in 3.48 s;
-  explicit discovery completed in 4.14 s and returned to `The flow is complete`
-  with zero private balance. The HTTP 410 error no longer occurred in that check.
-- Both public health endpoints reported OK with decoding OK and no latched root
-  mismatch. HTTPS SSE delivered three successive heads with full payloads on
-  each network. Snapshot and latest epoch URLs returned 200 with immutable cache
-  headers; epochs had strong ETags. All five demo assets matched the local build.
-  One Python TLS connection timed out during asset inspection; the complete
-  subsequent Node fetch/hash pass succeeded, as did the browser navigation.
-- All seven hashes in local `strk20.json` returned SUCCEEDED with pool events.
-  Six were ACCEPTED_ON_L1; withdrawal was ACCEPTED_ON_L2 at this check.
-  Hub still recognized its earlier four hashes, with demo/mainnet true and video false.
-- 12 SDK tests, 23 demo tests, typechecking, isolated archive installation and
-  its two real Node/WASM tests plus Vite production build passed. The two Rust
-  network-profile tests and the previously flaky SSE-disconnect convergence test
-  also passed. GitHub CI is green for 4bb6261, not the current uncommitted edits.
-- The main demo path already uses new-head/status WS and full-payload SSE.
-  Remaining one-second timers in the SDK reconnect an interrupted SSE stream;
-  comparison retries cover reference/transport failures without a readiness API.
-  The native CLI retains polling compatibility. None is a periodic wait on the
-  successful browser transaction path; removing recovery timers would not make
-  block production or proving faster.
-
-Release remains outstanding: commit/push the reviewed changes and metadata,
-check CI on that commit, and publish the prepared 0.1.1 archive. The npm login
-preflight returned E401. Video and its URL remain separate user-owned work.
+# Demo workflow
+
+The [hosted demo](https://strk20.nullref.cc/demo/) and
+[`ts/demo`](../../ts/demo) run a real software-wallet flow on Mainnet or Sepolia.
+The default build uses public feeds and RPCs, with the local provider supplying
+discovery results to the official transaction builder.
+
+## Run locally
+
+Follow the root README's [source build](../../README.md#build-from-source), then:
+
+```sh
+npm --prefix ts run dev
+```
+
+Endpoint configuration and static hosting are covered in
+[Hosting](../ops/hosting.md#demo-and-sdk-builds). The page has no RPC settings form.
+
+## Wallet and transaction cycle
+
+1. Select the network and wait for discovery initialization. First startup
+   downloads and verifies pool state before readiness; a valid local cache
+   restores directly. The page shows actual stages and downloaded-file counts.
+2. Create a wallet and export its backup. Signing and viewing keys are generated
+   locally and saved per network in a wallet IndexedDB database, separate from
+   the disposable discovery cache. Import the backup to recover that wallet.
+3. Fund the displayed address with STRK, including public funds for gas and pool
+   fees, then deploy the account. Funding detection reads the public token
+   balance; it is not private-note discovery. The transaction path estimates fees
+   and checks public balance before submission.
+4. Choose **Deposit STRK** to shield an amount. Registration is included when
+   required. Then choose **Discover transaction** to verify pool state and find
+   the resulting note locally.
+5. Choose **Transfer privately**. Self-transfer demonstrates spending the found
+   note and creating a new one; another recipient must be registered. The builder
+   uses local witnesses, channels and requirement checks pinned to one proving
+   block. Wait for maturity when needed, then discover the result.
+6. Choose **Withdraw STRK** to return shielded value to a public address, then
+   discover again to update spent notes and private balance.
+
+The primary action suggests the next step, and its menu allows repeated deposits,
+transfers, withdrawals or discovery. Completed actions do not lock the wallet into
+a one-time walkthrough. A pending transaction takes precedence and must be resumed
+before another send. Wallet records and pending hashes survive page reloads.
+
+The activity log shows requested operations and their transaction stages. Background
+synchronization and cache work do not create extra user-operation entries. Timing
+exports describe the selected operation; cold initialization, cached restoration,
+proof generation and confirmation are different work and should not be compared
+as interchangeable measurements.
+
+## Recovering an already submitted transaction
+
+If submission produced a hash but confirmation failed, use **Resume pending
+transaction**. Do not repeat the original action as a new send. The demo saves
+pending submission information and checks the existing hash after reload.
+
+Confirmation uses transaction-status subscriptions with receipt checks. A terminal
+subscription error, exhausted reconnects or timeout triggers one final bounded
+receipt catch-up. It checks the hash, accepted block and execution status. If the
+receipt succeeds, the demo records completion and clears the pending entry. If
+confirmation is still unavailable, pending state remains resumable. Resume does
+not sign or broadcast the transaction again. After confirmation, discover the
+transaction to update local note state.
+
+The relevant implementations are [submission recording](../../ts/demo/src/submission-signer.ts),
+[confirmation](../../ts/demo/src/confirmation.ts) and
+[transaction orchestration](../../ts/demo/src/transactions.ts).
+
+## Privacy and limitations
+
+- Local discovery keeps the viewing key in the wallet/Worker. Feed hosts still
+  see network metadata such as IP addresses and request timing.
+- **Official comparison is opt-in and discloses this wallet's viewing key to the
+  official discovery service.** It observes the same block with both providers
+  after one transaction; it does not send a second transaction. The local cache
+  and the official request's cursor conditions differ. Agreement must include
+  notes, amounts and spend witnesses before interpreting timing comparisons.
+- **Hosted proving receives proving inputs.** Keeping discovery local does not
+  make transaction construction private from the configured prover. Availability
+  and any required screening attestation depend on that service.
+- This is a browser software wallet. Keep its backup and use small amounts.
+  Clearing the discovery cache preserves wallet data; deleting the wallet's
+  browser storage without a backup can lose recovery material.
+- Cold verification can be substantial, and all synchronous engine work shares
+  one Worker. Neither a fixed startup bound nor a general speed advantage over
+  official discovery is established.
+- Verification covers state at a selected checkpoint, trusts local cache storage
+  and the configured header RPC, and does not establish every historical
+  transition or Ethereum finality. Conservative note maturity and a snapshot's
+  history floor can delay spending. See [Consumer path](consumer-path.md).
+
+## Historical transaction examples
+
+These are the selected complete cycles from September 6–7, 2026. They illustrate
+previous on-chain use of the local provider; they are not fresh acceptance runs or
+performance results for the current build. The explorer links show transactions;
+their receipts alone cannot prove which discovery provider an application used.
+
+| Action | Network | Transaction | What the example demonstrates |
+|---|---|---|---|
+| Shield | Sepolia | [Transaction](https://sepolia.voyager.online/tx/0x760b6fc6e6cefa318a53071823466163b4ba48a2aac513ccbc3a7fc5cf0e88d) | Deposit into the pool before local note discovery. |
+| Private transfer | Sepolia | [Transaction](https://sepolia.voyager.online/tx/0x48557def3325c9fc153b0e53e22fc624a51a65148d0f904b10a0d0099ed5386) | Self-transfer spends a discovered note and creates its replacement. |
+| Withdrawal | Sepolia | [Transaction](https://sepolia.voyager.online/tx/0x28d8c41ea12d5ce715e557c69945f87a0e0260f4a0210bb0d6d20e2fd845ce4) | Return to public balance completes the shield–spend–withdraw cycle. |
+| Shield | Mainnet | [Transaction](https://voyager.online/tx/0x3e09c1a8a09bf2a146bbd452fed3c48309b7124c7be4745056742ec1653bc59) | Mainnet deposit used for subsequent local discovery and spending. |
+| Private transfer | Mainnet | [Transaction](https://voyager.online/tx/0x1df98fdd1cc335d5bfa9c39b4bcc55ae4cbc02a3ce389e14e3a6dcec2d8b5a3) | Private spending with the local provider supplying builder discovery data. |
+| Withdrawal | Mainnet | [Transaction](https://voyager.online/tx/0x69ea91064cb35315d311493cac956439bf3e0bbe798c95248c7cc437802ef1f) | Completed withdrawal whose saved receipt was recovered after a confirmation failure, without resending. |

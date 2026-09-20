@@ -1,4 +1,4 @@
-//! THE acceptance e2e (spec §10.3): real binaries, real HTTP, fully offline.
+//! THE acceptance e2e: real binaries, real HTTP, fully offline.
 //! Topology: strk20-sync → recording proxy → strk20 → fixture RPC.
 //!
 //! Legs (run sequentially over one evolving fixture chain):
@@ -404,7 +404,7 @@ async fn acceptance() {
                 "keyless URL must carry no query: {}",
                 req.uri
             );
-            // §2.8.1: the allowlist is CLOSED and matched WHOLE-PATH, never by
+            // the allowlist is CLOSED and matched WHOLE-PATH, never by
             // prefix and never by a startsWith('/feed/') test — that is how the
             // property erodes the first time a new artifact turns this red.
             assert!(
@@ -414,7 +414,7 @@ async fn acceptance() {
                 e2e_tests::feed_urls::PATTERNS
             );
             // The Rust sync path is polling-only: /feed/live is in the closed
-            // set for the npm client, and must not appear here (§2.5).
+            // set for the npm client, and must not appear here.
             assert_ne!(req.uri, "/feed/live", "the sync path must not subscribe");
             urls.push(req.uri.clone());
             haystack.extend_from_slice(&req.all_bytes());

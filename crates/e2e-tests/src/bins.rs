@@ -1,6 +1,6 @@
 //! Locate, build (once) and spawn the REAL binaries — the acceptance test
-//! runs `strk20` and `strk20-sync` as separate processes over real HTTP
-//! (spec §10.3), never in-process shortcuts.
+//! runs `strk20` and `strk20-sync` as separate processes over real HTTP,
+//! never in-process shortcuts.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

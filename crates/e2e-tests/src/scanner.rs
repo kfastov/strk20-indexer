@@ -1,5 +1,5 @@
-//! Byte-encoding scanner for the mechanical no-key assertion (spec §10.3
-//! leg d): searches a byte haystack for EVERY plausible encoding of a felt —
+//! Byte-encoding scanner for the no-key assertion: searches a byte haystack
+//! for the felt encodings covered by the fixture —
 //! minimal hex, 64-padded hex (with/without 0x, both cases), decimal ASCII,
 //! raw 32-byte BE, raw 32-byte LE, and base64 of the BE bytes.
 //!

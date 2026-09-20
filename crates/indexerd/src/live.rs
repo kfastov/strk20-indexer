@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// §2.2 connect padding: defeats buffering middleboxes that hold a response
+/// SSE framing connect padding: defeats buffering middleboxes that hold a response
 /// until some minimum number of bytes has arrived.
 pub const PADDING_BYTES: usize = 2048;
-/// §2.2 `retry:` field, milliseconds.
+/// SSE framing `retry:` field, milliseconds.
 pub const RETRY_MS: u64 = 15_000;
-/// §2.2 keepalive cadence, and §2.5's watchdog budget on the client side.
+/// SSE framing keepalive cadence, and the client reconnect policy's watchdog budget on the client side.
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
 /// Oversized artifacts use HTTP catch-up; SSE queues stay bounded.
 const MAX_INLINE: usize = 2 * 1024 * 1024;
