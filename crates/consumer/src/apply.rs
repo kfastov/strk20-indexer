@@ -283,7 +283,7 @@ async fn apply_feed_once<S: ConsumerStore>(
 }
 
 /// Check the snapshot file and fold its slots. Independent state verification
-/// runs after applying the feed up to the selected checkpoint.
+/// follows feed application when enabled by the host.
 async fn cold_start_from_snapshot<S: ConsumerStore>(
     store: &S,
     transport: &dyn FeedTransport,
@@ -349,7 +349,7 @@ async fn cold_start_from_snapshot<S: ConsumerStore>(
 }
 
 /// Check a compressed snapshot file, with
-/// Decompression delegated to the host (see [`FeedTransport::decompress`]) so
+/// decompression delegated to the host (see [`FeedTransport::decompress`]) so
 /// Block B does not link zstd.
 ///
 /// The ladder itself is NOT reimplemented here. This function owns exactly the

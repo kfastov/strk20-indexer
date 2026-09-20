@@ -1102,8 +1102,7 @@ impl<'a> Cutter<'a> {
             },
             latest_epoch: rows.last().map(|r| r.idx),
             epochs,
-            // The newest retained snapshot; `null` until the snapshot reachability gate has
-            // been met once.
+            // The newest retained snapshot, if any.
             snapshot: self.db.snapshot_rows()?.pop(),
         };
         atomic_write(

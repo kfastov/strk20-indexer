@@ -95,8 +95,8 @@ pub struct FaultSpec {
     pub range_budget_tokens: usize,
     /// A proof whose `global_roots.block_hash` is not the block's hash while
     /// its `storage_root` is honest: the anonymous, load-balanced proof pool
-    /// answering for something other than the block we asked about. Only the
-    /// Proof-to-header binding catches it.
+    /// answering for something other than the block we asked about. Only
+    /// proof-to-header binding catches it.
     pub lying_proof: bool,
     /// `getBlockWithTxHashes("l1_accepted")` is answered with the LATEST block
     /// instead of the L1-accepted one (#21). This is LIVE-8 on the finality

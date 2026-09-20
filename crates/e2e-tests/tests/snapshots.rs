@@ -806,7 +806,7 @@ async fn s2_snapshot_cold_start_equals_full_replay() {
     }
 }
 
-/// The four keys that MUST differ between the two paths. The
+/// Fields excluded from report equality. The
 /// comparison deletes exactly these and compares everything else, so a field
 /// added to the report later lands in the compared set by default and cannot
 /// silently fall out of the equality.
@@ -861,10 +861,8 @@ fn assert_grades(replay: &Value, snapshot: &Value) {
     assert_eq!(
         snapshot["verified"].as_str(),
         Some("server-asserted"),
-        "with no anchor RPC of the client's own, the grade is \
-         server-asserted — reachability proves the snapshot is consistent with an \
-         anchor the SERVER published, and an anchor is a server assertion until the \
-         client checks it against its own RPC (ring 6): {snapshot}"
+        "without --verify-anchor, the client checks feed consistency but does not \
+         independently verify chain state; the grade is server-asserted: {snapshot}"
     );
 }
 
@@ -923,10 +921,9 @@ fn assert_capture_allowed(capture: &[e2e_tests::proxy::Captured], label: &str) -
 
 /// S3 — reachability: fold the snapshot, apply what the feed carries
 /// above the basis, recompute the storage root at an anchored block A and
-/// compare with the anchor. A match attests the snapshot AND the intervening
-/// range — which is strictly stronger than a point-proof at the basis, and is
-/// the only grounding obtainable, since no provider answers a proof for a
-/// block thousands behind head.
+/// compare with the anchor. This checks state at the anchored block, not
+/// every intervening transition. The fixture's narrow proof window makes
+/// the basis-block proof unavailable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_reachability_reproduces_the_anchor_root_across_the_snapshot_seam() {
     ensure_built();
@@ -1024,9 +1021,8 @@ async fn s3_reachability_reproduces_the_anchor_root_across_the_snapshot_seam() {
     assert_eq!(
         grounded["verified"].as_str(),
         Some("rpc-verified"),
-        "an anchor is a server assertion until the client checks it against an \
-         RPC it trusts. Recent anchors are exactly what the ~1024-block window serves, \
-         so with --verify-anchor the grade rises to \"anchored\": {grounded}"
+        "with --verify-anchor, the client verifies checkpoint state against its \
+         trusted RPC and reports rpc-verified: {grounded}"
     );
     assert_reports_equal(&report, &grounded, "ring 6 grounding");
 }
@@ -1379,8 +1375,8 @@ async fn serve_feed_dir(root: PathBuf) -> std::net::SocketAddr {
 }
 
 /// S8 — publish the basis-block sidecar after transient proof refusals.
-/// The publisher's sidecar is an audit artifact. The client uses its own
-/// checkpoint verification rather than trusting that sidecar's contents.
+/// The publisher's sidecar is an audit artifact. Native discovery without
+/// --verify-anchor ignores it and reports server-asserted state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s8_basis_sidecar_is_published_but_is_not_a_client_trust_root() {
     ensure_built();
@@ -1444,9 +1440,7 @@ async fn s8_basis_sidecar_is_published_but_is_not_a_client_trust_root() {
     assert_eq!(
         snapshot["grounding"].as_str(),
         Some("basis-anchor"),
-        "the manifest is the only published record of HOW this snapshot is \
-         grounded, and a client needs it to know whether the reachability walk is its \
-         primary check or a fallback: {snapshot}"
+        "the manifest must record that publication used a basis-block proof: {snapshot}"
     );
     assert_eq!(
         snapshot["storage_root"].as_str(),
@@ -1457,12 +1451,9 @@ async fn s8_basis_sidecar_is_published_but_is_not_a_client_trust_root() {
     let sidecar_path = feed_dir(dir.path()).join(SNAPSHOT_ANCHOR_FILE);
     assert!(
         sidecar_path.exists(),
-        "the full stored getStorageProof response for the basis block is published \
-         as {SNAPSHOT_ANCHOR_FILE}, so the manifest's anchor can be checked against the \
-         proof it claims to come from (and, through the snapshot's own root, against the \
-         slot set) rather than taken on the manifest's word. It is not offline-strong \
-         against the publisher itself — that is reachability's job, and ring 6's, for \
-         which this file is the audit material."
+        "the stored getStorageProof response for the basis block must be published \
+         as {SNAPSHOT_ANCHOR_FILE} for auditing; it does not independently \
+         authenticate publisher-supplied state"
     );
     let sidecar: Value = serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap())
         .expect("the anchor sidecar is JSON");
