@@ -109,7 +109,7 @@ Members and dependency edges (nothing depends on `strk20-indexerd`; `strk20-clie
 
 **`crates/e2e-tests`** — acceptance harness: fixture RPC server, recording reverse proxy, oracle runner, spawns the REAL binaries. Deps: strk20-feed, discovery-core (MockBackend oracle), tokio, axum, hyper, reqwest, tempfile 3.27.0, trybuild (for the compile-fail suite, §10.1).
 
-**`vendor/fixtures/`** — vendored verbatim from upstream at rev 74841caf with `PROVENANCE.md` (tag, rev, per-file sha256; Apache-2.0 notice): `devnet-state.json` (48 slots, alice `0x34ba56f9…`/key `0xa11ce`, bob `0x2939f2dc…`/key `0xb0b`, pool `0x66292db2…`, block 46), `cairo-reference-data.json` (crypto vectors), `devnet-dump.json.gz` + metadata (reference 11-HTTP-test fixtures), plus a verbatim copy of upstream's `#[cfg(test)]`-private `src/test_fixtures.rs` loader (all referenced types are pub — copy compiles).
+**`vendor/fixtures/`** — vendored verbatim from upstream at rev 74841caf with `PROVENANCE.md` (tag, rev, per-file sha256; Apache-2.0 notice): `devnet-state.json` (48 slots, alice `0x34ba56f9…`/key `0xa11ce`, bob `0x2939f2dc…`/key `0xb0b`, pool `0x66292db2…`, block 46), `cairo-reference-data.json` (crypto vectors), `devnet-dump.json.gz` + metadata (reference 11-HTTP-test fixtures).
 
 Roadmap members (NOT in branch, seams pre-cut): `crates/client-wasm`, `ts/packages/discovery-provider` (§12.1).
 

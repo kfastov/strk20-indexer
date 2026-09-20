@@ -16,11 +16,6 @@ had to be modified would stop being evidence about upstream.
 |---|---|---|
 | `cairo-reference-data.json` | `crates/discovery-core/tests/fixtures/cairo-reference-data.json` | `9da197c801ab57aa8f46212e87b58cfc78247c9e79485cf0840859cc52310437` |
 | `devnet-state.json` | `crates/discovery-core/tests/fixtures/devnet-state.json` | `ea69c284dc369aca3cb8e23e8b339a981221bb5c07e2edca6992b1b9a5626682` |
-| `test_fixtures.rs.ref` | `crates/discovery-core/src/test_fixtures.rs` | `8f6aefb015102e5534cd88455b3ec28a27d566e5cd56f0a27e17bc2a40f51925` |
-
-`test_fixtures.rs.ref` carries the `.ref` suffix so `cargo` never compiles it.
-It is kept as the reference loader our own fixture code is checked against, not
-as a module.
 
 ## What each one is for
 
@@ -37,7 +32,7 @@ as a module.
 From a clone of upstream checked out at the pinned rev:
 
 ```sh
-shasum -a 256 fixtures/upstream/*.json fixtures/upstream/*.ref
+shasum -a 256 fixtures/upstream/*.json
 cmp fixtures/upstream/devnet-state.json \
     <upstream>/crates/discovery-core/tests/fixtures/devnet-state.json
 ```
