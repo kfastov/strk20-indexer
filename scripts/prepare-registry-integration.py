@@ -19,7 +19,7 @@ def main():
         for directory in ["ts", "examples/mainnet"]:
             lock = json.loads((ROOT / directory / "package-lock.json").read_text())
             upstream = lock["packages"]["node_modules/" + PACKAGE]
-            assert upstream["version"] == VERSION, upstream
+            assert upstream.get("version") == VERSION, upstream
             assert upstream["resolved"].startswith("https://npm.pkg.github.com/"), upstream
             assert upstream["integrity"].startswith("sha512-"), upstream
             assert not upstream.get("link"), upstream

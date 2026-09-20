@@ -58,11 +58,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
         run: |
-          npm --prefix ts install --package-lock-only --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/resolve-cache"
+          npm --prefix ts install @starkware-libs/starknet-privacy-sdk@0.14.3-rc.5 --workspace strk20-discovery --save-exact --package-lock-only --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/resolve-cache"
           npm --prefix examples/mainnet install --package-lock-only --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/resolve-cache"
-          python3 scripts/prepare-registry-integration.py --verify-locks
           cp ts/package-lock.json registry-access-results/typescript-package-lock.json
           cp examples/mainnet/package-lock.json registry-access-results/examples-package-lock.json
+          python3 scripts/prepare-registry-integration.py --verify-locks
           npm pack @starkware-libs/starknet-privacy-sdk@0.14.3-rc.5 --ignore-scripts --pack-destination registry-access-results --json > registry-access-results/upstream-pack.json
       - name: Install workspaces and examples with a fresh cache
         env:
