@@ -1,4 +1,4 @@
-//! Minimal Starknet JSON-RPC client for the five ingest methods (spec §5.3).
+//! Minimal Starknet JSON-RPC client for the five ingest methods.
 //! Plain reqwest + our own serde structs; no starknet-providers. Primary /
 //! fallback endpoints with consecutive-failure failover and 429 backoff.
 
@@ -18,30 +18,12 @@ const TRANSPORT_ATTEMPTS: usize = 8;
 /// on the next ingest cycle anyway, so burning the full 8-attempt exponential
 /// budget on a dead endpoint only delays reaching a live one.
 const PROOF_TRANSPORT_ATTEMPTS: usize = 2;
-/// Provider-capability answers (pruned history) retried in place before a call
-/// gives up. Lava is an aggregator: the same request is routed to an archive
-/// or a pruned backend nondeterministically, so the retry is on the SAME
-/// endpoint and must be bounded (docs/research/live/live-run-findings.md
-/// LIVE-1).
+/// Retry pruned-history answers within a bound: a load-balanced endpoint can
+/// route successive requests to backends with different retained history.
 const CAPABILITY_RETRIES: usize = 5;
-/// Storage-proof refusals (error 42) absorbed AGAINST THE SAME ENDPOINT before
-/// that endpoint is given up on (consumer-path.md §12 B1). Error 42 names the
-/// backend that happened to answer, not the block: lava routes each call to a
-/// different backend and only some run archive tries, so a deep proof comes
-/// back after a handful of attempts (measured: 2 successes in 10 attempts at
-/// 2.89M blocks behind head, back to genesis — docs/research/live/proof-window.md
-/// §1). The earlier "~1024-block window" was a bisection over that
-/// nondeterministic predicate and is retracted. Bounded, because an endpoint
-/// that implements no proofs at any height (publicnode) must still terminate.
-///
-/// SIZED AGAINST THE MEASUREMENT, not picked round: the worst observed success
-/// rate is ~0.2 per attempt (2 in 10 at 2.89M behind head), so a budget of n
-/// answers UNAVAILABLE to an obtainable proof with probability 0.8^n — 17% at
-/// the 8 this started at, which is one deep proof in six wrongly given up on.
-/// At 16 it is 2.8%, and no caller depends on a single group of attempts: the
-/// head-side probe re-runs every ingest cycle and the snapshot basis probe
-/// spends `BASIS_PROBE_ATTEMPTS` cycles (cutter.rs), so the residual is that
-/// figure raised to the number of cycles.
+/// Bounded storage-proof refusal retries on one endpoint before trying another.
+/// A refusal is not a mirror mismatch. Providers without proof support must
+/// terminate rather than retry indefinitely.
 const PROOF_RETRIES: usize = 16;
 /// Pause between proof retries. The routing that decides the answer is
 /// per-call, so this exists to avoid hammering, not to wait for anything.
@@ -69,20 +51,20 @@ pub fn is_pruned_history(e: &anyhow::Error) -> bool {
 /// proof for the requested block (code 42), because it runs no archive trie or
 /// implements proofs nowhere at all. Never evidence about the mirror, and —
 /// since an aggregator routes the next call elsewhere — never evidence about
-/// the block either: `get_storage_proof` answers it with a retry (§12 B1).
+/// the block either: `get_storage_proof` answers it with a retry.
 pub fn is_proof_unavailable(e: &anyhow::Error) -> bool {
     let msg = error_text(e);
     msg.contains("too far in the past")
         || (msg.contains("starknet_getStorageProof") && msg.contains("\"code\":42"))
 }
 
-/// Marker carried by a §12 B2 chain-binding failure: the endpoint ANSWERED
+/// Marker carried by a proof-to-header binding failure: the endpoint ANSWERED
 /// with a proof that is not about the block we asked for. Deliberately not
 /// `is_proof_unavailable` — filing a lie under "capability gap" is how a
 /// load-balanced pool would get to choose our answer.
 pub const PROOF_NOT_BOUND: &str = "PROOF NOT BOUND TO BLOCK";
 
-/// A proof that could not be bound to the block it names (§12 B2).
+/// A proof that could not be bound to the block it names.
 pub fn is_proof_unbound(e: &anyhow::Error) -> bool {
     error_text(e).contains(PROOF_NOT_BOUND)
 }
@@ -502,7 +484,7 @@ impl RpcClient {
             [strk20_feed::felt_hex(contract)],
             keys_param
         ]);
-        // §12 B1: RETRY, don't fail over. Error 42 means "this backend
+        // RETRY, don't fail over. Error 42 means "this backend
         // cannot", not "this block cannot", so the first response to a refusal
         // is another attempt against the SAME endpoint — bounded by
         // PROOF_RETRIES. Only once that budget is spent is the next endpoint

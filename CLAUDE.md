@@ -9,10 +9,13 @@ into a hash-chained public feed; the client folds that feed locally and runs the
 
 ```sh
 cargo build --workspace --locked
-cargo test --workspace
-python3 scripts/check-invariants.py
-cd ts && npm ci && npm run build
+cargo test --workspace --locked
 ```
+
+For WASM, SDK and demo builds, follow [Build from source](README.md#build-from-source)
+in order. For invariant checks, read [Invariants](docs/ops/invariants.md), including
+the secret scanner's input scope; run the full scanner in a clean CI environment
+when local key access is prohibited.
 
 ## Hard rules
 
@@ -34,14 +37,15 @@ cd ts && npm ci && npm run build
 
 ## verify-root has three outcomes, not two
 
-- **MATCH**: recomputed storage root equals the proof; the server writes an anchor.
-- **MISMATCH**: the mirror is missing writes; `verify_root_failed` latches, publishing stops.
-- **UNAVAILABLE**: no endpoint served a proof; nothing latches, epochs are cut unverified.
+- **MATCH**: the reconstructed root agrees at the checked block; the server records an anchor.
+- **MISMATCH**: `verify_root_failed` latches and the current epoch cut aborts; live-tail publication can continue.
+- **UNAVAILABLE**: proof acquisition could not verify state; it does not change the latch and permits unverified epoch cuts.
 
-Never write "refuses to publish if it disagrees" without the UNAVAILABLE case
-(`crates/indexerd/src/cutter.rs`). The hole it catches: `getEvents` cannot name a block that
-writes pool storage and emits no event (`docs/spec/sound-ingest.md`); repair is `rescan` then
-`recut-epochs`.
+For ingestion, publication or recovery work, read
+[Architecture](docs/spec/architecture.md#verification-and-publication) and check
+`crates/indexerd/src/cutter.rs`. A successful check covers state at one block, not
+all historical writes. Operator repair instructions are in
+[Hosting](docs/ops/hosting.md#repairing-a-mirror).
 
 ## Agent skills
 

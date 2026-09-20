@@ -1,4 +1,4 @@
-//! FeedStore (spec §7.3): the client's verified local mirror in sync.db.
+//! FeedStore: the client's verified local mirror in sync.db.
 //!
 //! This is the **SQLite host** for Block B and nothing else. Everything that
 //! decides *what* to fold — the epoch hash chain, the snapshot verification
@@ -130,7 +130,7 @@ impl FeedStore {
         })
     }
 
-    /// Lowest block for which this mirror holds EVENTS (§1.1). 0 for a fully
+    /// Lowest block for which this mirror holds EVENTS. 0 for a fully
     /// epoch-replayed mirror.
     pub fn history_floor(&self) -> Result<u64> {
         history_floor(self)
@@ -331,7 +331,7 @@ impl ConsumerStore for FeedStore {
         Ok(())
     }
 
-    /// Fold a verified snapshot into the mirror (§1.7). No new tables: slot
+    /// Fold a verified snapshot into the mirror. No new tables: slot
     /// rows land in `storage_log` at their REAL write blocks, so the shipped
     /// as-of query serves them and `read_slots_with_block` returns the exact
     /// `last_update_block` a note's `block_number` is derived from.
@@ -495,7 +495,7 @@ impl ConsumerStore for FeedStore {
 pub struct ClientView {
     conn: Arc<Mutex<Connection>>,
     bound: u64,
-    /// Lowest block for which the `events` table can answer (§1.1). Below it
+    /// Lowest block for which the `events` table can answer. Below it
     /// the table is not empty-because-nothing-happened, it is empty because a
     /// snapshot carries slots and no events.
     history_floor: u64,
@@ -698,7 +698,7 @@ mod tests {
         (dir, store)
     }
 
-    /// §1.1 / R-L: below the floor the `events` table is empty because a
+    /// Below the history floor the `events` table is empty because a
     /// snapshot carries no events, not because nothing happened. Answering
     /// such a range with a truncated set and a success status is the masked
     /// incompleteness R-L exists to forbid — before this guard, a query over
@@ -753,7 +753,7 @@ mod tests {
             .is_ok());
     }
 
-    /// §1.5.2 guard rail: a view bound below the basis is refused rather than
+    /// Snapshot basis guard: a view bound below the basis is refused rather than
     /// answered with zeros. Engine bounds are always `last_epoch_to` or `head`,
     /// both at or above the basis — the rule is here so a future refactor
     /// cannot introduce a silent zero-read.

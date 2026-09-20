@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * §4.10's mechanical enforcement.
+ * Check that network access passes through net.ts for request observability.
  *
  * TypeScript has no type-system move that expresses "this module does no IO".
  * A scan over one filename is the checkable substitute, and it is what makes

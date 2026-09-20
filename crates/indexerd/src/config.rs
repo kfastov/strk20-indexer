@@ -10,47 +10,19 @@ pub const MAINNET_GENESIS_BLOCK: u64 = 8_978_970;
 pub const MAINNET_EPOCH_SIZE: u64 = 10_000;
 pub const MAINNET_RPC_PRIMARY: &str = "https://api.cartridge.gg/x/starknet/mainnet";
 pub const MAINNET_RPC_FALLBACK: &str = "https://starknet.publicnode.com";
-/// Verified on-chain (git history: docs/research/q1-version-pin.md, removed
-/// 2026-09-02).
+/// Supported Mainnet pool classes.
 pub const MAINNET_CLASS_V1: &str =
     "0x30b8c540cf04d8ef0f4db2a9098d9cc0e35e83af1cb3325f5a4f40144b4b30b";
 pub const MAINNET_CLASS_V2: &str =
     "0x67dddd89d80fedadc06b6f160798f94800a4a70164e5a24301cd0d6076b554d";
 
-/// Sepolia profile — every value verified on-chain, see
-/// docs/research/live/sepolia-abi-compat.md. The pool deploys at 8_271_125
-/// (`CONTRACT_NOT_FOUND` at 8_271_124) and has been upgraded five times; all
-/// six classes are field-level compatible with our decoder for every event we
-/// consume, so none of them may degrade decoding.
-///
-/// The sixth class arrived at block 14_339_893 *during* a live run
-/// (docs/research/live/live-run-findings.md session 6). Its ABI is identical
-/// for all eight consumed events — only an admin event changed
-/// (`OpenNoteDepositorBlockSet` → `OpenNoteScreeningPolicySet`) — and its
-/// storage layout was verified by discovering a note written under it
-/// (session 7), which no ABI diff could establish.
+/// Sepolia pool identity; supported event-compatible classes are listed below.
 pub const SEPOLIA_POOL: &str =
     "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
 pub const SEPOLIA_GENESIS_BLOCK: u64 = 8_271_125;
-/// Endpoint capability is part of the model (§11.5), and on Sepolia the two
-/// endpoints this profile used to name could not serve a storage proof at ANY
-/// height, so no anchor was ever captured, `verify-root` was permanently
-/// UNAVAILABLE and no snapshot could clear the §11.3 publication gate.
-/// Measured 2026-09-01, retried per the §12 method note (never a single call):
-///
-/// | endpoint | `starknet_getStorageProof` |
-/// |---|---|
-/// | `starknet-sepolia-rpc.publicnode.com` | code 42 at head−1 … head−16000, 5/5 attempts — implements no proofs at any height (LIVE-6) |
-/// | `rpc.starknet-testnet.lava.build` | dead: `No pairings available`, not a JSON-RPC answer at all |
-/// | `starknet-sepolia.drpc.org` | `-32601 method is not available` |
-/// | `starknet-sepolia.public.blastapi.io` | discontinued |
-/// | `api.cartridge.gg/x/starknet/sepolia` | **serves proofs**, deterministic window: OK at head−16, code 42 at head−20 |
-///
-/// So the primary is the one endpoint that can answer the request kind the
-/// publication gate depends on. Its window is ~16 blocks (~4 min at Sepolia's
-/// pace), which is exactly where `verify_root_at_target` aims: the live
-/// frontier. publicnode stays as the transport fallback — it serves blocks and
-/// events fine, and a proof refusal never moves the active endpoint (§12 B4).
+/// RPC defaults used by the Sepolia profile and Compose. At least one endpoint
+/// must support storage proofs for verification; a transport fallback alone
+/// cannot establish proof availability.
 pub const SEPOLIA_RPC_PRIMARY: &str = "https://api.cartridge.gg/x/starknet/sepolia";
 pub const SEPOLIA_RPC_FALLBACK: &str = "https://starknet-sepolia-rpc.publicnode.com";
 pub const SEPOLIA_CLASSES: [&str; 6] = [
@@ -101,7 +73,7 @@ pub struct ChainConfig {
     pub genesis_block: u64,
     pub epoch_size: u64,
     /// class hash -> decoder version name; an on-chain class outside this map
-    /// switches typed decoding into degraded mode (spec §5.7).
+    /// switches typed decoding into degraded mode.
     pub decoder_map: HashMap<Felt, String>,
 }
 
@@ -138,7 +110,7 @@ impl ChainConfig {
         block / self.epoch_size
     }
 
-    /// Inclusive block range of epoch `idx` (absolute alignment, spec §4.2).
+    /// Inclusive block range of epoch `idx` (absolute alignment).
     pub fn epoch_range(&self, idx: u64) -> (u64, u64) {
         (idx * self.epoch_size, (idx + 1) * self.epoch_size - 1)
     }
@@ -167,9 +139,7 @@ mod tests {
         assert_eq!(Network::Mainnet.rpc_fallback(), MAINNET_RPC_FALLBACK);
     }
 
-    /// Every class the Sepolia pool has ever run must decode: all five are
-    /// field-level compatible with our decoder for every event we consume
-    /// (docs/research/live/sepolia-abi-compat.md).
+    /// All configured Sepolia classes must be present in the decoder map.
     #[test]
     fn sepolia_profile_covers_the_whole_verified_class_history() {
         let cfg = Network::Sepolia.profile();

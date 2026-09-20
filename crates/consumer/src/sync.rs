@@ -1,8 +1,8 @@
-//! Sync orchestration (spec §7): apply the verified feed, then run the
+//! Sync orchestration: apply the verified feed, then run the
 //! UNMODIFIED discovery-core engine locally in two passes — a checkpoint pass
 //! bound to the L1-final epoch boundary and a live pass bound to the head.
 //! On a tail reorg the live cursor is discarded and the client resumes from
-//! the checkpoint — never from scratch (spec §7.5).
+//! the checkpoint — never from scratch.
 //!
 //! Every line here is host-independent: the store is a [`ConsumerStore`], the
 //! feed is a [`FeedTransport`], and ring 6's chain access is a
@@ -68,7 +68,7 @@ pub struct SyncReport {
     /// Lowest block for which this mirror holds EVENTS. 0 for a fully
     /// epoch-replayed mirror; `snapshot.block + 1` for a snapshot-started one,
     /// whose transaction history below the floor does not exist locally and
-    /// must never be answered with zeros (§1.1).
+    /// must never be answered with zeros.
     pub history_from: u64,
     pub snapshot_basis: Option<u64>,
     /// `rpc-verified` authenticates complete state at the selected block.
@@ -82,7 +82,7 @@ pub struct SyncReport {
 #[derive(Clone, Default)]
 pub struct SyncOptions {
     pub cold_start: ColdStart,
-    /// §1.5 ring 6. When set it RUNS and MUST PASS — there is no
+    /// Independent RPC verification. When set it RUNS and MUST PASS — there is no
     /// `verify: 'background'` equivalent.
     pub anchor_proofs: Option<Arc<dyn ProofSource>>,
 }
@@ -120,9 +120,7 @@ fn keys(kind: &str, owner: &Felt) -> CursorKeys {
 /// For a resume at a HIGHER block the completion flags are cleared and the
 /// cached totals dropped, while every progress position (last channel /
 /// subchannel / note index) is kept — the engine then re-probes only the
-/// boundary slots and discovers anything new (the "watch-set grows" property
-/// from the research; git history: docs/research/verify-discovery-trace.md §3,
-/// removed 2026-09-02).
+/// boundary slots and discovers anything new.
 pub fn reopen_cursor(cursor: &mut DiscoveryCursor) {
     cursor.channel_discovery_complete = false;
     cursor.total_n_channels = None;
@@ -252,8 +250,7 @@ pub fn register_notes<S: ConsumerStore>(
 /// client whose registry predates the spend keeps its row and reports
 /// `spent: true`. Same balances, different report — and the report is a
 /// document about the pool, not about how long this client has been running
-/// (spec §8 leg l(ii): a cold start must report the pre-basis note's
-/// `spent == true`).
+/// (a cold start must report the pre-basis note's `spent == true`).
 ///
 /// The dropped notes are recoverable without touching the engine, because the
 /// cursor it returns carries everything the scan used: the channel key per
@@ -325,9 +322,8 @@ pub fn register_scanned_notes<S: ConsumerStore>(
 /// Re-evaluate spent-state from the mirror (nullifier slot != 0 as of
 /// `block`). Returns nullifiers that flipped to spent.
 ///
-/// Semantics pinned by the live run (findings §7): a spent note's storage slot
-/// is NOT cleared, so spentness lives only in the nullifier slot. Anything
-/// inferring "unspent" from "the note slot is populated" would be wrong.
+/// A spent note's storage slot is not cleared, so spentness lives in the
+/// nullifier slot. Anything inferring "unspent" from "the note slot is populated" would be wrong.
 pub fn refresh_spent<S: ConsumerStore>(store: &S, owner: &Felt, block: u64) -> Result<Vec<Felt>> {
     let notes = store.notes(owner)?;
     let mut flipped = Vec::new();
@@ -397,12 +393,8 @@ pub fn full_resync<S: ConsumerStore>(store: &S, owner: &Felt) -> Result<()> {
 
 /// Canonical hex list from a cursor's channel keys.
 ///
-/// Upstream's cursor stores channels in a `HashMap`, so iterating it yields a
-/// different order per map instance. Emitting that order straight into the
-/// report made two runs over identical bytes produce different JSON — which
-/// the store-equality conformance leg caught, and which would have made the
-/// single golden report oracle (§0.4: one schema for the CLI, the wasm module,
-/// `serve` and npm) unpinnable. The report is a canonical document: sort.
+/// Upstream's cursor stores channels in a `HashMap`. Sort by felt value so
+/// identical discovery results produce stable JSON regardless of map order.
 fn sorted_hex<'a>(keys: impl Iterator<Item = &'a Felt>) -> Vec<String> {
     let mut felts: Vec<&Felt> = keys.collect();
     felts.sort_by_key(|f| f.to_bytes_be());
@@ -475,7 +467,7 @@ pub async fn discover_state<S: ConsumerStore>(
     let rewound_for_owner = owner_gen != generation;
     if rewound_for_owner {
         // Discard live cursors and any registry rows whose note slot is gone
-        // from the mirror; resume from the L1-final checkpoint (spec §7.5).
+        // from the mirror; resume from the L1-final checkpoint.
         store.meta_set(&in_keys.live, "")?;
         store.meta_set(&out_keys.live, "")?;
         let pruned = prune_missing_notes(store, &owner, outcome.head)?;

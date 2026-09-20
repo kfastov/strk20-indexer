@@ -25,7 +25,7 @@ discovery-core = { git = "https://github.com/starkware-libs/starknet-privacy.git
 # Type identity with the engine (fork EmittedEvent, BlockId, StorageResult) — rev 7caedfef85a4d748f8e9e5a159c87c31b6fe9d71
 starknet-core = { package = "starknet-rust-core", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
 starknet-crypto = { package = "starknet-rust-crypto", git = "https://github.com/software-mansion/starknet-rust.git", rev = "7caedfe" }
-# crates.io 1.0.0 is a DIFFERENT Felt type — must stay 0.2.x (see docs/spec/architecture.md §3)
+# crates.io 1.0.0 is a DIFFERENT Felt type — must stay 0.2.x (see docs/spec/architecture.md#components-and-dependencies)
 starknet-types-core = { version = "=0.2.4", features = ["curve", "serde"] }
 
 strk20-feed = { path = "crates/feed" }
@@ -59,20 +59,16 @@ zeroize = "1"
 # default-on `providers` feature. Zero lines under `discovery-core/src` differ
 # from upstream; CI job `fork-delta-check` enforces that mechanically.
 #
-# Purpose: with `default-features = false` a wasm consumer drops 24 crates from
-# the wasm32-unknown-unknown graph (142 -> 118), including `starknet-providers`,
-# `reqwest`, `web-sys`, `wasm-bindgen-futures` and the `ethereum-types` stack.
-# NOTE, measured 2026-08-31: `discovery-core` already builds for
-# wasm32-unknown-unknown with default features. This is a dependency-surface
-# reduction, not a fix for a broken target — do not claim otherwise.
-# The feature is default-on, so this patch is a no-op for the native build.
+# Purpose: with `default-features = false`, consumers exclude the unused
+# provider dependency stack. The upstream crate already supports wasm32;
+# this patch reduces dependencies without changing engine source.
 #
 # ONE workspace-wide patch, never a split pin: two `[patch]` entries resolving
 # to two `discovery-core` sources would put two incompatible `Felt` identities
-# in one workspace (see docs/spec/architecture.md §3).
+# in one workspace (see docs/spec/architecture.md#components-and-dependencies).
 #
 # Remove this section and `patches/` in a single commit once the upstream PR
-# merges.
+# is included in a compatible upstream revision; see docs/ops/fork.md.
 [patch."https://github.com/starkware-libs/starknet-privacy.git"]
 discovery-core = { git = "https://github.com/kfastov/starknet-privacy.git", rev = "e7f0177aab66a9c79699c358b728f9b0324f437e" }
 

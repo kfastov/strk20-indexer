@@ -1,4 +1,4 @@
-//! Engine bridge (spec §6.4, §10.2): the four discovery-core traits over the
+//! Engine bridge: the four discovery-core traits over the
 //! local SQLite mirror. The unmodified upstream engine runs on top via the
 //! blanket `impl<T: RawStorageAccess> IViews for T`.
 

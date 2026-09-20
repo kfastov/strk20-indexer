@@ -1,6 +1,6 @@
-//! HTTP server (spec §6): feed static files (§6.1), ops (§6.2), raw
-//! targeted endpoints behind --enable-raw (§6.3), compat behind
-//! --enable-compat (§6.4). No feed route takes any user-derived parameter —
+//! HTTP server: feed static files, ops, raw
+//! targeted endpoints behind --enable-raw, compat behind
+//! --enable-compat. No feed route takes any user-derived parameter —
 //! that absence is the privacy mechanism.
 
 use crate::config::ChainConfig;
@@ -381,7 +381,7 @@ async fn feed_snapshot_file(
     .await
 }
 
-/// `GET /feed/live` (§2.1) — always on, no flag.
+/// `GET /feed/live` — always on, no flag.
 ///
 /// Any query string is 400 `INVALID_QUERY` rather than ignored: that turns the
 /// address-blindness property into a SERVER-enforced guarantee instead of a
@@ -405,7 +405,7 @@ async fn feed_live(State(s): State<AppState>, RawQuery(query): RawQuery) -> Resp
     .to_string();
 
     // Read the published files now, so the connect burst is the present and
-    // not the last tick's past (§2.2: connect always replays CURRENT state).
+    // not the last tick's past (connect always replays CURRENT state).
     s.live.refresh();
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(2);
     let hub = s.live.clone();

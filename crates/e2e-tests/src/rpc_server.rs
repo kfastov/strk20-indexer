@@ -1,13 +1,9 @@
-//! In-process fixture JSON-RPC server (spec §10.3 topology): serves the six
+//! In-process fixture JSON-RPC server: serves the six
 //! Starknet methods the indexer ingests from, backed by a mutable
 //! FixtureChain. Captures every request body for the server-side no-key scan.
 //!
-//! `FaultSpec` reproduces the provider behaviours measured on live networks
-//! (docs/research/live/live-run-findings.md): lava's nondeterministic pruned
-//! backends, publicnode's total lack of storage proofs, 429 throttling, the
-//! aggregator's per-request routing of storage proofs (§12), and — LIVE-8 —
-//! a continuation token handed to a backend that did not issue it. Every
-//! fault is BUDGETED or deterministic, never random.
+//! `FaultSpec` models pruned history, unavailable proofs, throttling and
+//! node-local continuation tokens. Faults are budgeted or deterministic.
 //!
 //! **Page size (changed for LIVE-8).** The fixture used to force every
 //! getEvents page to 2 events regardless of `chunk_size`, to exercise the
@@ -44,10 +40,8 @@ pub const DEFAULT_MAX_PAGE: usize = 1000;
 pub const FOREIGN_TOKEN_SKIP: usize = 3;
 
 /// Error code a backend answers with when IT cannot serve a storage proof for
-/// the requested block — no archive trie, or no proof support at all. The
-/// "~1024-block window" this project once measured is retracted
-/// (proof-window.md §3): the code names the backend that answered, not the
-/// block.
+/// the requested block. The fixture can model unavailable history or absent
+/// proof support; the error does not establish a mirror mismatch.
 pub const PROOF_TOO_OLD_CODE: i64 = 42;
 pub const PROOF_TOO_OLD_MESSAGE: &str =
     "the node doesn't support storage proofs for blocks that are too far in the past";
@@ -84,7 +78,7 @@ pub struct FaultSpec {
     pub foreign_token: bool,
     /// getStorageProof answers code 42 for the first N attempts AT EACH BLOCK
     /// and succeeds afterwards: the aggregator routes each call to a different
-    /// backend and only some run archive tries (proof-window.md §1). Error 42
+    /// backend and only some run archive tries. Error 42
     /// names the BACKEND, not the block — which is what makes a bounded retry
     /// the right response. Distinct from `proofs_unsupported`, which means
     /// "this endpoint never serves a proof, at any height, ever".
@@ -101,8 +95,8 @@ pub struct FaultSpec {
     pub range_budget_tokens: usize,
     /// A proof whose `global_roots.block_hash` is not the block's hash while
     /// its `storage_root` is honest: the anonymous, load-balanced proof pool
-    /// answering for something other than the block we asked about. Only the
-    /// §12 chain binding catches it.
+    /// answering for something other than the block we asked about. Only
+    /// proof-to-header binding catches it.
     pub lying_proof: bool,
     /// `getBlockWithTxHashes("l1_accepted")` is answered with the LATEST block
     /// instead of the L1-accepted one (#21). This is LIVE-8 on the finality
@@ -579,7 +573,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
             }
             // Aggregator routing: the first N attempts at THIS block reach a
             // backend without archive tries. The block is provable; this
-            // answer is about the backend (proof-window.md §3).
+            // answer is about the backend.
             if seen <= rpc.faults.proof_flaky_attempts {
                 rpc.counters.proofs_denied.fetch_add(1, Ordering::SeqCst);
                 return rpc_err(id, PROOF_TOO_OLD_CODE, PROOF_TOO_OLD_MESSAGE);
@@ -594,7 +588,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
             let contracts_root = strk20_feed::mpt::edge_hash(&leaf,&chain.pool,251);
             // A proof from the anonymous pool that does not belong to the
             // block it names: the storage root is a real root, the block hash
-            // is not this block's. Only the §12 chain binding separates the
+            // is not this block's. Only proof-to-header binding separates the
             // two, and without it "retry until one succeeds" degenerates into
             // "accept whichever answer we liked".
             let proof_block_hash = if rpc.lying_proof.load(Ordering::SeqCst) {
@@ -605,7 +599,7 @@ async fn handle(State(rpc): State<FixtureRpc>, body: axum::body::Bytes) -> Respo
             // The node set for the keys asked about, computed from the same
             // slot set the root above folds from. A real endpoint returns the
             // whole root→key path for every requested key, which is what lets
-            // the §4.2 closure loop descend into a subtree it cannot explain;
+            // the storage-trie recovery loop descend into a subtree it cannot explain;
             // answering `[[]]` (as this fixture used to) makes every walk stall
             // and reports the endpoint as faulty.
             let requested: Vec<Felt> = params

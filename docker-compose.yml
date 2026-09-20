@@ -35,7 +35,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
     # `--allow-class` has no env binding in the CLI, so it is interpolated
     # into the argument list instead. Empty by default: the mainnet profile
-    # already carries both classes the pool has ever run. Set
+    # already carries its supported classes. Set
     # MAINNET_ALLOW_CLASS="--allow-class 0x..." after an upgrade the profile
     # does not know about yet, to keep decoding instead of degrading.
     command: run --listen 0.0.0.0:8080 ${MAINNET_ALLOW_CLASS:-}
@@ -50,9 +50,8 @@ services:
       timeout: 5s
       retries: 3
       # `/health` reports UNHEALTHY until the first ingest cycle writes a head,
-      # and on a cold mainnet start that first cycle IS the backfill (~70 min
-      # measured). A shorter start period would just mean staring at a red
-      # container that is working correctly.
+      # and a cold first cycle includes historical backfill. Allow startup
+      # time before marking the container unhealthy.
       start_period: 90m
 
   sepolia:
@@ -60,18 +59,9 @@ services:
       context: .
       dockerfile: Dockerfile
     image: strk20-indexer:latest
-    # The real profile, not a pile of hand-copied hashes: `--network sepolia`
-    # carries the Sepolia pool, its genesis block 8_271_125 and all six class
-    # hashes the pool has run, each verified on-chain
-    # (docs/research/live/sepolia-abi-compat.md).
-    #
-    # These two default to the profile's own endpoints and must stay equal to
-    # SEPOLIA_RPC_PRIMARY/FALLBACK in crates/indexerd/src/config.rs. The order
-    # is load-bearing rather than cosmetic: on Sepolia, Cartridge is the only
-    # endpoint that answers `starknet_getStorageProof` at all, so demoting it
-    # costs the instance every anchor, every snapshot and verify-root, while
-    # ingest keeps looking healthy. publicnode is the transport fallback --
-    # blocks and events only, no proofs at any height (LIVE-6).
+    # The Sepolia profile owns pool identity and the supported decoder classes.
+    # RPC defaults must match SEPOLIA_RPC_PRIMARY/FALLBACK in config.rs.
+    # Configure proof support as well as ordinary block/event transport.
     environment:
       STRK20_NETWORK: sepolia
       STRK20_FEEDER_URL: ${SEPOLIA_FEEDER_URL:-https://feeder.alpha-sepolia.starknet.io/feeder_gateway}

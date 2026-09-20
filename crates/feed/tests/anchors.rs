@@ -1,4 +1,4 @@
-//! Golden byte vector for the canonical anchors.ndjson encoding (spec §4.5).
+//! Golden byte vector for the canonical anchors.ndjson encoding.
 //! These bytes are FROZEN: anchors.ndjson is not content-addressed, so its
 //! only guarantee is that two independent operators emit identical bytes for
 //! the same anchor set. Changing them is a feed-format break.

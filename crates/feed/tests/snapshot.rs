@@ -1,5 +1,4 @@
-//! Golden byte vector for the canonical snapshot payload (consumer-path.md
-//! §1.2). These bytes are FROZEN: the payload's sha256 is the snapshot's
+//! Golden byte vector for the canonical snapshot payload. These bytes are FROZEN: the payload's sha256 is the snapshot's
 //! content identity and two independent operators must publish the same file,
 //! so changing them is a feed-format break.
 

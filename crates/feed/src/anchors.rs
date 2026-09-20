@@ -1,11 +1,9 @@
-//! `anchors.ndjson` — the append-only chain-anchor log (spec §4.5).
+//! `anchors.ndjson` — the append-only chain-anchor log.
 //!
-//! Per-epoch anchors are absent in production by construction: an epoch's end
-//! block is thousands of blocks old by the time the epoch is cut, and the
-//! storage-proof window is ~1024 blocks wide (docs/research/live/proof-window.md).
-//! The log instead records anchors captured opportunistically while a block was
-//! still provable, so a client can recompute the pool storage root from its own
-//! folded mirror and compare.
+//! Records publisher root checks when proofs are available. Consumers can
+//! compare their folded state with these records, but publisher agreement is
+//! not independent checkpoint authentication. Capture availability varies by
+//! endpoint and requested block; there is no fixed network-wide proof window.
 //!
 //! The file is NOT content-addressed — recomputation against the mirror is the
 //! only thing standing behind it. Encoding follows the same canonical rules as

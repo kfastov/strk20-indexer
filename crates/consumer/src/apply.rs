@@ -22,7 +22,7 @@ use strk20_feed::codec::{self, BlockLine};
 use strk20_feed::manifest::Manifest;
 use strk20_feed::snapshot::{FeedIdentity, SnapSlot, Snapshot};
 
-/// §1.5.2 guard rail, shared by every host's `view()`: a bound below the
+/// Snapshot basis guard, shared by every host's `view()`: a bound below the
 /// snapshot basis is refused rather than served. Pre-basis state does not exist
 /// locally and must never be answered with zeros. Engine bounds are always
 /// `last_epoch_to` or `head`, both at or above the basis — the rule exists so a
@@ -43,7 +43,7 @@ pub fn check_bound_above_basis<S: ConsumerStore + ?Sized>(store: &S, block: u64)
     Ok(())
 }
 
-/// Lowest block for which this mirror holds EVENTS (§1.1). 0 for a fully
+/// Lowest block for which this mirror holds EVENTS. 0 for a fully
 /// epoch-replayed mirror.
 pub fn history_floor<S: ConsumerStore + ?Sized>(store: &S) -> Result<u64> {
     Ok(store
@@ -108,7 +108,7 @@ async fn apply_feed_once<S: ConsumerStore>(
     }
     let feed_pool = strk20_feed::felt_from_hex(&genesis.pool)?;
 
-    // 0. snapshot cold start (§1.7). Taken only on an empty mirror, so a
+    // 0. snapshot cold start. Taken only on an empty mirror, so a
     // non-empty one never touches snapshots. Cold start is O(1) in history
     // length and identical for every user: genesis + manifest + snapshot +
     // anchors + (epochs above the basis, normally 0-1) + head.
@@ -118,7 +118,7 @@ async fn apply_feed_once<S: ConsumerStore>(
                 cold_start_from_snapshot(store, transport, &manifest, &entry, &genesis, &feed_pool)
                     .await?;
             }
-            // `snapshot` REQUIRES one (§1.5.2: refuse loudly, never
+            // `snapshot` REQUIRES one (refuse loudly, never
             // degrade). Silently replaying every epoch from genesis is the
             // run the operator explicitly asked not to do, and on a metered
             // link the cost is theirs, not ours.
@@ -231,7 +231,7 @@ async fn apply_feed_once<S: ConsumerStore>(
         let range = Range::Above {
             floor: out.last_epoch_to,
         };
-        // Reorg rule (spec §7.5): stored tail rows that contradict the new
+        // Reorg rule: stored tail rows that contradict the new
         // tail file mean the old tail was replaced.
         let stored = store.block_hashes(range)?;
         let contradiction =
@@ -282,8 +282,8 @@ async fn apply_feed_once<S: ConsumerStore>(
     Ok(out)
 }
 
-/// Rings 1-5 of §1.5, then fold the slot set. Reachability (§11.3) runs
-/// later, once the feed above the basis has been applied.
+/// Check the snapshot file and fold its slots. Independent state verification
+/// follows feed application when enabled by the host.
 async fn cold_start_from_snapshot<S: ConsumerStore>(
     store: &S,
     transport: &dyn FeedTransport,
@@ -348,7 +348,7 @@ async fn cold_start_from_snapshot<S: ConsumerStore>(
     Ok(snap.header.block)
 }
 
-/// Rings 1–5 of the §1.5 ladder over a compressed snapshot file, with
+/// Check a compressed snapshot file, with
 /// decompression delegated to the host (see [`FeedTransport::decompress`]) so
 /// Block B does not link zstd.
 ///
@@ -390,7 +390,7 @@ fn install_snapshot<S: ConsumerStore>(store: &S, snap: &Snapshot) -> Result<()> 
             ("last_epoch_applied", h.epoch.to_string()),
             ("last_epoch_hash", h.epoch_hash.clone()),
             ("last_epoch_to", h.block.to_string()),
-            // Made loud (§1.1): a snapshot carries slots and no events, so no
+            // Made loud: a snapshot carries slots and no events, so no
             // event below this block exists locally and none ever will.
             ("history_floor", (h.block + 1).to_string()),
             ("snapshot_basis", h.block.to_string()),

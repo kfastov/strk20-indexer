@@ -1,6 +1,6 @@
-//! Honest explorer metrics (spec §6.2, Q18 policy). Only aggregates that a
+//! Honest explorer metrics. Only aggregates that a
 //! public observer can verifiably derive; nothing that aids deanonymization.
-//! Typed decoding freezes at the degraded boundary (spec §5.7).
+//! Typed decoding freezes at the degraded boundary.
 
 use crate::db::Db;
 use anyhow::Result;
@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use starknet_types_core::felt::Felt;
 use std::collections::BTreeMap;
 
-/// Verified live selectors (docs/research/data/selector_map.json).
+/// Selectors for the pool events decoded into aggregate statistics.
 pub mod selectors {
     pub const DEPOSIT: &str = "0x9149d2123147c5f43d258257fef0b7b969db78269369ebcf5ebb9eef8592f2";
     pub const WITHDRAWAL: &str = "0x2eed7e29b3502a726faf503ac4316b7101f3da813654e8df02c13449e03da8";
