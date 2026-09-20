@@ -97,11 +97,13 @@ jobs:
       - name: Verify packaged consumers without registry credentials
         working-directory: ts
         env:
-          NPM_CONFIG_USERCONFIG: /dev/null
-          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/anonymous-user.npmrc
+          NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/anonymous-global.npmrc
           NPM_CONFIG_CACHE: ${{ runner.temp }}/anonymous-consumer-cache
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
-        run: npm run check:release --workspace strk20-discovery
+        run: |
+          touch "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG"
+          env -u NODE_AUTH_TOKEN npm run check:release --workspace strk20-discovery
       - name: Verify lockfiles stayed unchanged and no vendor directory exists
         run: |
           cmp ts/package-lock.json registry-access-results/typescript-package-lock.json
