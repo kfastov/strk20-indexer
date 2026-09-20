@@ -139,18 +139,22 @@ health checks and public endpoint allowlists, see [hosting](docs/ops/hosting.md)
 Public feeds are available at `/mainnet/feed` and `/feed` on
 [the hosted instance](https://strk20.nullref.cc/demo/).
 
-To build the SDK and demo from source, use Node 24+, Rust and wasm-pack:
+To build the SDK and demo from source, use Node 24+, Rust and wasm-pack.
+The official Privacy SDK is installed from GitHub Packages. Set `NODE_AUTH_TOKEN`
+to a GitHub personal access token (classic) with `read:packages` before installing
+dependencies. The checked-in `ts/.npmrc` routes only `@starkware-libs` packages to
+that registry; other dependencies use npmjs.org. See
+[GitHub's authentication instructions](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages).
 
 ```sh
-./examples/mainnet/setup.sh       # builds the pinned upstream SDK
 ./crates/wasm/build.sh
 npm --prefix ts ci
 npm --prefix ts run dev          # Vite demo; no browser auto-open
 ```
 
-The setup helper is retained for building upstream dependencies. The SDK and
-browser demo are the maintained user-facing integration path; old standalone
-Sepolia scripts have been removed and remain in Git history.
+CI uses its built-in `GITHUB_TOKEN` with `packages: read` for this installation.
+The SDK and browser demo are the maintained user-facing integration path; the
+[mainnet scripts](examples/mainnet/README.md) install the same pinned registry package.
 
 - [Consumer architecture and proof contract](docs/spec/consumer-path.md)
 - [Why event-only indexing is insufficient](docs/spec/sound-ingest.md)
@@ -164,4 +168,6 @@ fork; CI checks that its source matches upstream. The
 [upstream PR](https://github.com/starkware-libs/starknet-privacy/pull/984) is open.
 
 Apache-2.0. Upstream provenance and notices ship with the applicable packages and
-[fixtures](fixtures/upstream/PROVENANCE.md).
+[fixtures](fixtures/upstream/PROVENANCE.md). The
+[Privacy SDK license](ts/strk20-discovery/licenses/starknet-privacy-sdk.LICENSE)
+is included in each release archive.

@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const repo = resolve(root, '../..');
-const sdk = resolve(repo, 'examples/mainnet/vendor/starknet-privacy-sdk');
+const sdk = fileURLToPath(new URL('../', import.meta.resolve('@starkware-libs/starknet-privacy-sdk')));
 const stage = mkdtempSync(join(tmpdir(), 'strk20-package-'));
 const destination = resolve(process.env.PACK_DESTINATION ?? join(root, 'release'));
 mkdirSync(destination, { recursive: true });
@@ -27,7 +27,8 @@ try {
   mkdirSync(included, { recursive: true });
   cpSync(join(sdk, 'dist'), join(included, 'dist'), { recursive: true });
   cpSync(join(sdk, 'package.json'), join(included, 'package.json'));
-  cpSync(join(repo, 'examples/mainnet/vendor/starknet-privacy/LICENSE'), join(included, 'LICENSE'));
+  cpSync(join(sdk, 'README.md'), join(included, 'README.md'));
+  cpSync(join(root, 'licenses/starknet-privacy-sdk.LICENSE'), join(included, 'LICENSE'));
   writeFileSync(join(stage, 'UPSTREAM.txt'),
     'Includes the unmodified compiled @starkware-libs/starknet-privacy-sdk 0.14.3-rc.5.\n' +
     'Source: https://github.com/starkware-libs/starknet-privacy/tree/PRIVACY-0.14.3-RC.5/sdk\n' +

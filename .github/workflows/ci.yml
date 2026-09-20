@@ -124,6 +124,9 @@ jobs:
     name: typescript (wasm engine, build, typecheck)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -168,12 +171,19 @@ jobs:
         working-directory: crates/wasm
         run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
 
-      - name: Build the pinned official SDK
-        run: ./examples/mainnet/setup.sh
-
       - name: npm ci
         working-directory: ts
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
         run: npm ci
+
+      - name: Install mainnet example dependencies
+        working-directory: examples/mainnet
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          npm ci --ignore-scripts
+          node --input-type=module -e "await import('@starkware-libs/starknet-privacy-sdk')"
 
       # Build copies WASM assets and emits SDK typings before demo typechecking.
       - name: npm run build

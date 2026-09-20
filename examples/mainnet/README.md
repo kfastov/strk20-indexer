@@ -56,11 +56,14 @@ chain.
 
 ## Setup
 
-Requires **Node ≥ 24** (the SDK's OHTTP dependency needs modern WebCrypto) and `git`.
+Requires **Node ≥ 24** (the SDK's OHTTP dependency needs modern WebCrypto), Rust and
+wasm-pack. Set `NODE_AUTH_TOKEN` as described in the
+[repository's source-build instructions](../../README.md#run-the-indexer-or-contribute).
+The checked-in `.npmrc` routes the official SDK to GitHub Packages.
 
 ```sh
 cd examples/mainnet
-./setup.sh                       # vendors + builds the official SDK, installs deps
+npm ci
 cd ../..
 ./crates/wasm/build.sh
 npm --prefix ts ci
@@ -79,10 +82,8 @@ the wallet files, with mode 0600. `STRK20_FEED` must be an HTTP(S) public feed;
 snapshot or more blocks before a note is spendable. Hosted proving still sends
 proving inputs to the configured prover.
 
-`setup.sh` builds `@starkware-libs/starknet-privacy-sdk` **from source**. The package is
-published on GitHub Packages, which demands a token with `read:packages` even for public
-packages; the upstream repository is public (Apache-2.0) and its `sdk/` workspace builds
-standalone, so no token is needed.
+Both npm projects install the published `@starkware-libs/starknet-privacy-sdk`
+archive at the exact version recorded in their manifests and lockfiles.
 
 ### Which SDK version, and why
 
@@ -106,7 +107,8 @@ for this very deployment — also matches, which corroborates the band.
 
 A mismatch here is not a clean error at runtime: `ClientAction`/`ServerAction` are the wire
 format for `apply_actions`, so a wrong version mis-serializes actions. Re-run the diff after
-any pool upgrade. Override with `STRK20_SDK_TAG=… ./setup.sh` if you need a different one.
+any pool upgrade. To change the SDK version, update both npm projects and their
+lockfiles, then run the SDK compatibility and release checks.
 
 > Worth knowing: the mainnet class `0x67dddd89…` and the current Sepolia class
 > `0x56ab118a…` have **byte-identical ABIs** despite different class hashes, so the same SDK
@@ -269,7 +271,7 @@ has no channel to receive into.
 
 | file | role |
 |---|---|
-| `setup.sh` | vendors and builds the pinned SDK from source; installs deps |
+| `package.json`, `package-lock.json`, `.npmrc` | pin dependencies and configure the official SDK registry |
 | `lib.mjs` | shared: env config, chain guard, live pool reads, viewing-key derivation, proving, fee checks, error decoding |
 | `01`–`05` | the lifecycle steps |
 | `06-discover.sh` | runs `strk20-sync` with the generated viewing key |

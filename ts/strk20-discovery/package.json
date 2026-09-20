@@ -27,7 +27,7 @@
     "check:release": "npm run pack:release && node scripts/check-release.mjs"
   },
   "dependencies": {
-    "@starkware-libs/starknet-privacy-sdk": "file:../../examples/mainnet/vendor/starknet-privacy-sdk",
+    "@starkware-libs/starknet-privacy-sdk": "0.14.3-rc.5",
     "fzstd": "0.1.1",
     "starknet": "10.5.0"
   },

@@ -7,8 +7,21 @@ import { execFileSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(readFileSync(join(root, 'package.json')));
 const stage = mkdtempSync(join(tmpdir(), 'strk20-consumer-'));
-const run = (command, args) => execFileSync(command, args, { cwd: stage, stdio: 'inherit' });
+// A consumer must not inherit the maintainer's registry credentials or cache.
+const env = { ...process.env };
+for (const name of Object.keys(env)) {
+  if (/^(npm_config_|npm_token$|node_auth_token$)/i.test(name)) delete env[name];
+}
+Object.assign(env, {
+  NPM_CONFIG_USERCONFIG: join(stage, 'user.npmrc'),
+  NPM_CONFIG_GLOBALCONFIG: join(stage, 'global.npmrc'),
+  NPM_CONFIG_CACHE: join(stage, 'npm-cache'),
+  NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+});
+const run = (command, args) => execFileSync(command, args, { cwd: stage, env, stdio: 'inherit' });
 try {
+  writeFileSync(env.NPM_CONFIG_USERCONFIG, '');
+  writeFileSync(env.NPM_CONFIG_GLOBALCONFIG, '');
   writeFileSync(join(stage, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund',
     join(root, 'release', `${pkg.name}-${pkg.version}.tgz`),

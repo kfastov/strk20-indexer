@@ -15,6 +15,8 @@ npm install strk20-discovery
 Browser apps need a bundler with module Worker support, such as Vite. Node apps
 need Node 24+. Worker/WASM assets and the unmodified official Privacy SDK are
 included; installation requires no Rust toolchain or GitHub Packages login.
+The bundled Privacy SDK retains its published package metadata and includes the
+license from [the pinned upstream source](https://github.com/starkware-libs/starknet-privacy/blob/66e3caae8c0201227a6719696d004e30d90aea65/LICENSE).
 
 ## Browser
 

@@ -18,6 +18,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,11 +45,10 @@ jobs:
         working-directory: crates/wasm
         run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
 
-      - name: Build the pinned official SDK
-        run: ./examples/mainnet/setup.sh
-
       - run: npm ci
         working-directory: ts
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
 
       - run: npm run build && npm run typecheck
         working-directory: ts

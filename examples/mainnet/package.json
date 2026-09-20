@@ -6,7 +6,7 @@
   "description": "Full STRK20 privacy-pool lifecycle on Starknet mainnet, headless.",
   "engines": { "node": ">=24" },
   "dependencies": {
-    "@starkware-libs/starknet-privacy-sdk": "file:./vendor/starknet-privacy-sdk",
+    "@starkware-libs/starknet-privacy-sdk": "0.14.3-rc.5",
     "starknet": "10.5.0"
   }
 }
