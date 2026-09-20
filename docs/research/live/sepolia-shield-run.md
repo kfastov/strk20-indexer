@@ -8,9 +8,8 @@ Run date: 2026-08-31. Goal: produce **our own note** on the Sepolia STRK20 priva
 indexer can discover it keylessly end to end. Testnet only; no mainnet write path was
 touched (the script hard-aborts unless `starknet_chainId == SN_SEPOLIA`).
 
-Companion to `sepolia-write-path.md` (the pre-flight research). That report's verdict —
-"the chain is unbroken" — held. Its recipe needed eleven corrections (C1–C11), listed in
-§"Corrections" and marked inline.
+The pre-flight research verdict — "the chain is unbroken" — held. Its recipe needed
+eleven corrections (C1–C11), listed in §"Corrections" and marked inline.
 
 Evidence discipline: **OBSERVED** = a command in this run produced it. **INFERRED** =
 follows from observed facts but was not directly measured.
@@ -260,7 +259,7 @@ node verify.mjs                                  # receipt, 3 events, get_public
 `shield.mjs` is idempotent-ish: it skips `approve` when the allowance already covers
 `deposit + fee`, and it aborts before submitting if fee estimation fails.
 
-## Corrections to `sepolia-write-path.md`
+## Corrections to the pre-flight research
 
 **C1 — R6 ("npm auth") is real but not a blocker, and the stated fallback was wrong.**
 The 403 is confirmed exactly as predicted. But the report offers only "build from the
@@ -528,8 +527,8 @@ is a safe planning figure on Sepolia today (ceiling ~6.1–6.8 observed, fee 2, 
 packed `Option::None`, and the contract accepted it. Consistent with the Cairo: screening is
 asserted only for `TransferFrom`-carrying action spans. Practical consequence: **transfer,
 withdraw and register do not depend on StarkWare's elliptic-proxy credentials** — only shield
-does. That is exactly the split `sepolia-write-path.md` Q3 predicted for a self-hosted
-prover, now confirmed from the hosted one's behaviour.
+does. That is the split predicted by the pre-flight research for a self-hosted prover,
+now confirmed from the hosted one's behaviour.
 
 **C14 — self-transfer is supported and warning-free.** `.transfer({ recipient: <own
 address>, amount })` built, proved and executed with `warnings: []` — no `USER_LINKAGE`

@@ -172,9 +172,8 @@ This is the third defect in a row caused by the same root cause as LIVE-1/6:
 we treated RPC endpoints as one uniform, forgiving implementation. They differ
 in retention, in which methods exist, and in strictness about optional params.
 
-Ground truth captured for the regression test —
-`fixtures/proof_mainnet_14151973.json`, the full live response at block
-14,151,973: pool `storage_root = 0x25e47f354ce696498d59e80ab4eb07483d4e737647a7b4832959a170ae8db09`,
+Ground truth recorded from the live response at block 14,151,973:
+pool `storage_root = 0x25e47f354ce696498d59e80ab4eb07483d4e737647a7b4832959a170ae8db09`,
 `block_hash = 0x46a19ce7fed109f163453d914dc174f394e4e29270dded25d1d84f78c6b8aaa`,
 class `0x67dddd89…76b554d`. Once LIVE-4/LIVE-7 are fixed, our mirror must
 recompute exactly that root from its own 134,879 slots — the strongest
