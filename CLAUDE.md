@@ -42,3 +42,23 @@ Never write "refuses to publish if it disagrees" without the UNAVAILABLE case
 (`crates/indexerd/src/cutter.rs`). The hole it catches: `getEvents` cannot name a block that
 writes pool storage and emits no event (`docs/spec/sound-ingest.md`); repair is `rescan` then
 `recut-epochs`.
+
+## Agent skills
+
+These configuration files and domain documents created by `/domain-modeling` are
+exceptions to the documentation rules above.
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues for `kfastov/strk20-indexer`. Before issue
+operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five standard triage labels. Before triaging issues, read
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout: root `CONTEXT.md` and `docs/adr/`. Before exploring
+the codebase, read `docs/agents/domain.md`.
