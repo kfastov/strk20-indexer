@@ -1,0 +1,58 @@
+name: Official SDK registry access probe
+
+on:
+  push:
+    branches: [codex/registry-access-probe]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packages-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install and reinstall the official package
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-registry-access.py --expect allowed --report registry-access-results/packages-read.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: registry-packages-read
+          path: registry-access-results/
+          if-no-files-found: error
+
+  no-package-permission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Negative control without package permission
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-registry-access.py --expect denied --report registry-access-results/packages-none.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: registry-packages-none
+          path: registry-access-results/
+          if-no-files-found: error
