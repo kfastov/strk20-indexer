@@ -1,18 +1,9 @@
-//! One bounded recovery attempt per divergence — the §4.2 closure loop, and
+//! One bounded recovery attempt per divergence — the storage-trie recovery loop, and
 //! the guard that keeps it from eating the poll loop.
 //!
-//! **What was wrong.** `run` cut epochs after every cycle that moved the head.
-//! A `VERIFY-ROOT MISMATCH` sent it into a §5.6 rescan of a window derived
-//! from the PROBE block, which is by construction near the frontier while the
-//! divergence can sit five million blocks below it (sound-ingest.md §2.3). The
-//! rescan therefore could not converge — measured: 4 rounds, 2.46 hours, 0
-//! blocks repaired — and, worse, nothing remembered that it had already been
-//! tried. The next cycle's head move re-entered the same rescan, so on the
-//! hosted Sepolia instance ingest was starved in tens-of-minutes blocks, the
-//! log went silent, and the operator saw a frozen head with a DEGRADED health
-//! endpoint and no line explaining either.
-//!
-//! **What replaces it.** Two rules, and they are separable:
+//! A probe near the frontier can detect missing writes far below it; repeatedly
+//! rescanning a guessed recent window can starve ingestion without repairing
+//! that state. Persist the recovery attempt and target the divergent trie.
 //!
 //! 1. *At most one recovery attempt per unresolved divergence.* The identity
 //!    of the divergence being handled is persisted in `meta`, so the guard
@@ -36,7 +27,7 @@
 //! unresolved divergence is on record, do not attempt again. A mirror that has
 //! failed one repair is still missing a write at or below the previous
 //! mismatch; a second identical attempt cannot learn anything the first did
-//! not. This is also what makes the guard safe against §7.10, where a mutable
+//! not. This is also what makes the guard safe against non-monotone writes, where a mutable
 //! admin slot can make the bisection predicate non-monotone and the reported
 //! block wander: a wandering block changes the fingerprint, and under this
 //! rule a changed fingerprint still does not buy another attempt.
@@ -315,7 +306,7 @@ impl Drop for Heartbeat {
 
 const PHASES: [&str; 3] = ["trie-walk", "attribute-to-blocks", "re-ingest"];
 
-/// One bounded run of the §4.2 closure loop at `d.block`.
+/// One bounded run of the storage-trie recovery loop at `d.block`.
 ///
 /// Identical to what `strk20 enumerate-slots --attribute` does by hand —
 /// enumerate the chain's pool slots the mirror does not hold, bisect each
@@ -451,7 +442,7 @@ mod tests {
         assert_eq!(attempts(&db).unwrap(), 1, "still exactly one attempt");
     }
 
-    /// §7.10: a mutable admin slot can make the bisection predicate
+    /// A mutable admin slot can make the bisection predicate
     /// non-monotone, so the reported mismatch block — and with it the
     /// fingerprint — can wander while the underlying hole never moves. A
     /// wandering fingerprint must not be mistaken for progress, or the guard

@@ -4,7 +4,7 @@
 //! files and impossible for `/feed/live`: an SSE response never ends, so a
 //! buffering proxy would hang forever. This one splices bytes, so it can sit
 //! in front of the stream while still capturing every request head for the
-//! address-blindness assertions — and it can inject the two failures §2.5
+//! address-blindness assertions — and it can inject the two failures the client reconnect policy
 //! requires a client to survive: a stream killed mid-flight, and a route that
 //! answers 404 (a plain static-file mirror, which has no stream at all).
 

@@ -1,4 +1,4 @@
-//! Canonical NDJSON codec for epoch and head files (spec §4.3, §4.4).
+//! Canonical NDJSON codec for epoch and head files.
 //!
 //! Encoding is hand-built string emission so that byte identity is guaranteed
 //! by construction: fixed field order, no whitespace, minimal lowercase hex,

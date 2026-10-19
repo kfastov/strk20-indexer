@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 strk20-consumer = { path = "../consumer" }
 # NOT feature "compress": zstd-sys shells out to clang and has no wasm32
-# backend. TypeScript inflates; §3.4.
+# backend. TypeScript performs decompression in the host.
 strk20-feed = { path = "../feed", default-features = false, features = ["mpt"] }
 discovery-core = { workspace = true }
 starknet-types-core = { workspace = true }

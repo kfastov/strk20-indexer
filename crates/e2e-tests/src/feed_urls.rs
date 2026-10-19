@@ -1,25 +1,7 @@
-//! The CLOSED, whole-path URL allowlist a feed-mode client may emit
-//! (consumer-path.md §2.8.1, extended by §11.2's anchors log).
-//!
-//! Whole-path is the point. A `starts_with("/feed/")` test would pass any
-//! future artifact — including one carrying a user-derived selector — and that
-//! is exactly how the address-blindness property erodes. Every pattern here is
-//! matched against the ENTIRE path: a fixed literal, or a directory + an
-//! 8-digit zero-padded index + a fixed suffix. Adding an artifact means adding
-//! a pattern here, deliberately.
-//!
-//! Deltas from §2.8.1's eight patterns:
-//! - `/feed/anchors.ndjson` is IN: the head-captured anchors log grounds a
-//!   snapshot whose basis-block anchor could not be obtained (§11.2/§11.3,
-//!   demoted by §12 to the fallback grounding). Parameterless and
-//!   byte-identical for every user.
-//! - `/feed/snapshots/{e:08}.anchor.json` is IN, deliberately re-admitted by
-//!   §12: §11.1 struck it out on the measurement that a proof at a snapshot's
-//!   basis block cannot be obtained, and that measurement was RETRACTED —
-//!   deep proofs answer for any block on retry (research/live/proof-window.md
-//!   §1). §12 point 1 reinstates §1.3's required sidecar, and §1.5 ring 5
-//!   reads it, so a snapshot client fetches it. Like every other entry it
-//!   names a public epoch index and nothing user-derived.
+//! Closed, whole-path allowlist for public feed requests in the native tests.
+//! Each entry identifies public data, never a wallet selector. Match the whole
+//! path so a new user-derived route cannot pass through a broad prefix check.
+//! Keep changes consistent with docs/spec/architecture.md#http-interfaces.
 
 /// Human-readable form of the closed set, for assertion messages.
 pub const PATTERNS: [&str; 10] = [
@@ -92,8 +74,7 @@ mod tests {
         assert!(is_allowed("/feed/manifest.json"));
         assert!(is_allowed("/feed/epochs/00000001.strk20e.zst"));
         assert!(is_allowed("/feed/snapshots/00001405.strk20s.zst"));
-        // §12 point 1 reinstates the per-snapshot proof sidecar (§1.3), which
-        // §11.1 had struck out on a retracted measurement.
+        // A snapshot proof sidecar is a public, epoch-indexed artifact.
         assert!(is_allowed("/feed/snapshots/00000001.anchor.json"));
         // prefix-style matches are exactly what must NOT pass
         assert!(!is_allowed("/feed/"));

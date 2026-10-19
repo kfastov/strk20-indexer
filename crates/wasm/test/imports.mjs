@@ -1,4 +1,4 @@
-// §3.9's import-section audit, done with the WebAssembly API instead of
+// Inspect the import section with the WebAssembly API instead of
 // `wasm-objdump` (one fewer tool to install, same information).
 //
 // What this proves, at exactly its real strength: the module **cannot open a
@@ -9,7 +9,7 @@
 //
 // This is also the load-bearing evidence that `getrandom` — which is in the
 // dependency tree via `lambdaworks-math` -> `starknet-types-core`, and which
-// §3.9 says must not be reachable — is DEAD CODE here: a live call would need a
+// must not be reachable — is DEAD CODE here: a live call would need a
 // `crypto.getRandomValues` import, and there is none.
 
 import { readFileSync } from "node:fs";

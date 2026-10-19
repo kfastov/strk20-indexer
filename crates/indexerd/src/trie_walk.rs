@@ -1,17 +1,10 @@
-//! Structural enumeration of the chain's pool storage trie — the completing
-//! form of the sound-ingest.md §4.2 closure loop.
+//! Structural enumeration of the chain's pool storage trie for recovery.
 //!
-//! §4.2 step 2 localises a divergence by binary-searching the ACTIVE-BLOCK
-//! index with `verify-root`, then flat-scanning the gap it lands in. That
-//! works, but it inherits two properties of the mirror's own index: it can
-//! only ever land between two blocks the mirror already knows are active, and
-//! its predicate is monotone only for write-once slots (§7.10 — a missed write
-//! to a mutable admin slot can be masked by a later one the mirror did
-//! capture, healing the root while the block stays absent, and the bisection
-//! then walks straight past it).
+//! Locate missing slots without relying on an event-derived active-block index
+//! or a monotone historical root predicate. See docs/spec/architecture.md#recovery.
 //!
-//! This walk has neither property, because it never consults the mirror's
-//! index at all. A `starknet_getStorageProof` answer returns nodes keyed by
+//! The walk compares subtrees directly. A `starknet_getStorageProof` answer
+//! returns nodes keyed by
 //! their own hash, and every node names its children by hash. A child hash is
 //! therefore a commitment to the whole subtree beneath that bit-prefix — and
 //! the identical quantity is computable from the mirror's slot set
@@ -101,7 +94,7 @@ pub async fn enumerate_missing_slots(cutter: &Cutter<'_>, block: u64) -> Result<
     let sorted = mpt::bit_entries(&set);
     let local_root = mpt::storage_root(&set);
 
-    // The same binding every other proof consumer applies (§12 B2): an
+    // The same binding every other proof consumer applies: an
     // aggregator's proof is believed only once `global_roots.block_hash`
     // equals the block's real header hash. A walk seeded from an unbound root
     // would enumerate a different chain's tree.

@@ -1,4 +1,4 @@
-//! `strk20-sync` — the keyless client binary (spec §8). Key input is
+//! `strk20-sync` — the keyless client binary. Key input is
 //! file/stdin only (never argv: process lists leak); the key buffer is
 //! zeroized after parsing into `SecretFelt`.
 
@@ -15,7 +15,7 @@ use strk20_consumer::anchors::ProofSource;
 use strk20_client::transport::transport_for;
 use zeroize::Zeroize;
 
-/// §2.5 client behaviour for `/feed/live`: reconnect with jittered exponential
+/// Client behavior for `/feed/live`: reconnect with jittered exponential
 /// backoff 1 s -> 60 s, a 45 s watchdog on silence, and — the part that is a
 /// deployment decision rather than an error — 404/405 permanently degrades this
 /// session to polling with NOTHING surfaced. A plain static-file mirror has no
@@ -67,8 +67,7 @@ fn spawn_live_subscription(feed: &str) -> tokio::sync::mpsc::Receiver<()> {
             // which is CONSTANT for the process: every reconnect of a given
             // client landed at the same sub-second offset — ~9 bits of stable,
             // server-observable identity that survives reconnects, IP changes
-            // and OHTTP, which is precisely the linkability §2.6's residual
-            // paragraph assumed nothing would introduce.
+            // and OHTTP. Fresh jitter avoids that stable reconnect fingerprint.
             let jitter = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as u64)
@@ -165,8 +164,8 @@ enum Command {
         /// (the only way to get complete transaction history)
         #[arg(long, value_enum, default_value_t = ColdStartArg::Auto)]
         cold_start: ColdStartArg,
-        /// Ground the feed's anchor in the chain through YOUR OWN RPC
-        /// (§1.5 ring 6). Configured means mandatory: if it cannot pass, the
+        /// Ground the feed in the chain through your own RPC.
+        /// Configured means mandatory: if it cannot pass, the
         /// sync fails rather than reporting a grade it did not earn.
         #[arg(long)]
         verify_anchor: Option<String>,
@@ -275,7 +274,7 @@ async fn main() -> Result<()> {
                 // any hiccup).
                 let mut emitted: std::collections::HashSet<String> =
                     report.notes.iter().map(|n| n.note_id.clone()).collect();
-                // §2.5: subscribe when the feed offers a stream, poll always.
+                // subscribe when the feed offers a stream, poll always.
                 // Both paths converge on identical bytes, so a poke only ever
                 // moves work earlier.
                 let mut pokes = spawn_live_subscription(&feed);
@@ -371,7 +370,7 @@ fn print_human(r: &strk20_client::sync::SyncReport) {
     if r.tail_rewound {
         eprintln!("  tail reorg detected: rewound to L1-final checkpoint");
     }
-    // §1.1/§1.5.1: the grade and the history floor are SURFACED, never implied.
+    // the grade and the history floor are SURFACED, never implied.
     match r.snapshot_basis {
         Some(b) => eprintln!(
             "  integrity: {} (snapshot basis {b}; transaction history starts at block {})",

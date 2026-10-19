@@ -3,7 +3,7 @@
 //!
 //! Two jobs:
 //!
-//! 1. It is the store the **browser** host folds into (§3.2): no SQLite, no
+//! 1. It is the store the **browser** host folds into: no SQLite, no
 //!    filesystem, no tokio blocking pool, nothing that cannot exist in a
 //!    `wasm32-unknown-unknown` module.
 //! 2. It is the **second implementation** the conformance leg needs. The
@@ -369,7 +369,7 @@ impl ConsumerStore for MemStore {
 pub struct MemView {
     inner: Arc<Mutex<Inner>>,
     bound: u64,
-    /// Lowest block for which the event index can answer (§1.1). Below it it
+    /// Lowest block for which the event index can answer. Below it it
     /// is not empty-because-nothing-happened, it is empty because a snapshot
     /// carries slots and no events.
     history_floor: u64,

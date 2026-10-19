@@ -1,4 +1,4 @@
-//! `strk20` — the server binary (spec §8).
+//! `strk20` — the server binary (see docs/spec/architecture.md#components-and-dependencies).
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -56,7 +56,7 @@ struct CommonOpts {
     #[arg(long, default_value_t = 15, env = "STRK20_PROGRESS_SECS")]
     progress_secs: u64,
     /// Additional known pool class hash(es) for the decoder map (recovery
-    /// path after an upgrade; spec §5.7)
+    /// path after checking upgrade compatibility)
     #[arg(long = "allow-class")]
     allow_class: Vec<String>,
 }
@@ -166,17 +166,8 @@ enum Command {
         #[arg(long)]
         json: Option<PathBuf>,
     },
-    /// §5.6 slow path, as an operator command: re-ingest blocks straight from
-    /// their state updates rather than events-first.
-    ///
-    /// This is the only way to recover a pool write that rode a block with NO
-    /// pool event. `audit-coverage` cannot see those blocks — it compares
-    /// event counts, and their event count is zero on both sides — and neither
-    /// can the scanner, which asks `getEvents` what to ingest. Measured on
-    /// Sepolia 2026-09-01: blocks 8,472,101 / 12,715,446 / 13,702,347 carry 17
-    /// / 10 / 20 pool storage writes and zero pool events, and the mirror had
-    /// no row for any of them, which is exactly what `verify-root` reported as
-    /// a root divergence.
+    /// Re-ingest named blocks or a bounded range from their state updates.
+    /// This can repair eventless pool writes that audit-coverage cannot find.
     Rescan {
         #[command(flatten)]
         common: CommonOpts,
@@ -377,7 +368,7 @@ async fn run(
                 let ingest_ms = started.elapsed().as_millis() as u64;
                 // Publish the tail BEFORE cutting. `/health` already reports the
                 // new head at this point, and the cut path can take a while
-                // (verify-root, the anchor probe, or a §5.6 rescan) — a consumer
+                // (verify-root, the anchor probe, or a recovery rescan) — a consumer
                 // that polls /health and then fetches head.ndjson must not get a
                 // tail from before the block it was just told about.
                 {
@@ -436,7 +427,7 @@ async fn run(
 }
 
 /// Cut ready epochs. A verify-root mismatch gets ONE bounded recovery attempt
-/// — the sound-ingest.md §4.2 closure loop — and then the divergence is on
+/// using storage-trie enumeration, and then the divergence is on
 /// record; every later cycle that meets it again returns immediately so ingest
 /// keeps running, with `verify_root_failed` latched and `/health` DEGRADED.
 ///
@@ -448,7 +439,7 @@ async fn run(
 ///    per divergence and is additionally capped by `ATTEMPT_DEADLINE`.
 /// 2. **The attempt localises the divergence instead of guessing at it.** The
 ///    window rescan was derived from the PROBE block and provably could not
-///    reach a divergence below it (§2.3). The walk asks the chain's trie which
+///    reach a divergence below it. The walk asks the chain's trie which
 ///    slots are missing and bisects them to their writing blocks, so its cost
 ///    tracks the size of the hole rather than the distance to the frontier.
 async fn cut_epochs_with_recovery(
@@ -551,7 +542,7 @@ async fn cut_epochs_with_recovery(
         tracing::error!(
             error = %err,
             block = divergence.block,
-            "verify-root mismatch: entering the §4.2 closure loop, once"
+            "verify-root mismatch: entering the storage-trie recovery loop, once"
         );
         if let Err(e) = recovery::begin_attempt(db, &divergence) {
             tracing::error!(error = %e, "cannot record the divergence; not attempting recovery");
@@ -772,7 +763,7 @@ async fn verify_root(common: CommonOpts, block: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// Structural enumeration of the chain's storage trie (sound-ingest.md §1, the
+/// Structural enumeration of the chain's storage trie (the
 /// eventless-write hole class). Read-only: it names slots and, with
 /// `--attribute`, the blocks that wrote them. Repair is `rescan --blocks`.
 async fn enumerate_slots(
@@ -872,15 +863,8 @@ async fn enumerate_slots(
     Ok(())
 }
 
-/// The seeker pass, and with `--repair` the targeted re-ingest that follows it.
-///
-/// A hole below the ingest frontier is invisible to every forward mechanism
-/// this binary has: the scan starts at `cursor + 1`, the §5.6 rescan only
-/// widens to the epoch of a mismatch it was handed, and `verify-root` can say
-/// a root diverged but not which blocks are absent. Re-asking the chain for the
-/// whole block → event-count map is the only thing that names them, and doing
-/// it with `getEvents` alone costs a fraction of the re-backfill that would
-/// otherwise be the answer.
+/// Compare the chain's event-count map with the mirror and optionally re-ingest
+/// named gaps. Eventless writes require storage-trie enumeration or a rescan.
 async fn audit_coverage(
     common: CommonOpts,
     from: Option<u64>,
@@ -996,14 +980,8 @@ async fn audit_coverage(
     Ok(())
 }
 
-/// §5.6 slow path on demand. Two shapes, same ingest path: a bounded range
-/// walked one `getStateUpdate` at a time, or an explicit block list.
-///
-/// Why this exists as a command: the mismatch recovery inside `run` rescans
-/// only `[last_epoch.to + 1 .. frontier]`, and when the missing write is older
-/// than that it prints "re-run with --full-resync" — a flag that does not
-/// exist, for a rebuild that costs a full backfill. A divergence localized to
-/// a handful of blocks deserves a repair the size of the divergence.
+/// Re-ingest a bounded range or explicit block list, including eventless writes.
+/// Repairs inside published epochs require an explicit recut afterwards.
 async fn rescan(
     common: CommonOpts,
     from: Option<u64>,
@@ -1266,7 +1244,7 @@ async fn mirror_pull(common: CommonOpts, url: String) -> Result<()> {
         db.meta_set("decode_state", "ok")?;
     }
     // Store the manifest and genesis for onward serving, MINUS the origin's
-    // snapshot: mirror-pull ingests epochs only (§1.9 — a server needs events
+    // snapshot: mirror-pull ingests epochs only (a server needs events
     // to cut future epochs and can never bootstrap from a slots-only file), so
     // advertising a snapshot file this mirror does not hold would 404 every
     // client that believed the manifest. This mirror publishes its own after

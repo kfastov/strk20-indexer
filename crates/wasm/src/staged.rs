@@ -160,7 +160,7 @@ impl FeedTransport for StagedFeed {
         let Some(raw) = g.inflated.get(&h(bytes)) else {
             bail!(
                 "NOT_STAGED: no inflated payload was staged for {artifact}. This module \
-                 does not link zstd (§3.4); the caller must inflate and stage the result."
+                 does not link zstd; the caller must inflate and stage the result."
             );
         };
         // R-I still applies on this side of the seam: the caller inflated, but

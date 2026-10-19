@@ -1,4 +1,4 @@
-//! Conformance vs upstream (spec §10.2):
+//! Conformance vs upstream:
 //! 1. trait-bridge proof: the unmodified engine over our SQLite `DbBackend`
 //!    produces results identical to the engine over upstream's `MockBackend`
 //!    for the same slots — full struct equality via canonical JSON;

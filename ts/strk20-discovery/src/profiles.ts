@@ -1,11 +1,7 @@
 /**
- * §A6 chain profiles. One profile source, consumed by Rust and TypeScript.
- *
- * These values are read from the feeds this repo actually publishes
- * (`data/mainnet/feed/genesis.json`) and from live-run-findings.md §5 for
- * Sepolia. They are the identity the client PINS BEFORE a byte is requested,
- * which is what closes the trust-on-first-use hole: an empty mirror must not
- * adopt whatever chain the feed declares (§3.10 item 3).
+ * Expected feed identities, pinned before downloading data. Keep these
+ * consistent with the supported Rust network profiles in config.rs; an empty
+ * client must not adopt whichever chain an arbitrary feed declares.
  */
 
 import type { ChainProfile } from "./types.ts";

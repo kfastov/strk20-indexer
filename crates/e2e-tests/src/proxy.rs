@@ -1,4 +1,4 @@
-//! Recording reverse proxy (spec §10.3 topology): sits between the client
+//! Recording reverse proxy: sits between the client
 //! and the indexer, byte-captures every request (method, URI, headers, body)
 //! for the mechanical no-key assertion, and forwards transparently.
 

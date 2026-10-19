@@ -2,7 +2,7 @@
 use anyhow::Result;
 use wasm_bindgen::JsError;
 
-/// The closed §3.7 code set, plus the two this crate raises for staging. A code
+/// Error codes recognized at the Worker boundary, including staging errors. A code
 /// is recognised when the message begins with it followed by `:` or ` `, which
 /// is exactly how `strk20-consumer` and `strk20-feed` spell them.
 const CODES: &[&str] = &[
@@ -32,7 +32,7 @@ const CODES: &[&str] = &[
     // this crate's own: the caller pushed nothing for an artifact Block B asked
     // for, which is a wrapper bug, not a feed problem
     "NOT_STAGED",
-    // §1.5 ring 6. `ANCHOR_NOT_ON_CHAIN` is Block B's verdict — the user's own
+    // independent RPC verification. `ANCHOR_NOT_ON_CHAIN` is Block B's verdict — the user's own
     // endpoint refutes this mirror; the `PROOF_*` codes are this crate's, and
     // every one of them is a REFUSAL to report a grade rather than a downgrade
     // of one.
@@ -42,7 +42,7 @@ const CODES: &[&str] = &[
     "PROOF_UNUSED",
 ];
 
-/// Retryable per §3.7. Only the manifest/head race heals on its own.
+/// Retryable per the error contract. Only the manifest/head race heals on its own.
 const RETRYABLE: &[&str] = &["FEED_ADVANCED_MIDSYNC"];
 
 pub struct ErrJson {
@@ -61,7 +61,7 @@ impl ErrJson {
     }
 
     /// The structural half: project a typed `FeedError` onto its code and
-    /// operands. This is the mapping §3.7 assumed already existed.
+    /// operands for structured Worker errors.
     fn from_feed_error(e: &strk20_feed::FeedError, rendered: &str) -> Self {
         use strk20_feed::FeedError as F;
         let (code, details) = match e {

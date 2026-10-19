@@ -1,4 +1,4 @@
-//! Compat mode (spec §6.4): the exact reference `/v1/sync/*` + `/v1/history`
+//! Compat mode: the exact reference `/v1/sync/*` + `/v1/history`
 //! wire over the unmodified discovery-core engine via the SQLite bridge.
 //! OFF by default; key-visible and labeled. Hard rules: request/response
 //! bodies and cursors are NEVER logged (they carry raw viewing keys and
@@ -25,7 +25,7 @@ use starknet_core::types::{BlockId, Felt};
 use std::sync::{Arc, Mutex};
 use wire::{error_codes, ApiErrorResponse};
 
-/// Reference server budget default (spec §14.1 limits).
+/// Reference server budget default.
 const SERVER_BUDGET: usize = 10_000;
 pub const MODE_HEADER: &str = "x-strk20-mode";
 pub const MODE_VALUE: &str = "compat-keyed";
@@ -100,7 +100,7 @@ fn with_db<T>(state: &CompatState, f: impl FnOnce(&Db) -> anyhow::Result<T>) -> 
     })
 }
 
-/// Degraded-mode gate (spec §5.7): once an unknown class hash appears at
+/// Degraded-mode gate: once an unknown class hash appears at
 /// block b, compat answers SERVICE_UNAVAILABLE for any read at/after b.
 fn check_degraded(state: &CompatState, resolved_block: u64) -> Result<(), Response> {
     let (decode_state, since) = with_db(state, |db| {

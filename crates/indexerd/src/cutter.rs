@@ -1,6 +1,6 @@
-//! Epoch cutter, verify-root, manifest and head-tail generation (spec §5.5,
-//! §5.6, §4.2–§4.4). Epochs are cut only when their whole range is
-//! ≤ l1_accepted — immutable by construction.
+//! Epoch cutter, verify-root, manifest and head-tail generation.
+//! Epoch cuts require their whole range to be at or below the RPC-reported
+//! accepted-on-L1 height. See docs/spec/architecture.md#verification-and-publication.
 
 use crate::config::ChainConfig;
 use crate::db::Db;
@@ -16,13 +16,13 @@ use strk20_feed::manifest::{
 use strk20_feed::snapshot::{self, SnapSlot, Snapshot, SnapshotHeader};
 use strk20_feed::{felt_hex, payload_sha256};
 
-/// Retention (§1.4 step 6): snapshots are derived artifacts, deletable and
+/// Retention: snapshots are derived artifacts, deletable and
 /// never in the hash chain, but never pruned out from under a client that read
 /// the previous manifest moments ago.
 pub const SNAPSHOT_KEEP: usize = 2;
 
 /// Cycles a snapshot's basis-block proof is attempted over before the snapshot
-/// settles for the §11.3 fallback grounding. Each attempt already spends the
+/// settles for the snapshot reachability fallback grounding. Each attempt already spends the
 /// per-endpoint refusal budget inside `get_storage_proof`; this is the OUTER
 /// budget, and it is bounded because an endpoint that implements no proofs at
 /// any height would otherwise be asked forever.
@@ -51,15 +51,8 @@ pub enum VerifyOutcome {
     Unavailable(String),
 }
 
-/// A verify-root divergence as DATA rather than as a sentence.
-///
-/// The shipped build re-derived the mismatch block by parsing it back out of
-/// the error message (`rescan_lower_bound`, deleted with this type), which is
-/// how "recover with a full-range rescan of recent epochs" — advice that was
-/// wrong in every case ever observed — became load-bearing in code
-/// (sound-ingest.md §2.3 and §8.1). The three numbers the recovery path
-/// actually needs now travel with the error, and the sentence is only a
-/// sentence.
+/// A root disagreement at the probe block, carried as typed data so recovery
+/// does not have to infer a location by parsing the diagnostic message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RootMismatch {
     /// The block the PROBE asked about. Not where the divergence is.
@@ -76,7 +69,7 @@ impl std::fmt::Display for RootMismatch {
              missing writes and publication stays blocked until a verify-root passes. \
              Block {} is where we LOOKED, not where the divergence is: pool slots are \
              write-once, so the missing write may sit arbitrarily far below it \
-             (sound-ingest.md §2.3). Recovery localises it by walking the storage trie \
+             (docs/spec/architecture.md#recovery). Recovery localises it by walking the storage trie \
              (`strk20 enumerate-slots --attribute`), never by rescanning a recent window.",
             self.block,
             felt_hex(&self.local_root),
@@ -149,7 +142,7 @@ impl<'a> Cutter<'a> {
     }
 
     /// Build the canonical Epoch struct for `idx` from DB rows — a pure
-    /// function of chain data (spec §5.3 determinism guarantee).
+    /// function of chain data.
     pub fn build_epoch(&self, idx: u64, prev: Option<[u8; 32]>) -> Result<Epoch> {
         let (from, to) = self.cfg.epoch_range(idx);
         let blocks = self.blocks_as_lines(from, to, None)?;
@@ -224,10 +217,10 @@ impl<'a> Cutter<'a> {
         Ok(out)
     }
 
-    /// A storage proof BOUND to the chain (consumer-path.md §12 B2), together
-    /// with the raw response and the block hash it was bound to.
+    /// A storage proof bound to the chain, together with the raw response.
+    /// See docs/spec/architecture.md#verification-and-publication.
     ///
-    /// The proof pool is anonymous and load-balanced, and §12 B1 answers a
+    /// The proof pool is anonymous and load-balanced, and the proof retry policy answers a
     /// refusal by asking again. Retry-until-success is only distinguishable
     /// from "accept whichever answer we liked" if the answer is tied to the
     /// block we asked about, so every accepted proof's
@@ -286,8 +279,7 @@ impl<'a> Cutter<'a> {
                 }
                 None => bail!(
                     "{}: the proof for block {block} carries no global_roots.block_hash, so it \
-                     cannot be bound to the chain and its storage_root must not be believed \
-                     (§12 B2).",
+                     cannot be bound to the chain and its storage_root must not be believed.",
                     crate::rpc::PROOF_NOT_BOUND
                 ),
             }
@@ -297,14 +289,14 @@ impl<'a> Cutter<'a> {
             "{}: the proof's global_roots.block_hash {} is not this block's hash {} \
              (starknet_getBlockWithTxHashes), on {BINDING_ATTEMPTS} independent fetches of \
              both. It is not a proof about block {block} at all, so its storage_root must \
-             not be believed (§12 B2).",
+             not be believed.",
             crate::rpc::PROOF_NOT_BOUND,
             felt_hex(&claimed),
             felt_hex(&chain_hash)
         )
     }
 
-    /// Verify-root (spec §5.6): recompute the pool storage MPT root from the
+    /// Verify-root: recompute the pool storage MPT root from the
     /// full mirrored slot set as of `block` and compare with the proof served
     /// by the RPC for that block. Returns the anchor on success.
     pub async fn verify_root(&self, block: u64) -> Result<Anchor> {
@@ -334,30 +326,17 @@ impl<'a> Cutter<'a> {
         }
         Ok(Anchor {
             block,
-            // §12 B2 already proved this equals the chain's header hash.
+            // proof-to-header binding already proved this equals the chain's header hash.
             block_hash: anchor_block_hash(&proof)?,
             storage_root: remote_root,
             class_hash,
         })
     }
 
-    /// Verify-root at `min(frontier, rpc_head)`.
-    ///
-    /// The target is NOT chosen to dodge a proof window: proof-window.md §3
-    /// retracts that window — it was a bisection over a nondeterministic
-    /// predicate, and deep proofs answer for any block once `get_storage_proof`
-    /// retries (§12 B1). The target is chosen because pool slots are
-    /// write-once, so a root match at block B attests every write at or below
-    /// B, and the newest block we hold is therefore the strongest single check
-    /// available. Finality is a separate concern, already handled by the epoch
-    /// floor. Going ABOVE the frontier would be unsound: the chain root there
-    /// covers writes we have not ingested.
-    ///
-    /// UNAVAILABLE survives the retraction, with a narrower meaning: not "this
-    /// block is too old to prove" but "every endpoint we hold spent its whole
-    /// retry budget refusing", which on a proof-less provider (publicnode
-    /// implements none at any height) is the permanent answer. It is a
-    /// statement about the PROVIDER and never about the mirror.
+    /// Compare state at `min(frontier, rpc_head)`: never ask the mirror to
+    /// reproduce writes beyond its ingest frontier. Agreement is at this
+    /// checkpoint only, not proof of every historical transition. Exhausted
+    /// proof capability is UNAVAILABLE rather than a mirror mismatch.
     pub async fn verify_root_at_target(&self, frontier: u64) -> Result<VerifyOutcome> {
         let head = match self.rpc.get_block(BlockRef::Latest).await {
             Ok(h) => h.block_number,
@@ -418,7 +397,7 @@ impl<'a> Cutter<'a> {
     /// reached. Skipped when the frontier has not
     /// moved since the last completed probe — the answer cannot change and a
     /// proof call per poll interval is pure waste. A MISMATCH deliberately does
-    /// NOT record the probe frontier: the caller's §5.6 rescan must be able to
+    /// NOT record the probe frontier: the caller's recovery rescan must be able to
     /// re-verify at the same frontier before any epoch is cut.
     pub async fn verify_and_capture(&self, frontier: u64) -> Result<()> {
         if frontier == 0 {
@@ -454,11 +433,11 @@ impl<'a> Cutter<'a> {
             Err(e) if root_mismatch_of(&e).is_some() => {
                 // Surfaced in /health; the caller decides whether this
                 // divergence has already had its one recovery attempt
-                // (`recovery::decide`) and, if not, runs the §4.2 closure loop.
+                // (`recovery::decide`) and, if not, runs the storage-trie recovery loop.
                 self.db.meta_set("verify_root_failed", "1")?;
                 return Err(e);
             }
-            // §12 B2: an endpoint that ANSWERS with a proof belonging to some
+            // an endpoint that ANSWERS with a proof belonging to some
             // other block has not had a capability gap. Swallowing it as one
             // would hide a lie behind LIVE-6, so it halts the batch loudly —
             // but it says nothing about the mirror, so it does not latch
@@ -503,13 +482,9 @@ impl<'a> Cutter<'a> {
             let file = self.epochs_dir().join(format!("{next_idx:08}.strk20e.zst"));
             atomic_write(&file, &compressed)?;
 
-            // Anchor at the epoch's end block. §12 point 2: a block of our
-            // choosing IS provable — the "0 of 515 epochs carry one" result
-            // came from single attempts against an aggregator, and
-            // `get_storage_proof` now retries — so this is no longer a
-            // rehearsal-only path. Still tolerant of an endpoint that cannot
-            // serve proofs at all (a capability gap is never a data defect),
-            // but a proof that cannot be BOUND to the block halts the batch.
+            // Optional sidecar for the epoch end block. Proof acquisition is
+            // bounded; unavailable proofs leave no anchor, while a proof for
+            // another block aborts the cut.
             let anchor = match self.bound_proof(to).await {
                 Ok((proof, raw)) => {
                     let leaf = proof.contracts_proof.contract_leaves_data.first().cloned();
@@ -565,7 +540,7 @@ impl<'a> Cutter<'a> {
             self.rewrite_manifest()?;
         }
         // Publication is a CONDITION, not a step of a successful cut batch: the
-        // anchor that satisfies the §11.3 gate is captured at head, long after
+        // anchor that satisfies the snapshot reachability gate is captured at head, long after
         // the batch that cut the epoch it grounds. Trying only inside a batch
         // that cut something would publish nothing, ever.
         self.maybe_publish_snapshot().await?;
@@ -772,7 +747,7 @@ impl<'a> Cutter<'a> {
     /// and a client that fetched the manifest would reject the snapshot (ring
     /// 4) or, worse, fold a slot set built from the holed mirror — so the
     /// affected ones are dropped here and republished by the next cut, once the
-    /// §11.3 gate is met again.
+    /// snapshot reachability gate is met again.
     ///
     /// The bound is `first_idx` and not the first epoch actually rewritten: an
     /// interrupted earlier re-cut may already have replaced an epoch that this
@@ -813,26 +788,10 @@ impl<'a> Cutter<'a> {
     }
 
     /// Publish a snapshot at the newest cut epoch's end block.
-    ///
-    /// §12 B4 gives this two groundings, in order of strength:
-    ///
-    /// 1. **basis anchor** (§1.3, §1.4 step 4, reinstated) — a chain-bound
-    ///    storage proof at the basis block ITSELF, published as the sidecar
-    ///    `snapshots/{e:08}.anchor.json`. §11.1 declared this unobtainable on a
-    ///    bisection over a nondeterministic predicate; retried, deep proofs
-    ///    answer for any block, so it is the primary grounding again. Primary
-    ///    against a mirror that is WRONG — it is the only check that speaks
-    ///    about the basis block itself — and not against a publisher that is
-    ///    dishonest, which is what (2) is for.
-    /// 2. **reachability** (§11.3) — `anchors.ndjson` carries a record at some
-    ///    `A >= basis` with no verified mismatch since. Pool slots are
-    ///    write-once, so a root match at `A` attests every write at or below
-    ///    `A`, the basis included. Kept, not deleted: it also validates the
-    ///    intervening epochs and it is the only check that catches an
-    ///    internally consistent forged snapshot.
-    ///
-    /// Which one was used is published in the manifest rather than left for a
-    /// client to infer from a missing field.
+    /// Prefer a basis-block proof; otherwise require a recorded anchor at or
+    /// above the basis with the mismatch latch clear. Record that choice in
+    /// the manifest. Agreement at a later anchor does not authenticate every
+    /// historical transition. Clients still need an independent checkpoint.
     pub async fn maybe_publish_snapshot(&self) -> Result<()> {
         let Some((epoch, content_hash, basis)) = self.db.last_epoch()? else {
             return Ok(());
@@ -870,14 +829,14 @@ impl<'a> Cutter<'a> {
             },
             slots,
         };
-        // Grounding 1 (§12 point 1): the proof at the basis block itself.
+        // Grounding 1: the proof at the basis block itself.
         //
         // The probe is BUDGETED PER EPOCH, and the budget is spent only by an
         // attempt that actually happened and actually failed. Two separate
         // reasons for that shape:
         //
         //  - It must be more than one attempt. A refusal is per-call routing
-        //    luck, not a property of the block (§12 B1), so a single
+        //    luck, not a property of the block, so a single
         //    unsuccessful group of retries is a coin the snapshot's primary
         //    grounding should not be lost on. `PROOF_RETRIES` covers the
         //    within-call odds; this covers the rest across cycles.
@@ -928,7 +887,7 @@ impl<'a> Cutter<'a> {
                         epoch, block = basis, attempt = spent + 1,
                         budget = BASIS_PROBE_ATTEMPTS, error = %format!("{e:#}"),
                         "no basis-block proof for this snapshot yet; falling back to the \
-                         §11.3 reachability grounding for now"
+                         snapshot reachability grounding for now"
                     );
                     None
                 }
@@ -941,9 +900,9 @@ impl<'a> Cutter<'a> {
             if chain_root != snap.header.storage_root {
                 // The chain disagrees with the slot set this snapshot would
                 // carry. Two things have to happen, and neither is enough
-                // alone: the failure is LATCHED, so the §11.3 fallback cannot
+                // alone: the failure is LATCHED, so the snapshot reachability fallback cannot
                 // publish this slot set on a later cycle while the divergence
-                // stands, and it is an ERROR rather than a skip, so the §5.6
+                // stands, and it is an ERROR rather than a skip, so the
                 // recovery path is entered and /health goes DEGRADED. The latch
                 // is cleared only by a verify-root that passes.
                 self.db.meta_set("verify_root_failed", "1")?;
@@ -967,7 +926,7 @@ impl<'a> Cutter<'a> {
             });
         }
 
-        // Grounding 2 (§11.3), required only when grounding 1 was unobtainable.
+        // Grounding 2, required only when grounding 1 was unobtainable.
         if anchor.is_none() {
             let Some(anchor_block) = self.db.newest_anchor_block()? else {
                 return Ok(());
@@ -1004,17 +963,9 @@ impl<'a> Cutter<'a> {
         };
         self.ensure_layout()?;
         atomic_write(&self.feed_dir.join(&file), &compressed)?;
-        // The sidecar is the provider's stored response, published verbatim.
-        // What that buys, exactly: a client can check the manifest's anchor
-        // against the proof it claims to come from, and against the slot set
-        // the snapshot carries (client/store.rs `check_basis_anchor`), so the
-        // three cannot disagree unnoticed. What it does NOT buy: any offline
-        // strength against the publisher itself. Nothing in the feed binds
-        // `global_roots` to a chain a client independently knows, so a
-        // publisher that forges the slot set and the sidecar together is
-        // consistent — that adversary is caught by the §11.3 reachability walk
-        // (still run, on every cold start) and by ring 6 against the user's own
-        // RPC, for which this file is the audit material.
+        // Publish the provider's stored response as an audit artifact. A forged
+        // slot set and proof can be mutually consistent; clients must verify
+        // against an independently selected header and reconstruct its state.
         if let Some((_, _, raw)) = &basis_proof {
             atomic_write(
                 &self
@@ -1061,7 +1012,7 @@ impl<'a> Cutter<'a> {
         Ok(())
     }
 
-    /// Regenerate head.ndjson wholesale (spec §4.4).
+    /// Regenerate head.ndjson wholesale.
     pub fn regen_head(&self) -> Result<()> {
         self.ensure_layout()?;
         let head_number: u64 = self
@@ -1151,8 +1102,7 @@ impl<'a> Cutter<'a> {
             },
             latest_epoch: rows.last().map(|r| r.idx),
             epochs,
-            // The newest retained snapshot; `null` until the §11.3 gate has
-            // been met once.
+            // The newest retained snapshot, if any.
             snapshot: self.db.snapshot_rows()?.pop(),
         };
         atomic_write(
@@ -1163,7 +1113,7 @@ impl<'a> Cutter<'a> {
     }
 }
 
-/// The block hash a §12 B2-bound proof was verified against. Only reachable
+/// The block hash a chain-bound proof was verified against. Only reachable
 /// after `bound_proof` has already established that it is present and equal to
 /// the chain's.
 fn anchor_block_hash(proof: &crate::rpc::StorageProof) -> Result<Felt> {
@@ -1285,11 +1235,8 @@ mod tests {
         );
     }
 
-    /// §8.1: the mismatch text used to end with "recover with a full-range
-    /// rescan of recent epochs", and `rescan_lower_bound` parsed the block
-    /// number back out of it to build exactly that window. Both are gone. What
-    /// the sentence must now say is that the probe block is where we LOOKED,
-    /// because a reader who believes otherwise reaches for the wrong tool.
+    /// The diagnostic identifies the checked block without implying that it
+    /// locates the first missing write or justifies a guessed rescan window.
     #[test]
     fn the_mismatch_text_no_longer_advises_a_recent_window_rescan() {
         let text = mismatch().to_string();

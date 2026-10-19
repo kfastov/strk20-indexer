@@ -1,17 +1,7 @@
 /**
- * The in-page half of `capture-scan`.
- *
- * consumer-path.md §4.9 is explicit that the Rust scanner is NOT reimplemented
- * in TypeScript for the e2e capture; it is promoted to a bin and reused. What
- * IS needed in the page is the same *encoding list*, so demo-app.md §6.2's live
- * scan searches for the same 13 forms. §4.9 requires that list to live in ONE
- * shared fixture consumed by both scanners so the two cannot drift.
- *
- * `ENCODINGS_FIXTURE_V1` below is that fixture's TypeScript face. Leg d4 asserts
- * it byte-identical to the fixture the Rust scanner compiles against. Until the
- * Rust side is wired the assertion is pending, and `encodingsFixtureDigest()`
- * exists precisely so that comparison is one string equality rather than a
- * review of two lists.
+ * Browser-side generation of sensitive-value encodings for capture checks.
+ * `ENCODINGS_FIXTURE_V1` describes the encoding set; compare its digest when
+ * checking parity with another scanner. Keep this separate from feed transport.
  */
 
 const toHex = (bytes: Uint8Array) =>

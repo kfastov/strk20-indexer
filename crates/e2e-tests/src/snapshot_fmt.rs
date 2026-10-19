@@ -1,11 +1,10 @@
-//! Test-side reader/writer for the snapshot wire format (consumer-path.md
-//! §1.2), written INDEPENDENTLY of the product encoder on purpose: the byte
+//! Test-side reader/writer for the snapshot wire format, written INDEPENDENTLY of the product encoder on purpose: the byte
 //! canonicality leg compares the served payload against bytes this module
 //! produces, so a shared implementation would make that comparison vacuous.
 //!
 //! `parse` is deliberately tolerant (it accepts any JSON object order and any
 //! felt spelling) so that a non-canonical publisher produces an informative
-//! byte diff rather than a parse error; `encode` is strict canonical §1.2.
+//! byte diff rather than a parse error; `encode` emits canonical snapshot bytes.
 
 use serde_json::Value;
 use starknet_types_core::felt::Felt;
@@ -144,7 +143,7 @@ pub fn footer_line(slots: u64) -> String {
     format!("{{\"t\":\"end\",\"slots\":{slots}}}")
 }
 
-/// Canonical §1.2 bytes: fixed field order, no whitespace, minimal lowercase
+/// Canonical snapshot bytes: fixed field order, no whitespace, minimal lowercase
 /// hex, slot lines ascending by the 32-byte BE key, `\n` after every line.
 pub fn encode(doc: &SnapDoc) -> Vec<u8> {
     let mut out = String::new();

@@ -1,4 +1,4 @@
-//! Golden byte vectors for the canonical epoch/head encoding (spec §10.1).
+//! Golden byte vectors for the canonical epoch/head encoding.
 //! These bytes are FROZEN: changing them is a feed-format break and requires
 //! a `v:2` namespace, not an edit to this file.
 

@@ -1,4 +1,4 @@
-//! Deterministic synthetic chain for the acceptance test (spec §10.3):
+//! Deterministic synthetic chain for the acceptance test:
 //! blocks 1..=head with the 48 fixture slots partitioned across blocks
 //! {10, 20, 30}, synthesized pool events on every active block, an on-chain
 //! class deployed at the first active block, and mutation hooks for the

@@ -1,4 +1,4 @@
-//! Acceptance-test harness for the STRK20 indexer (spec §10.3): fixture
+//! Acceptance-test harness for the STRK20 indexer: fixture
 //! chain + RPC server, recording proxy, byte scanner, dual oracle, and real
 //! binary process management.
 

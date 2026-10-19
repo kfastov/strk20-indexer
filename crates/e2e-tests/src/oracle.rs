@@ -1,4 +1,4 @@
-//! Independent oracle O1 (spec §10.3): the unmodified discovery-core engine
+//! Independent oracle O1: the unmodified discovery-core engine
 //! over upstream's own MockBackend, loaded with the same slots + write
 //! blocks. Also the note-minting helpers for the reorg/spent legs (valid
 //! ciphertexts constructed with the engine's own crypto).

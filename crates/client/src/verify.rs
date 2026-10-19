@@ -1,4 +1,4 @@
-//! U6 auditor path (spec §7.7): verify the client's own discovered state
+//! U6 auditor path: verify the client's own discovered state
 //! against Starknet state roots via `starknet_getStorageProof` fetched from
 //! the USER'S OWN RPC. The indexer plays no role here. Nullifier-slot
 //! non-membership proves un-spent-ness.

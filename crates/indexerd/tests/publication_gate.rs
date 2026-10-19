@@ -1,17 +1,7 @@
-//! The §11.3 snapshot publication gate, driven directly rather than through a
-//! backfill (spec §8 leg m(v)).
-//!
-//! Why directly: the gate has two conditions and the e2e legs can only reach
-//! one of them. `verify_and_capture` runs at the TOP of a cut batch and returns
-//! `Err` on a MISMATCH, so a fixture that forces a real divergence never gets
-//! as far as `maybe_publish_snapshot` — the `verify_root_failed == "1"` branch
-//! is guarding a state no end-to-end fixture can construct. Before this file
-//! that `if` could be deleted with the whole suite still green.
-//!
-//! Everything here is a pure function of DB rows. The RPC is a dead address on
-//! purpose: §12 B4 makes publication try for a basis-block proof first, and an
-//! endpoint that cannot answer must leave the §11.3 reachability gate — the
-//! thing these legs are about — deciding on its own.
+//! Direct snapshot publication tests. Calling `maybe_publish_snapshot` isolates
+//! its mismatch-latch guard, which an earlier failed cut would otherwise hide.
+//! An unavailable basis proof exercises the later-anchor fallback. Additional
+//! cases below use fixture RPCs to check proof retries and basis mismatches.
 
 use starknet_types_core::felt::Felt;
 use strk20_indexerd::config::ChainConfig;
@@ -23,8 +13,7 @@ const CHAIN_ID: &str = "SN_TEST";
 const EPOCH_SIZE: u64 = 16;
 /// Epoch 1 = [16, 31]; the snapshot's basis is 31.
 const BASIS: u64 = 31;
-/// The head-captured anchor that satisfies the gate, above the basis (§11.2:
-/// captures are head-driven, never at an epoch boundary).
+/// A captured anchor above the snapshot basis satisfies the fallback gate.
 const ANCHOR_BLOCK: u64 = 40;
 
 fn cfg() -> ChainConfig {
@@ -47,7 +36,7 @@ fn block(n: u64) -> BlockRow {
 }
 
 /// A mirror with one cut epoch, some slot writes at or below the basis, and a
-/// head-captured anchor above it — i.e. the §11.3 gate MET.
+/// head-captured anchor above it — i.e. the snapshot reachability gate MET.
 fn gated_mirror(dir: &std::path::Path, anchor_at: Option<u64>) -> (Db, ChainConfig) {
     let mut db = Db::open(&dir.join("strk20.db")).expect("open db");
     for (n, slot, value) in [(20u64, 0xaa_u64, 0x11_u64), (28, 0xbb, 0x22), (BASIS, 0xcc, 0x33)] {
@@ -116,7 +105,7 @@ async fn the_gate_publishes_when_the_mirror_last_matched_the_chain() {
     assert_eq!(
         snapshot_files(&dir.path().join("feed")),
         vec!["00000001.strk20s.zst".to_owned()],
-        "§11.3: an anchor at {ANCHOR_BLOCK} >= basis {BASIS} with no verified mismatch \
+        "an anchor at {ANCHOR_BLOCK} >= basis {BASIS} with no verified mismatch \
          since is the gate, and it is met here"
     );
     let entry = manifest_snapshot(&dir.path().join("feed"));
@@ -124,8 +113,8 @@ async fn the_gate_publishes_when_the_mirror_last_matched_the_chain() {
     assert_eq!(entry["block"].as_u64(), Some(BASIS), "{entry}");
 }
 
-/// §8 leg m(v) — after a verify-root failure, NO snapshot file and NO manifest
-/// snapshot entry are produced, even though the §11.3 anchor gate is otherwise
+/// after a verify-root failure, NO snapshot file and NO manifest
+/// snapshot entry are produced, even though the snapshot reachability anchor gate is otherwise
 /// met.
 ///
 /// The two conditions are independent: an anchor at or above the basis says the
@@ -163,7 +152,7 @@ async fn a_latched_verify_root_failure_blocks_publication_even_with_an_anchor() 
         "...and no manifest entry naming one"
     );
 
-    // Recovery: once the failure is cleared (the §5.6 rescan re-verified),
+    // Recovery: once the failure is cleared (the recovery rescan re-verified),
     // publication resumes with no new epoch cut.
     db.meta_set("verify_root_failed", "").unwrap();
     cutter.maybe_publish_snapshot().await.expect("publish after recovery");
@@ -225,7 +214,7 @@ fn the_anchor_log_is_bounded() {
     assert_eq!(kept.first().map(|a| a.block), Some(26));
 }
 
-// --------------------------------------------------------------- §12 B1/B4
+// --------------------------------------------------------------- proof retry and snapshot grounding
 //
 // The legs below need an RPC that ANSWERS, so they bring a minimal fixture
 // rather than the dead address above: what is under test is what happens to a
@@ -237,7 +226,7 @@ use std::sync::Arc;
 
 /// A storage-proof endpoint with two knobs: how many attempts it refuses with
 /// error 42 before serving anything, and which storage root it serves. Its
-/// `global_roots.block_hash` is always the block's real hash, so §12 B2 binding
+/// `global_roots.block_hash` is always the block's real hash, so proof-to-header binding
 /// passes and the legs below are about the ROOT and nothing else.
 #[derive(Clone)]
 struct ProofFixture {
@@ -310,7 +299,7 @@ impl ProofFixture {
                                 "global_roots": {
                                     "contracts_tree_root": "0x0",
                                     "classes_tree_root": "0x0",
-                                    // §12 B2: the block's real hash, so the
+                                    // the block's real hash, so the
                                     // binding is never what fails here.
                                     "block_hash": strk20_feed::felt_hex(&block(number).hash),
                                 }
@@ -361,7 +350,7 @@ fn honest_basis_root() -> Felt {
 /// epoch, and the budget used to be spent BEFORE the call; on a mismatch the
 /// error left the marker behind, so the next call (`cut_epochs_with_recovery`
 /// makes one immediately, in the same function) skipped the proof entirely,
-/// found the §11.3 anchor gate met, and published — with
+/// found the snapshot reachability anchor gate met, and published — with
 /// `grounding: "reachability"` and health still OK.
 #[tokio::test]
 async fn a_basis_proof_that_contradicts_the_slot_set_latches_instead_of_falling_back() {
@@ -388,7 +377,7 @@ async fn a_basis_proof_that_contradicts_the_slot_set_latches_instead_of_falling_
     let text = format!("{err:#}");
     assert!(
         text.contains("VERIFY-ROOT MISMATCH") && text.contains(&BASIS.to_string()),
-        "the §5.6 recovery path keys on this name and the operator needs the block: {text}"
+        "the recovery path keys on this name and the operator needs the block: {text}"
     );
     assert!(
         fixture.attempts() > 0,
@@ -412,7 +401,7 @@ async fn a_basis_proof_that_contradicts_the_slot_set_latches_instead_of_falling_
     assert!(
         snapshot_files(&dir.path().join("feed")).is_empty(),
         "the slot set the chain contradicted must never be published — not on the basis \
-         anchor, and not on the §11.3 fallback either: {:?}",
+         anchor, and not on the snapshot reachability fallback either: {:?}",
         snapshot_files(&dir.path().join("feed"))
     );
     cutter.rewrite_manifest().unwrap();
@@ -436,7 +425,7 @@ async fn a_basis_proof_that_contradicts_the_slot_set_latches_instead_of_falling_
     );
 }
 
-/// §12 B1 across CYCLES, not just within a call: a refusal is per-call routing
+/// the proof retry policy across CYCLES, not just within a call: a refusal is per-call routing
 /// luck, so a basis proof that could not be obtained this cycle is asked for
 /// again on the next one. Without that, one unlucky group of retries costs a
 /// snapshot its primary grounding permanently.
@@ -464,7 +453,7 @@ async fn an_unobtainable_basis_proof_is_retried_on_the_next_cycle() {
     let first = fixture.attempts();
     assert!(
         first >= 2,
-        "§12 B1: error 42 names the backend that answered, so a single attempt is not an \
+        "error 42 names the backend that answered, so a single attempt is not an \
          answer about the block; only {first} attempt(s) were made"
     );
     assert!(

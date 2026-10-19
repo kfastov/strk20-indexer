@@ -1,4 +1,4 @@
-//! §12 B2 chain binding, and the one distinction it has to make: "the chain
+//! Proof-to-header binding, and the one distinction it has to make: "the chain
 //! moved" versus "the pool lied".
 //!
 //! `bound_proof` compares a storage proof's `global_roots.block_hash` with the
@@ -155,7 +155,7 @@ async fn a_reorg_between_the_proof_and_the_header_is_re_tested_not_alarmed() {
 }
 
 /// ...and a disagreement that SURVIVES the re-test is still the hard error it
-/// has to be. This is the §12 B2 property itself: without it, retry-until-
+/// has to be. This is the proof-to-header binding property itself: without it, retry-until-
 /// success is indistinguishable from accepting whichever answer we liked.
 #[tokio::test]
 async fn a_disagreement_that_survives_the_re_test_is_a_hard_error() {

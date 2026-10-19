@@ -1,4 +1,4 @@
-//! STRK20 feed format v1 (docs/spec/architecture.md §4).
+//! STRK20 feed format v1 (see docs/spec/architecture.md).
 //!
 //! The canonical product of the indexer is a directory of content-addressed
 //! static files. This crate owns their byte format: canonical NDJSON epoch
@@ -80,7 +80,7 @@ pub fn compress(payload: &[u8]) -> Vec<u8> {
     zstd::encode_all(payload, 19).expect("in-memory zstd cannot fail")
 }
 
-/// §1.5 ring 1 output cap (R-I). The transport hash is authored by the same
+/// Decompression output cap (R-I). The transport hash is authored by the same
 /// server as the file it names, so a passing hash says nothing about how far
 /// the frame expands: without a cap a ~100 KB `.zst` can be made to allocate
 /// tens of GB, which on the browser target this format exists to serve is a

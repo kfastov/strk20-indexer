@@ -1,4 +1,4 @@
-//! SQLite store (spec §4.1). One writer (the ingest loop); readers open their
+//! SQLite store. One writer (the ingest loop); readers open their
 //! own connections (WAL). Felts are 32-byte big-endian BLOBs.
 
 use anyhow::{Context, Result};
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS epochs (
   cut_at        INTEGER NOT NULL
 );
 
--- Opportunistically captured chain anchors (spec §4.5). Published as the
+-- Opportunistically captured chain anchors. Published as the
 -- append-only feed/anchors.ndjson; keyed by block so a re-capture is idempotent
 -- and the published log is a pure function of what was ever provable.
 CREATE TABLE IF NOT EXISTS anchors (
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS anchors (
   class_hash   BLOB NOT NULL
 );
 
--- Published snapshots (consumer-path.md §1.8). Derived artifacts: rows are
+-- Published snapshots (see docs/spec/architecture.md#storage-and-public-feed). Derived artifacts: rows are
 -- deleted by retention and the files with them, so nothing here is in the hash
 -- chain. Keyed by epoch so republication of an already-published epoch is
 -- impossible and a retained file is never rewritten.
@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   bytes        INTEGER NOT NULL,
   slots        INTEGER NOT NULL,
   storage_root TEXT NOT NULL,
-  -- §12 B4: the chain-bound proof at the basis block, when one was obtained,
+  -- the chain-bound proof at the basis block, when one was obtained,
   -- and which grounding the manifest therefore publishes.
   anchor_block        INTEGER,
   anchor_block_hash   BLOB,
@@ -459,7 +459,7 @@ impl Db {
                 params![block.number as i64, felt_blob(class).as_slice()],
             )?;
         }
-        // The frontier only ever advances here: the §5.6 recovery rescan
+        // The frontier only ever advances here: the recovery rescan
         // re-ingests blocks BELOW it, and letting that pull the cursor
         // backwards makes a backfill that hit a mismatch loop forever
         // (rescan rewinds, the next cycle re-advances, repeat). A reorg is
@@ -680,7 +680,7 @@ impl Db {
         )?)
     }
 
-    /// Newest captured anchor block, if any — the left side of the §11.3
+    /// Newest captured anchor block, if any — the left side of the snapshot reachability
     /// publication gate.
     pub fn newest_anchor_block(&self) -> Result<Option<u64>> {
         Ok(self
@@ -791,7 +791,7 @@ impl Db {
     }
 
     /// Complete slot set as of `block` with each slot's last write block —
-    /// the snapshot payload's whole input (§1.2).
+    /// the snapshot payload's whole input.
     pub fn full_slot_set_with_blocks_as_of(&self, block: u64) -> Result<Vec<(Felt, Felt, u64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT slot, value, block FROM storage_log s

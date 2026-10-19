@@ -9,5 +9,6 @@ ts/strk20-discovery/src/wasm/
 # npm release archives
 ts/strk20-discovery/release/
 
-# Local video script
-/docs/pitch.md
+# Python bytecode caches
+__pycache__/
+*.py[cod]

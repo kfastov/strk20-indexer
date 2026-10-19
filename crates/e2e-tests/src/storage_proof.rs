@@ -1,15 +1,9 @@
 //! The `contracts_storage_proofs` node set a real `starknet_getStorageProof`
 //! returns, computed from the fixture chain's slot set.
 //!
-//! The fixture used to answer `"contracts_storage_proofs": [[]]` — enough for
-//! `verify-root`, which only ever reads `contract_leaves_data[0].storage_root`,
-//! and useless for anything that has to DESCEND. The sound-ingest.md §4.2
-//! closure loop descends: it compares the chain's child hash for a bit-prefix
-//! against the same quantity folded from the mirror, and asks for a proof of a
-//! crafted key whenever it meets a subtree it cannot explain. With an empty
-//! node set every one of those requests teaches it nothing, and
-//! `trie_walk::enumerate_missing_slots` correctly reports the endpoint as
-//! faulty — so the recovery path could not be tested end to end at all.
+//! Recovery needs child-node hashes to descend through differing subtrees.
+//! A contract-leaf storage root alone cannot exercise that path; this fixture
+//! supplies the nodes consumed by `trie_walk::enumerate_missing_slots`.
 //!
 //! The generator walks the canonical trie from the root towards each requested
 //! key and emits every node on the way, which is exactly a proof: the client

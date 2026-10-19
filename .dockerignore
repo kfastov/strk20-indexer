@@ -17,11 +17,9 @@ vendor/
 .env
 *.log
 
-# The TypeScript half of the project. It is not a cargo workspace member and
-# no Rust source references a path under it, so `cargo build -p
-# strk20-indexerd` never opens it — but it carries `node_modules/` and build
-# output (`ts/demo/dist/`), which would be uploaded to the daemon on every
-# build for nothing.
+# The TypeScript workspace is not a Cargo workspace member and no Rust source
+# references paths under it. Its dependencies and build output are not needed
+# by `cargo build -p strk20-indexerd`.
 ts/
 
 # Docs and notes are not compiled.

@@ -15,7 +15,7 @@ echo "==> wasm-pack (target web)"
 wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
 
 echo
-echo "==> size (total published wire cost, §3.9's single denominator)"
+echo "==> size (WASM module and JavaScript glue)"
 total_gz=0
 total_br=0
 for f in pkg/strk20_engine_bg.wasm pkg/strk20_engine.js; do
@@ -28,10 +28,10 @@ for f in pkg/strk20_engine_bg.wasm pkg/strk20_engine.js; do
 done
 printf '  %-28s              gzip %7d   brotli %7d\n' 'TOTAL (module + glue)' "$total_gz" "$total_br"
 echo "  NOTE: a TypeScript wrapper must add a JS zstd decoder (fzstd, ~10 KB gzip)"
-echo "        to reach the figure §3.9 gates. See README, \"Size\"."
+echo "        in addition to the module and glue reported above."
 
 echo
-echo "==> import-section audit (§3.9)"
+echo "==> import-section audit"
 node test/imports.mjs
 
 echo
