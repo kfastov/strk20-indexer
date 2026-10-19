@@ -1,34 +1,28 @@
 # Build context = the sources cargo needs, and nothing else.
 #
-# `target/`, `data/`, `examples/`, `ts/` and `prototype/` are the five that
-# matter. `data/` alone is ~600 MB of live mainnet + Sepolia feed and databases,
-# and shipping any of them into the context would make every build upload them
-# to the daemon.
+# `target/`, `data/`, `vendor/` and `ts/` are the four that matter. `data/`
+# alone is ~600 MB of live mainnet + Sepolia feed and databases, and shipping
+# any of them into the context would make every build upload them to the
+# daemon.
 #
-# `examples/` is excluded for a second reason on top of its 515 MB (a vendored
-# starknet-privacy clone plus node_modules): the demo scripts write operator key
-# material to `examples/*/keystore/`, gitignored but still present on disk. The
-# `COPY . .` below would bake that into the *builder* stage's layer, which is
-# recoverable with `--target builder`, a buildx cache export, or `docker save`,
-# even though the runtime stage copies only the binary. Nothing under
-# `examples/` is a cargo workspace member, so the build never needs it.
+# `vendor/` is a cloned starknet-privacy checkout plus the compiled SDK and
+# its node_modules, ~500 MB. Nothing under it is a cargo workspace member, so
+# the build never needs it.
 
 target/
 data/
-examples/
+vendor/
 .git/
 .gitignore
 .env
 *.log
 
-# The TypeScript halves of the project. Neither is a cargo workspace member and
-# no Rust source references a path under either, so `cargo build -p
-# strk20-indexerd` never opens them — but both carry a committed `node_modules/`
-# and committed build output (`ts/demo/dist/`, replay fixtures), which is 133 MB
-# uploaded to the daemon on every build for nothing. Added after `ts/` landed;
-# the list above predates it.
+# The TypeScript half of the project. It is not a cargo workspace member and
+# no Rust source references a path under it, so `cargo build -p
+# strk20-indexerd` never opens it — but it carries `node_modules/` and build
+# output (`ts/demo/dist/`), which would be uploaded to the daemon on every
+# build for nothing.
 ts/
-prototype/
 
 # Docs and notes are not compiled.
 docs/

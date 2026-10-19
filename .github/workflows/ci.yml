@@ -169,7 +169,7 @@ jobs:
         run: wasm-pack build --release --target web --out-dir pkg --out-name strk20_engine
 
       - name: Build the pinned official SDK
-        run: ./examples/mainnet/setup.sh
+        run: ./vendor/setup.sh
 
       - name: npm ci
         working-directory: ts

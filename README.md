@@ -142,7 +142,7 @@ Public feeds are available at `/mainnet/feed` and `/feed` on
 To build the SDK and demo from source, use Node 24+, Rust and wasm-pack:
 
 ```sh
-./examples/mainnet/setup.sh       # builds the pinned upstream SDK
+./vendor/setup.sh                 # builds the pinned upstream SDK
 ./crates/wasm/build.sh
 npm --prefix ts ci
 npm --prefix ts run dev          # Vite demo; no browser auto-open

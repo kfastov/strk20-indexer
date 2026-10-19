@@ -172,9 +172,8 @@ This is the third defect in a row caused by the same root cause as LIVE-1/6:
 we treated RPC endpoints as one uniform, forgiving implementation. They differ
 in retention, in which methods exist, and in strictness about optional params.
 
-Ground truth captured for the regression test —
-`fixtures/proof_mainnet_14151973.json`, the full live response at block
-14,151,973: pool `storage_root = 0x25e47f354ce696498d59e80ab4eb07483d4e737647a7b4832959a170ae8db09`,
+Ground truth captured from the full live response at block 14,151,973:
+pool `storage_root = 0x25e47f354ce696498d59e80ab4eb07483d4e737647a7b4832959a170ae8db09`,
 `block_hash = 0x46a19ce7fed109f163453d914dc174f394e4e29270dded25d1d84f78c6b8aaa`,
 class `0x67dddd89…76b554d`. Once LIVE-4/LIVE-7 are fixed, our mirror must
 recompute exactly that root from its own 134,879 slots — the strongest
@@ -182,8 +181,7 @@ end-to-end statement the project can make about a real mirror of real history.
 
 ## Session 5: end-to-end on Sepolia, with a note we created ourselves
 
-We minted our own note on the Sepolia pool (see
-[sepolia-shield-run.md](sepolia-shield-run.md)): tx
+We minted our own note on the Sepolia pool: tx
 `0x701e056354f9e0e17e86b7d63d4403cb46e239e7061806e9f5e02ff47d65f49`, block
 **14,339,115**, 3 STRK, registration + deposit + note creation in one
 `apply_actions`. Then the whole read path was run against it.
@@ -248,8 +246,7 @@ unannounced, in production, during the run, is worth more. Recovery is
 
 A second transaction we made (`0x3d253f8a…`, block **14,340,785**, a private
 self-transfer) spent the first note and created a new one — under the *new*
-class, 892 blocks after the upgrade. Details in
-[sepolia-shield-run.md](sepolia-shield-run.md) Run 2.
+class, 892 blocks after the upgrade.
 
 With `--allow-class 0x7e2bbd7c…` the server returned to `status: OK`,
 `decode_state: ok` — the documented recovery path, exercised against a real

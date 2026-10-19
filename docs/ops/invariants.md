@@ -100,7 +100,7 @@ bug until proven otherwise.
 ## 4. No secrets in tracked files
 
 **Protects** against committing key material. Real private keys and viewing keys live
-only in gitignored places: `data/`, `~/.strk20/`, `examples/*/keystore/`, `.env`.
+only in gitignored places: `data/`, `~/.strk20/`, `.env`.
 
 **How.** Two independent detectors. (a) It reads the actual gitignored key files and
 harvests their secret values, then looks for those exact values in every tracked

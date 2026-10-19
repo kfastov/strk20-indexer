@@ -232,8 +232,7 @@ SHAPES = [(re.compile(r"(private_?key|secret_?key|viewing_?key|mnemonic|passphra
 
 def harvest_secrets():
     """Values from the GITIGNORED key locations only — never addresses or hashes."""
-    roots = [R("data"), os.path.expanduser("~/.strk20"), R(".env")] + \
-            [R("examples", d) for d in ("mainnet", "sepolia")]
+    roots = [R("data"), os.path.expanduser("~/.strk20"), R(".env")]
     seen, out = set(), set()
     for root in roots:
         paths = [root] if os.path.isfile(root) else \

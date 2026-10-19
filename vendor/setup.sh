@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 00 — one-time setup: vendor the Starknet Privacy SDK and install dependencies.
+# Vendor the pinned Starknet Privacy SDK: clone the upstream tag, build its
+# `sdk/` workspace from source and expose the result under a stable path.
 #
 # The SDK is published on GitHub Packages, which needs a token with
 # `read:packages` even for public packages. We do not use it. The upstream
@@ -10,23 +11,24 @@
 # 0x67dddd89d80fedadc06b6f160798f94800a4a70164e5a24301cd0d6076b554d has an ABI
 # that matches tags RC.3, RC.4 and RC.5 exactly (117/117 entries) and does NOT
 # match RC.2 (5 differences, incl. a missing ClientAction/ServerAction variant)
-# or RC.6 (8 differences). RC.5 is the newest exact match. See README.
+# or RC.6 (8 differences). RC.5 is the newest exact match.
+#
+# Consumers of the result:
+#   ts/strk20-discovery/package.json              file:../../vendor/starknet-privacy-sdk
+#   ts/strk20-discovery/scripts/pack-release.mjs  bundles its dist and the upstream LICENSE
 set -euo pipefail
 
 SDK_TAG="${STRK20_SDK_TAG:-PRIVACY-0.14.3-RC.5}"
 SDK_REPO="${STRK20_SDK_REPO:-https://github.com/starkware-libs/starknet-privacy.git}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENDOR="$HERE/vendor"
-SRC="$VENDOR/starknet-privacy"
-DEST="$VENDOR/starknet-privacy-sdk"
+SRC="$HERE/starknet-privacy"
+DEST="$HERE/starknet-privacy-sdk"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 if [ "$node_major" -lt 24 ]; then
   echo "ERROR: Node >= 24 required (the SDK's OHTTP dependency needs modern WebCrypto); you have $(node --version)" >&2
   exit 1
 fi
-
-mkdir -p "$VENDOR"
 
 if [ ! -d "$SRC/.git" ]; then
   echo "==> cloning $SDK_REPO"
@@ -50,10 +52,5 @@ cp -R "$SRC/sdk/dist" "$DEST/dist"
 cp "$SRC/sdk/package.json" "$DEST/package.json"
 cp -R "$SRC/sdk/node_modules" "$DEST/node_modules"
 
-echo "==> installing example dependencies"
-( cd "$HERE" && npm install --no-audit --no-fund >/dev/null )
-
 echo
 echo "Setup complete. SDK $sdk_version from $SDK_TAG."
-echo "Next:  cp .env.example .env  &&  \$EDITOR .env  &&  set -a; . ./.env; set +a"
-echo "Then:  node 01-create-account.mjs"
